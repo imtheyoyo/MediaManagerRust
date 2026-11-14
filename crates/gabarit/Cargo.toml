@@ -1,0 +1,9 @@
+[package]
+name = "mediamanager-gabarit"
+description = "Moteur de gabarits pour le renommage (${variable}, conditions, boucles)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+thiserror.workspace = true
