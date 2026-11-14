@@ -1,0 +1,12 @@
+[package]
+name = "mediamanager-core"
+description = "Modèle de données, scan des dossiers, NFO et renommage"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+serde.workspace = true
+thiserror.workspace = true
+regex.workspace = true
+walkdir.workspace = true

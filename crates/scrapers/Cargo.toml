@@ -1,0 +1,12 @@
+[package]
+name = "mediamanager-scrapers"
+description = "Récupération des métadonnées en ligne"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+mediamanager-core.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true

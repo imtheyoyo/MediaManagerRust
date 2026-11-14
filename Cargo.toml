@@ -1,0 +1,22 @@
+[workspace]
+resolver = "3"
+members = ["crates/core", "crates/scrapers", "crates/store", "crates/cli", "crates/gui"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+authors = ["imtheyoyo"]
+repository = "https://github.com/imtheyoyo/MediaManagerRust"
+
+[workspace.dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+anyhow = "1"
+tracing = "0.1"
+regex = "1"
+walkdir = "2"
+mediamanager-core = { path = "crates/core" }
+mediamanager-scrapers = { path = "crates/scrapers" }
+mediamanager-store = { path = "crates/store" }

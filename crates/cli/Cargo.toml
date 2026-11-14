@@ -1,0 +1,15 @@
+[package]
+name = "mediamanager-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "mediamanager"
+path = "src/main.rs"
+
+[dependencies]
+mediamanager-core.workspace = true
+mediamanager-scrapers.workspace = true
+mediamanager-store.workspace = true
+anyhow.workspace = true
