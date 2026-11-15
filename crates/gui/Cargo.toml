@@ -14,14 +14,22 @@ name = "mediamanager-gui"
 path = "src/main.rs"
 
 [dependencies]
-# L'intégration avec mediamanager-core / -store / -scrapers viendra plus tard :
-# pour l'instant la GUI travaille sur ses propres structures d'affichage.
+# Services de l'application (la GUI garde ses structures d'affichage : conversion dans
+# `conversion.rs`, branchement dans `source_application.rs`).
+mediamanager-app.workspace = true
+mediamanager-core.workspace = true
+mediamanager-store.workspace = true
+mediamanager-scrapers.workspace = true
 eframe = "0.37"
 # Polices d'emojis monochromes embarquées (NotoEmoji, licence OFL ; emoji-icon-font, MIT) :
 # sans elles, les pictogrammes (⚙ 🔔 ✔ ⚠ ▲...) dépendent des polices du système.
 egui = { version = "0.37", features = ["monochrome_emoji_fonts"] }
 egui_extras = "0.37"
 regex.workspace = true
+tracing.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+
+[dev-dependencies]
+tempfile = "3"

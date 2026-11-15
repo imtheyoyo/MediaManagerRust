@@ -1,4 +1,5 @@
-//! Structures d'affichage locales à la GUI (indépendantes du crate `core` pour l'instant).
+//! Structures d'affichage de la GUI (indépendantes du modèle des services : la conversion
+//! est faite par `conversion.rs`).
 
 use std::cmp::Ordering;
 
@@ -10,6 +11,10 @@ pub enum TypeFichier {
     SousTitres,
     Affiche,
     Fanart,
+    Banniere,
+    Miniature,
+    BandeAnnonce,
+    Autre,
 }
 
 impl TypeFichier {
@@ -20,6 +25,10 @@ impl TypeFichier {
             TypeFichier::SousTitres => "SUBTITLE",
             TypeFichier::Affiche => "POSTER",
             TypeFichier::Fanart => "FANART",
+            TypeFichier::Banniere => "BANNER",
+            TypeFichier::Miniature => "THUMB",
+            TypeFichier::BandeAnnonce => "TRAILER",
+            TypeFichier::Autre => "OTHER",
         }
     }
 }
@@ -77,8 +86,18 @@ pub struct Film {
 }
 
 impl Film {
+    /// Chemin affiché : source + dossier relatif.
     pub fn chemin(&self) -> String {
-        format!("{}\\{}", self.source, self.dossier)
+        if self.dossier.is_empty() {
+            self.source.clone()
+        } else if self.source.is_empty() {
+            self.dossier.clone()
+        } else {
+            std::path::Path::new(&self.source)
+                .join(&self.dossier)
+                .display()
+                .to_string()
+        }
     }
 
     /// Libellé de format vidéo (480p, 720p, 1080p, 2160p...).

@@ -14,6 +14,7 @@ pub mod dialogue_recherche;
 pub mod dialogue_reglages;
 pub mod dialogue_renommage;
 pub mod menus;
+pub mod series;
 pub mod tableau;
 pub mod visionneuse;
 

@@ -1,7 +1,8 @@
-//! Réglages modifiables depuis le dialogue (valeurs factices, non persistées pour l'instant).
+//! Réglages propres à l'interface (langue, thème, comportement), mémorisés dans `ui.json`.
+//! Les réglages des services (sources, renommeur, réseau…) vivent dans le fichier de réglages
+//! du stockage : voir [`ReglagesServices`](crate::source_donnees::ReglagesServices).
 
 use crate::i18n::Langue;
-use crate::renommage::{Profil, profils_par_defaut};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum Theme {
@@ -34,20 +35,6 @@ pub struct Reglages {
     pub theme: Theme,
     pub memoriser_module: bool,
     pub afficher_memoire: bool,
-    pub proxy_hote: String,
-    pub proxy_port: String,
-    pub proxy_utilisateur: String,
-    pub proxy_mot_de_passe: String,
-    pub ignorer_erreurs_ssl: bool,
-    pub telechargements_paralleles: u32,
-    pub sources: Vec<String>,
-    pub exclusions: Vec<String>,
-    pub profils: Vec<Profil>,
-    pub profil_actif: usize,
-    pub renommer_dossiers: bool,
-    pub renommer_fichiers: bool,
-    pub corbeille: bool,
-    pub cache_image: bool,
 }
 
 impl Default for Reglages {
@@ -57,27 +44,14 @@ impl Default for Reglages {
             theme: Theme::Sombre,
             memoriser_module: true,
             afficher_memoire: false,
-            proxy_hote: String::new(),
-            proxy_port: String::new(),
-            proxy_utilisateur: String::new(),
-            proxy_mot_de_passe: String::new(),
-            ignorer_erreurs_ssl: false,
-            telechargements_paralleles: 4,
-            sources: vec!["D:\\Films".into(), "E:\\Films 4K".into()],
-            exclusions: vec!["@eaDir".into(), "$RECYCLE.BIN".into()],
-            profils: profils_par_defaut(),
-            profil_actif: 0,
-            renommer_dossiers: true,
-            renommer_fichiers: true,
-            corbeille: true,
-            cache_image: true,
         }
     }
 }
 
 /// Pages de l'arbre des réglages (§3.1 de la spécification).
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Default)]
 pub enum Page {
+    #[default]
     General,
     TypesFichiers,
     TriTitre,

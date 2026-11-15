@@ -1,4 +1,5 @@
-//! Aperçu du renommage (maquette 5.2) : profil, table des films, détail dossier/fichiers.
+//! Aperçu du renommage (maquette 5.2) : table des films, détail dossier/fichiers (ancien vers
+//! nouveau), conflits du plan calculé par les services.
 
 use super::Sortie;
 use crate::etat::{ActionDialogue, Etat, EtatApercu, Message};
@@ -9,30 +10,21 @@ use egui_extras::{Column, TableBuilder};
 
 pub fn afficher(ctx: &egui::Context, etat: &Etat, d: &EtatApercu, sortie: &mut Sortie) {
     let i = &etat.i18n;
-    let apercus = etat.apercu_courant();
+    let apercus = &d.apercus;
     let reponse = Modal::new(egui::Id::unique("dlg_renommage")).show(ctx, |ui| {
         ui.set_min_size(Vec2::new(900.0, 460.0));
         ui.heading(i.t("renamer.title"));
         ui.horizontal(|ui| {
-            ui.label(i.t("Settings.renamer.profile"));
-            let nom = etat
-                .reglages
-                .profils
-                .get(d.profil)
-                .map(|p| p.nom.as_str())
-                .unwrap_or("");
-            egui::ComboBox::from_id_salt("profil_renommage")
-                .selected_text(nom)
-                .show_ui(ui, |ui| {
-                    for (n, p) in etat.reglages.profils.iter().enumerate() {
-                        if ui.selectable_label(d.profil == n, &p.nom).clicked() {
-                            sortie.push(Message::Dialogue(ActionDialogue::ApercuProfil(n)));
-                        }
-                    }
-                });
+            ui.label(RichText::new(i.t("Settings.renamer.folder")).strong());
+            ui.monospace(&etat.services.gabarit_dossier_film);
+            ui.add_space(12.0);
+            ui.label(RichText::new(i.t("Settings.renamer.file")).strong());
+            ui.monospace(&etat.services.gabarit_fichier_film);
         });
         ui.separator();
-        if apercus.is_empty() {
+        if let Some(e) = &d.erreur {
+            ui.colored_label(ROUGE, e);
+        } else if apercus.is_empty() {
             ui.label(i.t("renamer.nothing"));
         }
         ui.horizontal_top(|ui| {
@@ -59,7 +51,7 @@ pub fn afficher(ctx: &egui::Context, etat: &Etat, d: &EtatApercu, sortie: &mut S
                             let a = &apercus[ligne.index()];
                             ligne.set_selected(d.film_actif == Some(a.id));
                             ligne.col(|ui| {
-                                if a.probleme {
+                                if a.probleme() {
                                     ui.label(RichText::new("⚠").color(ORANGE))
                                         .on_hover_text(i.t("renamer.problem"));
                                 }
@@ -94,12 +86,15 @@ pub fn afficher(ctx: &egui::Context, etat: &Etat, d: &EtatApercu, sortie: &mut S
                         ui.label(&a.ancien_dossier);
                         ui.end_row();
                         ui.label(RichText::new(i.t("renamer.newfolder")).strong());
-                        let couleur = if a.probleme { ROUGE } else { VERT };
+                        let couleur = if a.probleme() { ROUGE } else { VERT };
                         ui.label(RichText::new(&a.nouveau_dossier).color(couleur));
                         ui.end_row();
                     });
-                if a.probleme {
-                    ui.colored_label(ROUGE, i.t("renamer.duplicate"));
+                for c in &a.conflits {
+                    ui.colored_label(ROUGE, format!("⚠ {c}"));
+                }
+                for c in &a.avertissements {
+                    ui.colored_label(ORANGE, c);
                 }
                 ui.add_space(6.0);
                 let lignes: Vec<&LigneFichier> = a
@@ -125,7 +120,7 @@ pub fn afficher(ctx: &egui::Context, etat: &Etat, d: &EtatApercu, sortie: &mut S
                         body.rows(20.0, lignes.len(), |mut ligne| {
                             let l = lignes[ligne.index()];
                             ligne.col(|ui| {
-                                ui.label(l.type_fichier.libelle());
+                                ui.label(&l.type_fichier);
                             });
                             ligne.col(|ui| {
                                 ui.label(&l.ancien);
@@ -161,7 +156,7 @@ pub fn afficher(ctx: &egui::Context, etat: &Etat, d: &EtatApercu, sortie: &mut S
                 if ui.button(i.t("Button.close")).clicked() {
                     sortie.push(Message::FermerDialogue);
                 }
-                let actif = apercus.iter().any(|a| !a.probleme && !a.rien_a_renommer());
+                let actif = apercus.iter().any(|a| a.executable());
                 if ui
                     .add_enabled(actif, egui::Button::new(i.t("Button.rename")))
                     .clicked()

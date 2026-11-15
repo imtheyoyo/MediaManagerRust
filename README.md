@@ -4,16 +4,23 @@ Gestionnaire de médiathèque films et séries, écrit en Rust, avec interface g
 
 ## État du projet
 
-| Crate | Rôle | État |
-|---|---|---|
-| `crates/core` | modèle, scan films/séries, NFO, renommeur | fait : scan films et séries, NFO, renommeur (plan + exécution sûre) |
-| `crates/gabarit` | moteur de gabarits du renommeur (`${titre}`, conditions, boucles, nettoyage des noms) | fait (74 tests) |
-| `crates/scrapers` | client HTTP avec cache, correspondance, fournisseur TMDB films | fait (32 tests) |
-| `crates/store` | SQLite, réglages atomiques, mode portable, instance unique, sauvegardes | fait |
-| `crates/gui` | interface egui : tableau, détails, thèmes, réglages, aperçu du renommage | coque faite (41 tests), données factices |
-| `crates/cli` | outil en ligne de commande | à faire |
+| Crate | Rôle |
+|---|---|
+| `crates/core` | modèle, scan films/séries, NFO, renommeur (plan + exécution sûre) |
+| `crates/gabarit` | moteur de gabarits du renommeur |
+| `crates/scrapers` | client HTTP avec cache ; TMDB films et séries, Fanart.tv, TVmaze |
+| `crates/store` | SQLite, réglages atomiques, secrets dans le trousseau, mode portable, sauvegardes |
+| `crates/app` | services : mise à jour des sources, récupération des métadonnées, images, NFO, renommage, tâches |
+| `crates/gui` | application graphique `mediamanager-gui` (egui) |
+| `crates/cli` | outil en ligne de commande `mediamanager` |
 
-Prochaine étape : brancher l'interface et l'outil en ligne de commande sur le cœur, le stockage et TMDB.
+Pas encore fait : récupération et renommage des séries, collections, analyse des flux (MediaInfo/ffprobe), export.
+
+## Utilisation
+
+- Interface : `mediamanager-gui` (ou `mediamanager-gui --demo` pour des données de démonstration).
+- Ligne de commande : `mediamanager --help` (`maj`, `lister`, `scraper`, `nfo`, `renommer --appliquer`, `cle-tmdb`, `info`).
+- Mode portable par défaut : les données sont créées à côté de l'exécutable. Un fichier `non-portable` à côté de l'exécutable utilise les dossiers utilisateur.
 
 ## Clé TMDB
 

@@ -10,7 +10,7 @@ use crate::source_donnees::SourceDonnees;
 use crate::taches::Repaint;
 use crate::theme;
 use crate::vue::{
-    self, Sortie, barre_etat, barre_menus, barre_modules, barre_outils, details, tableau,
+    self, Sortie, barre_etat, barre_menus, barre_modules, barre_outils, details, series, tableau,
 };
 use eframe::egui::{self, CentralPanel, Event, Frame, Id, Key, Margin, Panel, ViewportCommand};
 use std::path::PathBuf;
@@ -238,6 +238,7 @@ impl Application {
                         .frame(Frame::new().inner_margin(Margin::symmetric(4, 0)))
                         .show(ui, |ui| tableau::afficher(ui, &self.etat, &mut sortie));
                 }
+                Module::Series => series::afficher(ui, &self.etat, &mut sortie),
                 autre => {
                     let nom = self.etat.i18n.t(autre.cle());
                     ui.add_space(24.0);
@@ -302,15 +303,14 @@ mod tests {
     use super::*;
     use crate::commandes::Commande;
     use crate::etat::TypeDialogue;
+    use crate::reglages::Page;
 
     /// Rendu hors écran de chaque écran / dialogue : aucune panique, messages appliqués.
-    #[test]
-    fn rendu_de_tous_les_ecrans_sans_panique() {
+    fn rendre_tous_les_ecrans(etat: Etat, dossier: &std::path::Path) {
         let ctx = egui::Context::default();
         let repaint: Repaint = Arc::new(|| {});
-        let dossier = std::env::temp_dir().join(format!("mmr-app-{}", std::process::id()));
         let mut app = Application {
-            etat: Etat::nouveau(),
+            etat,
             theme_applique: None,
             images: GestionnaireImages::new(repaint),
             chemin_ui: dossier.join("ui.json"),
@@ -320,7 +320,7 @@ mod tests {
             let mut sortie = ctx.run_ui(Default::default(), |ui| app.dessiner(ui));
             sortie.textures_delta.clear();
         };
-        let etapes: Vec<Message> = vec![
+        let mut etapes: Vec<Message> = vec![
             Message::OuvrirDialogue(TypeDialogue::Assistant),
             Message::FermerDialogue,
             Message::OuvrirFiltres(true),
@@ -332,13 +332,29 @@ mod tests {
             Message::FermerDialogue,
             Message::Commande(Commande::ApercuRenommage),
             Message::FermerDialogue,
-            Message::OuvrirDialogue(TypeDialogue::Reglages),
+        ];
+        for page in [
+            Page::General,
+            Page::Systeme,
+            Page::ServicesExternes,
+            Page::Divers,
+            Page::FilmsSource,
+            Page::FilmsExtracteur,
+            Page::FilmsRenommeur,
+            Page::Series,
+        ] {
+            etapes.push(Message::OuvrirReglagesPage(page));
+        }
+        etapes.extend([
             Message::FermerDialogue,
             Message::OuvrirDialogue(TypeDialogue::Messages),
             Message::FermerDialogue,
+            Message::ChoisirModule(crate::etat::Module::Series),
+            Message::ChoisirModule(crate::etat::Module::Collections),
+            Message::ChoisirModule(crate::etat::Module::Films),
             Message::ChoisirOnglet(crate::etat::OngletDetails::Illustration),
             Message::OuvrirVisionneuse(dossier.join("absente.png")),
-        ];
+        ]);
         image(&mut app);
         for m in etapes {
             app.etat.appliquer(m);
@@ -348,6 +364,24 @@ mod tests {
         app.enregistrer_interface();
         let relu = persistance::charger(&dossier.join("ui.json")).unwrap();
         assert_eq!(relu, app.etat.instantane_interface());
-        let _ = std::fs::remove_dir_all(dossier);
+    }
+
+    #[test]
+    fn rendu_de_tous_les_ecrans_sans_panique() {
+        let dossier = tempfile::tempdir().unwrap();
+        rendre_tous_les_ecrans(Etat::nouveau(), dossier.path());
+    }
+
+    #[test]
+    fn rendu_de_tous_les_ecrans_avec_la_source_reelle() {
+        let d = tempfile::tempdir().unwrap();
+        let source = crate::source_application::tests::source_reelle(d.path());
+        let mut etat = Etat::avec_source(source.clone());
+        etat.appliquer(Message::Commande(Commande::MettreAJourToutesSources));
+        crate::source_application::tests::attendre(&mut etat, |e| {
+            e.films.len() == 2 && e.taches.is_empty()
+        });
+        rendre_tous_les_ecrans(etat, d.path());
+        source.arreter().unwrap();
     }
 }

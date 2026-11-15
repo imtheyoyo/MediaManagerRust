@@ -4,25 +4,24 @@
 use crate::commandes::Commande;
 use crate::dialogues::{
     ActionAssistant, ActionConfirmee, ActionEditeur, ActionRecherche, EtatAssistant,
-    EtatConfirmation, EtatEditeur, EtatRecherche, FilmEdite, OngletEditeur, appliquer_resultat,
-    valider,
+    EtatConfirmation, EtatEditeur, EtatRecherche, FilmEdite, OngletEditeur, valider,
 };
 use crate::filtres::{ActionFiltre, ContexteFiltre, FiltresAvances, OngletFiltre};
 use crate::i18n::{I18n, Langue};
 use crate::modele::{Colonne, ColonneEtat, Film, Ordre, colonnes_par_defaut, normaliser};
 use crate::persistance::{ColonnePersistee, EtatInterface, GeometrieFenetre, TriPersiste};
 use crate::reglages::{Page, Reglages, Theme};
-use crate::renommage::{self, Profil};
+use crate::renommage::ApercuFilm;
 use crate::source_donnees::{
-    RequeteRecherche, ResultatRecherche, SourceDonnees, SourceFactice, titre_nettoye,
+    ReglagesServices, RequeteRecherche, ResultatRecherche, Retour, SECRET_CLE_TMDB, SerieAffichage,
+    SourceDonnees, SourceFactice, Travail, titre_nettoye,
 };
-use crate::taches::{Repaint, Tache, lancer_simulation};
+use crate::taches::{IssueTache, Repaint, Tache};
 use regex::Regex;
 use std::collections::BTreeSet;
 use std::path::PathBuf;
-use std::sync::Arc;
-use std::sync::atomic::AtomicBool;
-use std::sync::mpsc::{Receiver, Sender, channel};
+use std::sync::mpsc::{Receiver, channel};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 /// Fenêtre de la recherche incrémentale au clavier (500 ms comme l'original).
@@ -127,15 +126,21 @@ pub struct Notification {
 #[derive(Clone, Debug)]
 pub struct EtatApercu {
     pub ids: Vec<u64>,
-    pub profil: usize,
     pub masquer_inchanges: bool,
     pub film_actif: Option<u64>,
+    /// Plan de renommage calculé par la source à l'ouverture du dialogue.
+    pub apercus: Vec<ApercuFilm>,
+    pub erreur: Option<String>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct EtatDialogueReglages {
     pub page: Page,
     pub filtre: String,
+    /// Saisies en cours (ajout d'un dossier source films / séries, clé d'API).
+    pub saisie_source: String,
+    pub saisie_source_serie: String,
+    pub saisie_cle: String,
 }
 
 /// Dialogue modal affiché (un seul à la fois ; le dialogue de filtres, non modal, est à part).
@@ -160,11 +165,15 @@ pub enum TypeDialogue {
 
 #[derive(Clone, Debug)]
 pub enum ActionDialogue {
-    ApercuProfil(usize),
     ApercuMasquer(bool),
     ApercuFilm(u64),
     ReglagesPage(Page),
     ReglagesFiltre(String),
+    ReglagesSaisieSource(String),
+    ReglagesSaisieSourceSerie(String),
+    ReglagesSaisieCle(String),
+    /// Transmet la clé saisie au coffre à secrets.
+    ReglagesEnregistrerCle,
     Editeur(ActionEditeur),
     Recherche(ActionRecherche),
     Assistant(ActionAssistant),
@@ -213,6 +222,10 @@ pub enum Message {
     Confirmer,
     ApercuAppliquer,
     AppliquerReglages(Box<Reglages>),
+    /// Réglages des services modifiés dans le dialogue (enregistrés à sa fermeture).
+    AppliquerServices(Box<ReglagesServices>),
+    /// Ouvre les réglages sur une page donnée.
+    OuvrirReglagesPage(Page),
     Filtre(ActionFiltre),
     OuvrirFiltres(bool),
     OngletFiltres(OngletFiltre),
@@ -229,22 +242,42 @@ pub enum Message {
     Notifier(Niveau, String),
     MessagesLus,
     ArreterTache(u64),
+    /// Mise à jour des sources de séries (module Séries).
+    MettreAJourSeries,
+    // ---- messages publiés par la source de données
+    TacheDemarree {
+        id: u64,
+        /// Clé de traduction ou nom déjà lisible.
+        nom: String,
+        principale: bool,
+    },
     TacheProgression {
         id: u64,
         fait: u32,
         total: u32,
+        description: String,
     },
     TacheTerminee {
         id: u64,
-        annulee: bool,
+        issue: IssueTache,
     },
+    /// Film ajouté ou modifié par les services.
+    FilmActualise(Box<Film>),
+    /// Film retiré de la bibliothèque.
+    FilmRetire(u64),
+    /// La liste des séries a changé.
+    SeriesModifiees,
 }
 
 pub struct Etat {
     pub i18n: I18n,
     pub reglages: Reglages,
+    /// Réglages des services (lus et écrits par la source).
+    pub services: ReglagesServices,
+    services_modifies: bool,
     pub source: Arc<dyn SourceDonnees>,
     pub films: Vec<Film>,
+    pub series: Vec<SerieAffichage>,
     pub module: Module,
     pub onglet: OngletDetails,
     pub recherche: String,
@@ -279,13 +312,15 @@ pub struct Etat {
     pub quitter: bool,
     tampon_frappe: String,
     derniere_frappe: Option<Instant>,
-    tx: Sender<Message>,
+    /// Canal de retour (tâches, recherche, événements des services) vers `rx`.
+    retour: Retour,
     rx: Receiver<Message>,
-    repaint: Repaint,
-    prochain_id_tache: u64,
+    /// Rafraîchissement réel, remplaçable après la création (voir `definir_repaint`).
+    repaint_partage: Arc<Mutex<Repaint>>,
     prochain_id_requete: u64,
-    /// Pas de la tâche simulée (réduit dans les tests).
-    pas_simulation: Duration,
+    /// Vue dérivée ou séries à recalculer après un lot de messages.
+    a_recalculer: bool,
+    series_a_recharger: bool,
 }
 
 impl Etat {
@@ -306,11 +341,28 @@ impl Etat {
     fn construire(source: Arc<dyn SourceDonnees>, films: Vec<Film>) -> Self {
         let (tx, rx) = channel();
         let reglages = Reglages::default();
+        let repaint_partage: Arc<Mutex<Repaint>> = Arc::new(Mutex::new(Arc::new(|| {})));
+        let partage = repaint_partage.clone();
+        let retour = Retour {
+            tx,
+            repaint: Arc::new(move || {
+                let r = partage.lock().map(|r| r.clone());
+                if let Ok(r) = r {
+                    r();
+                }
+            }),
+        };
+        source.brancher(retour.clone());
+        let services = source.reglages_services();
+        let series = source.series();
         let mut etat = Self {
             i18n: I18n::new(reglages.langue),
             reglages,
+            services,
+            services_modifies: false,
             source,
             films,
+            series,
             module: Module::Films,
             onglet: OngletDetails::Details,
             recherche: String::new(),
@@ -341,19 +393,21 @@ impl Etat {
             quitter: false,
             tampon_frappe: String::new(),
             derniere_frappe: None,
-            tx,
+            retour,
             rx,
-            repaint: Arc::new(|| {}),
-            prochain_id_tache: 1,
+            repaint_partage,
             prochain_id_requete: 1,
-            pas_simulation: Duration::from_millis(80),
+            a_recalculer: false,
+            series_a_recharger: false,
         };
         etat.recalculer();
         etat
     }
 
     pub fn definir_repaint(&mut self, repaint: Repaint) {
-        self.repaint = repaint;
+        if let Ok(mut r) = self.repaint_partage.lock() {
+            *r = repaint;
+        }
     }
 
     // ---------------------------------------------------------------- persistance de l'interface
@@ -524,10 +578,6 @@ impl Etat {
             .or_else(|| self.taches.first())
     }
 
-    pub fn profil_actif(&self) -> Option<&Profil> {
-        self.reglages.profils.get(self.reglages.profil_actif)
-    }
-
     pub fn tri_de(&self, colonne: Colonne) -> Option<(usize, Ordre)> {
         self.tri
             .iter()
@@ -542,41 +592,58 @@ impl Etat {
 
     // ---------------------------------------------------------------- canal de tâches
 
-    /// Applique les messages reçus des tâches d'arrière-plan (non bloquant, borné).
+    /// Applique les messages reçus des tâches et des services (non bloquant, borné), puis
+    /// recalcule une seule fois la vue dérivée.
     pub fn drainer(&mut self) {
         for _ in 0..MAX_MESSAGES_PAR_IMAGE {
             match self.rx.try_recv() {
-                Ok(m) => self.appliquer(m),
+                Ok(m) => self.appliquer_sans_recalcul(m),
                 Err(_) => break,
             }
         }
+        self.recalculs_differes();
     }
 
-    fn lancer_tache(&mut self, cle_nom: &'static str, total: u32, principale: bool) {
-        if principale && self.taches.iter().any(|t| t.principale) {
-            let texte = self.i18n.t("gui.task.running");
-            self.notifier(Niveau::Avertissement, texte);
+    fn recalculs_differes(&mut self) {
+        if std::mem::take(&mut self.a_recalculer) {
+            self.recalculer();
+        }
+        if std::mem::take(&mut self.series_a_recharger) {
+            self.series = self.source.series();
+        }
+    }
+
+    /// Lance un traitement long ; il apparaîtra dans la barre d'état à son démarrage.
+    fn lancer_travail(&mut self, travail: Travail) {
+        if let Err(e) = self.source.lancer(travail, &self.retour) {
+            self.notifier(Niveau::Erreur, e);
+        }
+    }
+
+    /// Nom affiché d'une tâche : traduction si c'est une clé connue.
+    fn nom_tache(&self, nom: &str) -> String {
+        if self.i18n.brut(nom).is_some() {
+            self.i18n.t(nom)
+        } else {
+            nom.to_string()
+        }
+    }
+
+    /// Enregistre les réglages des services s'ils ont changé.
+    fn enregistrer_services(&mut self) {
+        if !std::mem::take(&mut self.services_modifies) {
             return;
         }
-        let id = self.prochain_id_tache;
-        self.prochain_id_tache += 1;
-        let annulation = Arc::new(AtomicBool::new(false));
-        self.taches.push(Tache {
-            id,
-            cle_nom,
-            fait: 0,
-            total,
-            principale,
-            annulation: annulation.clone(),
-        });
-        lancer_simulation(
-            id,
-            total,
-            self.pas_simulation,
-            self.tx.clone(),
-            self.repaint.clone(),
-            annulation,
-        );
+        if let Err(e) = self.source.enregistrer_reglages_services(&self.services) {
+            self.notifier(Niveau::Erreur, e);
+        }
+    }
+
+    fn fermer_dialogue(&mut self) {
+        if matches!(self.dialogue, Some(Dialogue::Reglages(_))) {
+            self.enregistrer_services();
+        }
+        self.dialogue = None;
     }
 
     fn notifier(&mut self, niveau: Niveau, texte: String) {
@@ -587,6 +654,11 @@ impl Etat {
     // ---------------------------------------------------------------- mise à jour
 
     pub fn appliquer(&mut self, message: Message) {
+        self.appliquer_sans_recalcul(message);
+        self.recalculs_differes();
+    }
+
+    fn appliquer_sans_recalcul(&mut self, message: Message) {
         match message {
             Message::ChoisirModule(m) => self.module = m,
             Message::ChoisirOnglet(o) => self.onglet = o,
@@ -640,7 +712,7 @@ impl Etat {
             Message::Fenetre(g) => self.fenetre = g,
             Message::Commande(c) => self.executer(c),
             Message::OuvrirDialogue(t) => self.ouvrir_dialogue(t),
-            Message::FermerDialogue => self.dialogue = None,
+            Message::FermerDialogue => self.fermer_dialogue(),
             Message::Dialogue(a) => self.action_dialogue(a),
             Message::Confirmer => self.confirmer(),
             Message::ApercuAppliquer => self.appliquer_renommage(),
@@ -649,6 +721,18 @@ impl Etat {
                     self.i18n = I18n::new(r.langue);
                 }
                 self.reglages = *r;
+            }
+            Message::AppliquerServices(r) => {
+                if *r != self.services {
+                    self.services = *r;
+                    self.services_modifies = true;
+                }
+            }
+            Message::OuvrirReglagesPage(page) => {
+                self.ouvrir_dialogue(TypeDialogue::Reglages);
+                if let Some(Dialogue::Reglages(d)) = &mut self.dialogue {
+                    d.page = page;
+                }
             }
             Message::Filtre(a) => {
                 self.filtres.appliquer(a);
@@ -677,37 +761,59 @@ impl Etat {
             }
             Message::Notifier(niveau, texte) => self.notifier(niveau, texte),
             Message::MessagesLus => self.non_lus = 0,
-            Message::ArreterTache(id) => {
-                if let Some(t) = self.taches.iter().find(|t| t.id == id) {
-                    t.annuler();
+            Message::ArreterTache(id) => self.source.annuler_tache(id),
+            Message::MettreAJourSeries => self.lancer_travail(Travail::MettreAJourSeries),
+            Message::TacheDemarree {
+                id,
+                nom,
+                principale,
+            } => {
+                if !self.taches.iter().any(|t| t.id == id) {
+                    let nom = self.nom_tache(&nom);
+                    self.taches.push(Tache::nouvelle(id, nom, principale));
                 }
             }
-            Message::TacheProgression { id, fait, total } => {
+            Message::TacheProgression {
+                id,
+                fait,
+                total,
+                description,
+            } => {
                 if let Some(t) = self.taches.iter_mut().find(|t| t.id == id) {
                     t.fait = fait;
                     t.total = total;
+                    t.description = description;
                 }
             }
-            Message::TacheTerminee { id, annulee } => {
+            Message::TacheTerminee { id, issue } => {
                 if let Some(pos) = self.taches.iter().position(|t| t.id == id) {
                     let tache = self.taches.remove(pos);
-                    let nom = self.i18n.t(tache.cle_nom);
-                    let cle = if annulee {
-                        "gui.task.cancelled"
-                    } else {
-                        "gui.task.done"
+                    // Les recherches (tâches de fond) n'encombrent pas l'historique.
+                    if !tache.principale && issue == IssueTache::Reussie {
+                        return;
+                    }
+                    let nom = tache.nom.as_str();
+                    let (cle, niveau) = match &issue {
+                        IssueTache::Reussie => ("gui.task.done", Niveau::Info),
+                        IssueTache::Annulee => ("gui.task.cancelled", Niveau::Avertissement),
+                        IssueTache::Echouee(_) => ("gui.task.failed", Niveau::Erreur),
                     };
-                    let texte = self.i18n.t_args(cle, &[("task", nom.as_str())]);
-                    self.notifier(
-                        if annulee {
-                            Niveau::Avertissement
-                        } else {
-                            Niveau::Info
-                        },
-                        texte,
-                    );
+                    let texte = self.i18n.t_args(cle, &[("task", nom)]);
+                    self.notifier(niveau, texte);
                 }
             }
+            Message::FilmActualise(f) => {
+                match self.films.iter_mut().find(|x| x.id == f.id) {
+                    Some(x) => *x = *f,
+                    None => self.films.push(*f),
+                }
+                self.a_recalculer = true;
+            }
+            Message::FilmRetire(id) => {
+                self.films.retain(|f| f.id != id);
+                self.a_recalculer = true;
+            }
+            Message::SeriesModifiees => self.series_a_recharger = true,
         }
     }
 
@@ -892,9 +998,34 @@ impl Etat {
             return;
         }
         match commande {
-            Commande::MettreAJourToutesSources => self.lancer_tache("gui.task.update", 40, true),
-            Commande::ScrapeMeilleur | Commande::ScrapeNonTraites | Commande::ScrapeMetadonnees => {
-                self.lancer_tache("gui.task.scrape", 25, true)
+            Commande::MettreAJourToutesSources => self.lancer_travail(Travail::MettreAJourSources),
+            Commande::ScrapeMeilleur | Commande::ScrapeMetadonnees => {
+                let ids = self.selection_ordonnee();
+                self.lancer_travail(Travail::RecupererAuto {
+                    ids,
+                    artwork: commande == Commande::ScrapeMeilleur,
+                });
+            }
+            Commande::ScrapeNonTraites => {
+                let ids: Vec<u64> = self
+                    .films
+                    .iter()
+                    .filter(|f| !f.metadonnees_ok && !f.verrouille)
+                    .map(|f| f.id)
+                    .collect();
+                if ids.is_empty() {
+                    let texte = self.i18n.t("gui.scrape.nothing");
+                    self.notifier(Niveau::Info, texte);
+                } else {
+                    self.lancer_travail(Travail::RecupererAuto { ids, artwork: true });
+                }
+            }
+            Commande::ReecrireNfo => {
+                let ids = self.selection_ordonnee();
+                self.lancer_travail(Travail::EcrireNfo { ids });
+            }
+            Commande::AjouterSource => {
+                self.appliquer_sans_recalcul(Message::OuvrirReglagesPage(Page::FilmsSource))
             }
             Commande::ScrapeInteractif => {
                 let ids = self.selection_ordonnee();
@@ -904,18 +1035,21 @@ impl Etat {
                 let ids = self.selection_ordonnee();
                 self.ouvrir_editeur(ids);
             }
-            Commande::BasculerVu => {
+            Commande::BasculerVu | Commande::BasculerVerrou => {
                 let ids = self.selection.clone();
+                let mut modifies = Vec::new();
                 for f in self.films.iter_mut().filter(|f| ids.contains(&f.id)) {
-                    f.vu = !f.vu;
+                    if commande == Commande::BasculerVu {
+                        f.vu = !f.vu;
+                    } else {
+                        f.verrouille = !f.verrouille;
+                    }
+                    modifies.push(f.clone());
+                }
+                if let Err(e) = self.source.enregistrer_films(&modifies) {
+                    self.notifier(Niveau::Erreur, e);
                 }
                 self.recalculer();
-            }
-            Commande::BasculerVerrou => {
-                let ids = self.selection.clone();
-                for f in self.films.iter_mut().filter(|f| ids.contains(&f.id)) {
-                    f.verrouille = !f.verrouille;
-                }
             }
             Commande::RetirerBase => self.demander_confirmation(ActionConfirmee::RetirerBase),
             Commande::SupprimerFichiers => {
@@ -981,6 +1115,12 @@ impl Etat {
         match action {
             ActionConfirmee::RetirerBase | ActionConfirmee::SupprimerFichiers => {
                 let n = self.selection.len();
+                let liste: Vec<u64> = self.selection.iter().copied().collect();
+                let supprimer = action == ActionConfirmee::SupprimerFichiers;
+                if let Err(e) = self.source.retirer_films(&liste, supprimer) {
+                    self.notifier(Niveau::Erreur, e);
+                    return;
+                }
                 let ids = std::mem::take(&mut self.selection);
                 self.films.retain(|f| !ids.contains(&f.id));
                 self.principal = None;
@@ -997,7 +1137,7 @@ impl Etat {
             }
             ActionConfirmee::Quitter => {
                 for t in &self.taches {
-                    t.annuler();
+                    self.source.annuler_tache(t.id);
                 }
                 self.quitter = true;
             }
@@ -1014,25 +1154,25 @@ impl Etat {
                     self.notifier(Niveau::Avertissement, texte);
                     return;
                 }
-                let ids: Vec<u64> = self.films_selectionnes().iter().map(|f| f.id).collect();
-                let profil = self.reglages.profil_actif;
+                let ids = self.selection_ordonnee();
+                let (apercus, erreur) = match self.source.apercu_renommage(&ids) {
+                    Ok(v) => (v, None),
+                    Err(e) => (Vec::new(), Some(e)),
+                };
+                // Le premier film de l'aperçu est affiché par défaut.
+                let film_actif = apercus.first().map(|x| x.id);
                 self.dialogue = Some(Dialogue::ApercuRenommage(EtatApercu {
                     ids,
-                    profil,
                     masquer_inchanges: false,
-                    film_actif: None,
+                    film_actif,
+                    apercus,
+                    erreur,
                 }));
-                // Le premier film de l'aperçu (trié par titre) est affiché par défaut.
-                let premier = self.apercu_courant().first().map(|x| x.id);
-                if let Some(Dialogue::ApercuRenommage(a)) = &mut self.dialogue {
-                    a.film_actif = premier;
-                }
             }
             TypeDialogue::Reglages => {
-                self.dialogue = Some(Dialogue::Reglages(EtatDialogueReglages {
-                    page: Page::General,
-                    filtre: String::new(),
-                }));
+                self.services = self.source.reglages_services();
+                self.services_modifies = false;
+                self.dialogue = Some(Dialogue::Reglages(EtatDialogueReglages::default()));
             }
             TypeDialogue::Messages => {
                 self.dialogue = Some(Dialogue::Messages);
@@ -1042,7 +1182,7 @@ impl Etat {
                 self.dialogue = Some(Dialogue::Assistant(Box::new(EtatAssistant::new(
                     self.reglages.langue,
                     self.reglages.theme,
-                    self.reglages.sources.clone(),
+                    self.services.sources_films.clone(),
                 ))));
             }
         }
@@ -1050,7 +1190,6 @@ impl Etat {
 
     fn action_dialogue(&mut self, action: ActionDialogue) {
         match (&mut self.dialogue, action) {
-            (Some(Dialogue::ApercuRenommage(a)), ActionDialogue::ApercuProfil(p)) => a.profil = p,
             (Some(Dialogue::ApercuRenommage(a)), ActionDialogue::ApercuMasquer(m)) => {
                 a.masquer_inchanges = m
             }
@@ -1059,6 +1198,25 @@ impl Etat {
             }
             (Some(Dialogue::Reglages(r)), ActionDialogue::ReglagesPage(p)) => r.page = p,
             (Some(Dialogue::Reglages(r)), ActionDialogue::ReglagesFiltre(f)) => r.filtre = f,
+            (Some(Dialogue::Reglages(r)), ActionDialogue::ReglagesSaisieSource(s)) => {
+                r.saisie_source = s
+            }
+            (Some(Dialogue::Reglages(r)), ActionDialogue::ReglagesSaisieSourceSerie(s)) => {
+                r.saisie_source_serie = s
+            }
+            (Some(Dialogue::Reglages(r)), ActionDialogue::ReglagesSaisieCle(s)) => r.saisie_cle = s,
+            (Some(Dialogue::Reglages(r)), ActionDialogue::ReglagesEnregistrerCle) => {
+                let cle = std::mem::take(&mut r.saisie_cle);
+                if !cle.trim().is_empty() {
+                    match self.source.transmettre_secret(SECRET_CLE_TMDB, cle.trim()) {
+                        Ok(()) => {
+                            let texte = self.i18n.t("gui.settings.keysaved");
+                            self.notifier(Niveau::Info, texte);
+                        }
+                        Err(e) => self.notifier(Niveau::Erreur, e),
+                    }
+                }
+            }
             (Some(Dialogue::Confirmation(c)), ActionDialogue::ConfirmationNePlusDemander(v)) => {
                 c.ne_plus_demander = v
             }
@@ -1142,7 +1300,7 @@ impl Etat {
                 if let Some(f) = self.films.iter_mut().find(|f| f.id == id) {
                     brouillon.appliquer(f);
                     let copie = f.clone();
-                    if let Err(err) = self.source.enregistrer_film(&copie) {
+                    if let Err(err) = self.source.enregistrer_films(&[copie]) {
                         self.notifier(Niveau::Erreur, err);
                     }
                 }
@@ -1178,6 +1336,7 @@ impl Etat {
             self.dialogue = Some(Dialogue::Recherche(Box::new(EtatRecherche {
                 film_id: id,
                 requete: RequeteRecherche {
+                    film: id,
                     extracteur,
                     langue: self.reglages.langue.code().into(),
                     texte,
@@ -1212,15 +1371,13 @@ impl Etat {
         r.selection = None;
         let requete = r.requete.clone();
         let source = self.source.clone();
-        let tx = self.tx.clone();
-        let repaint = self.repaint.clone();
+        let retour = self.retour.clone();
         std::thread::spawn(move || {
             let resultat = source.rechercher(&requete);
-            let _ = tx.send(Message::ResultatsRecherche {
+            retour.envoyer(Message::ResultatsRecherche {
                 id_requete,
                 resultat,
             });
-            repaint();
         });
     }
 
@@ -1277,14 +1434,13 @@ impl Etat {
                     std::mem::take(&mut r.file),
                     r.total,
                 );
-                if let Some(f) = self.films.iter_mut().find(|f| f.id == id) {
-                    appliquer_resultat(f, &choix, npr);
-                    let copie = f.clone();
-                    if let Err(err) = self.source.enregistrer_film(&copie) {
-                        self.notifier(Niveau::Erreur, err);
-                    }
-                }
-                self.recalculer();
+                // Métadonnées, images et NFO en tâche principale : le film sera rafraîchi
+                // à la fin (FilmActualise).
+                self.lancer_travail(Travail::AppliquerResultat {
+                    film: id,
+                    resultat: choix,
+                    ne_pas_remplacer: npr,
+                });
                 self.recherche_suivante(&mut file, total, npr);
             }
         }
@@ -1324,61 +1480,50 @@ impl Etat {
                 let Some(Dialogue::Assistant(a)) = self.dialogue.take() else {
                     return;
                 };
-                self.reglages.sources = a.sources.clone();
+                self.services.sources_films = a.sources.clone();
+                if !a.langue_extracteur.trim().is_empty() {
+                    self.services.langue_scraping = a.langue_extracteur.trim().to_string();
+                }
+                self.services_modifies = true;
+                self.enregistrer_services();
                 if !a.cle_tmdb.trim().is_empty() {
                     // Transmise au coffre à secrets : jamais conservée dans l'état ni dans ui.json.
-                    self.source
-                        .transmettre_secret("tmdb.cle_api", a.cle_tmdb.trim());
+                    if let Err(e) = self
+                        .source
+                        .transmettre_secret(SECRET_CLE_TMDB, a.cle_tmdb.trim())
+                    {
+                        self.notifier(Niveau::Erreur, e);
+                    }
                 }
                 self.assistant_termine = true;
                 let texte = self.i18n.t("wizard.done");
                 self.notifier(Niveau::Info, texte);
-                if !self.reglages.sources.is_empty() {
-                    self.lancer_tache("gui.task.update", 40, true);
+                if !self.services.sources_films.is_empty() {
+                    self.lancer_travail(Travail::MettreAJourSources);
                 }
             }
         }
     }
 
-    /// Aperçu du renommage pour l'état courant du dialogue (calculé à la volée, tri par titre).
-    pub fn apercu_courant(&self) -> Vec<renommage::ApercuFilm> {
-        let Some(Dialogue::ApercuRenommage(a)) = &self.dialogue else {
-            return Vec::new();
-        };
-        let Some(profil) = self.reglages.profils.get(a.profil) else {
-            return Vec::new();
-        };
-        let films: Vec<&Film> = a.ids.iter().filter_map(|&id| self.film(id)).collect();
-        renommage::calculer(&films, profil)
+    /// Aperçu du renommage affiché par le dialogue (plan calculé à son ouverture).
+    pub fn apercu_courant(&self) -> Vec<ApercuFilm> {
+        match &self.dialogue {
+            Some(Dialogue::ApercuRenommage(a)) => a.apercus.clone(),
+            _ => Vec::new(),
+        }
     }
 
-    /// « Renommer » du dialogue : applique les nouveaux noms (factices) aux films sans problème.
+    /// « Renommer » du dialogue : lance le renommage des films sans conflit.
     fn appliquer_renommage(&mut self) {
-        let apercus = self.apercu_courant();
-        let faits: Vec<_> = apercus
-            .into_iter()
-            .filter(|a| !a.probleme && !a.rien_a_renommer())
+        let ids: Vec<u64> = self
+            .apercu_courant()
+            .iter()
+            .filter(|a| a.executable())
+            .map(|a| a.id)
             .collect();
-        for a in &faits {
-            if let Some(f) = self.films.iter_mut().find(|f| f.id == a.id) {
-                f.dossier = a.nouveau_dossier.clone();
-                for (fic, ligne) in f.fichiers.iter_mut().zip(&a.fichiers) {
-                    fic.nom = ligne.nouveau.clone();
-                    if fic.type_fichier == crate::modele::TypeFichier::Video {
-                        f.nom_fichier = ligne.nouveau.clone();
-                    }
-                }
-            }
-        }
-        let ids: BTreeSet<u64> = faits.iter().map(|a| a.id).collect();
-        if let Some(Dialogue::ApercuRenommage(d)) = &mut self.dialogue {
-            d.ids.retain(|id| !ids.contains(id));
-            if d.film_actif.is_some_and(|id| ids.contains(&id)) {
-                d.film_actif = d.ids.first().copied();
-            }
-            if d.ids.is_empty() {
-                self.dialogue = None;
-            }
+        self.dialogue = None;
+        if !ids.is_empty() {
+            self.lancer_travail(Travail::Renommer { ids });
         }
     }
 }
@@ -1646,23 +1791,26 @@ mod tests {
         assert_eq!(e.selection.len(), 1); // la 1re ligne est resélectionnée
     }
 
-    #[test]
-    fn tache_en_arriere_plan_via_le_canal() {
-        let mut e = Etat::nouveau();
-        e.pas_simulation = Duration::from_millis(1);
-        e.appliquer(Message::Commande(Commande::MettreAJourToutesSources));
-        assert_eq!(e.taches.len(), 1);
-        assert!(e.tache_active().unwrap().principale);
-        // une seconde tâche principale est refusée
-        e.appliquer(Message::Commande(Commande::ScrapeNonTraites));
-        assert_eq!(e.taches.len(), 1);
+    /// Pompe les messages jusqu'à ce que `fini` soit vrai (10 s au plus).
+    fn attendre(e: &mut Etat, fini: impl Fn(&Etat) -> bool) {
         let fin = Instant::now() + Duration::from_secs(10);
-        while !e.taches.is_empty() && Instant::now() < fin {
-            if let Ok(m) = e.rx.recv_timeout(Duration::from_millis(100)) {
+        while !fini(e) && Instant::now() < fin {
+            if let Ok(m) = e.rx.recv_timeout(Duration::from_millis(20)) {
                 e.appliquer(m);
             }
         }
-        assert!(e.taches.is_empty());
+        assert!(fini(e), "délai dépassé");
+    }
+
+    #[test]
+    fn tache_en_arriere_plan_via_le_canal() {
+        let mut e = Etat::avec_source(source_rapide());
+        e.appliquer(Message::Commande(Commande::MettreAJourToutesSources));
+        attendre(&mut e, |e| !e.taches.is_empty());
+        let t = e.tache_active().unwrap();
+        assert!(t.principale);
+        assert_eq!(t.nom, "Mise à jour des sources");
+        attendre(&mut e, |e| e.taches.is_empty());
         assert_eq!(
             e.notifications.last().unwrap().texte,
             "Tâche terminée : Mise à jour des sources"
@@ -1671,16 +1819,14 @@ mod tests {
 
     #[test]
     fn annulation_d_une_tache() {
-        let mut e = Etat::nouveau();
-        e.pas_simulation = Duration::from_millis(5);
+        let mut s = SourceFactice::new(std::env::temp_dir().join("mmr-etat-annulation"));
+        s.pas = Duration::from_millis(20);
+        let mut e = Etat::avec_source(Arc::new(s));
         e.appliquer(Message::Commande(Commande::MettreAJourToutesSources));
+        attendre(&mut e, |e| !e.taches.is_empty());
         let id = e.taches[0].id;
         e.appliquer(Message::ArreterTache(id));
-        let fin = Instant::now() + Duration::from_secs(10);
-        while !e.taches.is_empty() && Instant::now() < fin {
-            e.drainer();
-            std::thread::sleep(Duration::from_millis(5));
-        }
+        attendre(&mut e, |e| e.taches.is_empty());
         assert!(
             e.notifications
                 .last()
@@ -1692,7 +1838,7 @@ mod tests {
 
     #[test]
     fn dialogue_apercu_renommage_et_application() {
-        let mut e = Etat::nouveau();
+        let mut e = Etat::avec_source(source_rapide());
         let id = id_de(&e, "Blade Runner 2049", 2017);
         e.appliquer(Message::Selectionner {
             id,
@@ -1706,11 +1852,71 @@ mod tests {
         assert_eq!(apercus[0].nouveau_dossier, "Blade Runner 2049 (2017)");
         e.appliquer(Message::ApercuAppliquer);
         assert!(e.dialogue.is_none());
-        assert_eq!(e.film(id).unwrap().dossier, "Blade Runner 2049 (2017)");
+        attendre(&mut e, |e| {
+            e.film(id).unwrap().dossier == "Blade Runner 2049 (2017)" && e.taches.is_empty()
+        });
         assert_eq!(
             e.film(id).unwrap().nom_fichier,
             "Blade Runner 2049 (2017).mkv"
         );
+    }
+
+    #[test]
+    fn reglages_des_services_enregistres_a_la_fermeture() {
+        let source = source_rapide();
+        let mut e = Etat::avec_source(source.clone());
+        e.appliquer(Message::Commande(Commande::AjouterSource));
+        let Some(Dialogue::Reglages(d)) = &e.dialogue else {
+            panic!("réglages attendus")
+        };
+        assert_eq!(d.page, Page::FilmsSource);
+        let mut r = e.services.clone();
+        r.sources_films.push("F:\\Nouveaux".into());
+        e.appliquer(Message::AppliquerServices(Box::new(r)));
+        assert!(
+            !source
+                .reglages_services()
+                .sources_films
+                .contains(&"F:\\Nouveaux".into())
+        );
+        e.appliquer(Message::FermerDialogue);
+        assert!(
+            source
+                .reglages_services()
+                .sources_films
+                .contains(&"F:\\Nouveaux".into())
+        );
+        // Clé saisie dans les réglages : transmise au coffre, effacée de l'état.
+        e.appliquer(Message::OuvrirDialogue(TypeDialogue::Reglages));
+        e.appliquer(Message::Dialogue(ActionDialogue::ReglagesSaisieCle(
+            "k1".into(),
+        )));
+        e.appliquer(Message::Dialogue(ActionDialogue::ReglagesEnregistrerCle));
+        assert_eq!(source.secret(SECRET_CLE_TMDB).as_deref(), Some("k1"));
+        let Some(Dialogue::Reglages(d)) = &e.dialogue else {
+            panic!()
+        };
+        assert!(d.saisie_cle.is_empty());
+    }
+
+    #[test]
+    fn films_et_series_actualises_par_la_source() {
+        let mut e = Etat::nouveau();
+        let total = e.films.len();
+        let mut f = e.films[0].clone();
+        f.titre = "Titre actualisé".into();
+        e.appliquer(Message::FilmActualise(Box::new(f.clone())));
+        assert_eq!(e.film(f.id).unwrap().titre, "Titre actualisé");
+        f.id = 999;
+        e.appliquer(Message::FilmActualise(Box::new(f)));
+        assert_eq!(e.films.len(), total + 1);
+        assert!(e.position(999).is_some());
+        e.appliquer(Message::FilmRetire(999));
+        assert_eq!(e.films.len(), total);
+        assert_eq!(e.series.len(), 2);
+        e.series.clear();
+        e.appliquer(Message::SeriesModifiees);
+        assert_eq!(e.series.len(), 2);
     }
 
     #[test]
@@ -1728,6 +1934,7 @@ mod tests {
             std::env::temp_dir().join(format!("mmr-etat-{}", std::process::id())),
         );
         s.latence = Duration::ZERO;
+        s.pas = Duration::from_millis(1);
         Arc::new(s)
     }
 
@@ -1819,9 +2026,11 @@ mod tests {
         let mut e = Etat::nouveau();
         e.appliquer(Message::DemandeQuitter);
         assert!(e.quitter);
-        let mut e = Etat::nouveau();
-        e.pas_simulation = Duration::from_millis(50);
+        let mut s = SourceFactice::new(std::env::temp_dir().join("mmr-etat-quitter"));
+        s.pas = Duration::from_millis(50);
+        let mut e = Etat::avec_source(Arc::new(s));
         e.appliquer(Message::Commande(Commande::MettreAJourToutesSources));
+        attendre(&mut e, |e| !e.taches.is_empty());
         assert!(!e.quitter_autorise());
         e.appliquer(Message::DemandeQuitter);
         assert!(matches!(e.dialogue, Some(Dialogue::Confirmation(_))));
@@ -1940,7 +2149,8 @@ mod tests {
             ActionRecherche::Valider,
         )));
         assert!(e.dialogue.is_none());
-        assert_eq!(e.film(id).unwrap().annee, 1982);
+        attendre(&mut e, |e| e.film(id).unwrap().annee == 1982);
+        assert!(e.film(id).unwrap().metadonnees_ok);
     }
 
     #[test]
@@ -1960,16 +2170,19 @@ mod tests {
         e.appliquer(assistant(ActionAssistant::CleTmdb("cle-secrete-42".into())));
         e.appliquer(assistant(ActionAssistant::Terminer));
         assert!(e.dialogue.is_none() && e.assistant_termine);
-        assert!(e.reglages.sources.contains(&"E:\\Vidéos".to_string()));
+        assert!(e.services.sources_films.contains(&"E:\\Vidéos".to_string()));
+        assert!(
+            source
+                .reglages_services()
+                .sources_films
+                .contains(&"E:\\Vidéos".to_string())
+        );
         assert_eq!(
-            source.secret("tmdb.cle_api").as_deref(),
+            source.secret(SECRET_CLE_TMDB).as_deref(),
             Some("cle-secrete-42")
         );
         let json = serde_json::to_string(&e.instantane_interface()).unwrap();
         assert!(!json.contains("cle-secrete-42"));
         assert!(json.contains("\"theme\":\"clair\""));
-        for t in &e.taches {
-            t.annuler();
-        }
     }
 }

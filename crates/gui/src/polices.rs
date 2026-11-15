@@ -146,6 +146,7 @@ mod tests {
             include_str!("vue/dialogue_recherche.rs"),
             include_str!("vue/dialogue_reglages.rs"),
             include_str!("vue/dialogue_renommage.rs"),
+            include_str!("vue/series.rs"),
             include_str!("vue/tableau.rs"),
             include_str!("vue/visionneuse.rs"),
         ] {

@@ -30,7 +30,14 @@ pub fn afficher(ui: &mut egui::Ui, etat: &Etat, sortie: &mut Sortie) {
                             ProgressBar::new(tache.fraction())
                         };
                         ui.add(barre.desired_width(100.0).desired_height(12.0));
-                        ui.label(etat.i18n.t(tache.cle_nom));
+                        let reponse = ui.label(&tache.nom);
+                        if !tache.description.is_empty() {
+                            reponse.on_hover_text(&tache.description);
+                        }
+                        let autres = etat.taches.len() - 1;
+                        if autres > 0 {
+                            ui.label(egui::RichText::new(format!("(+{autres})")).weak());
+                        }
                     }
                     None => {
                         ui.label(etat.i18n.t("gui.status.idle"));

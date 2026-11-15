@@ -1,15 +1,27 @@
 //! Frontière d'intégration : tout ce que l'interface attend des services de l'application
-//! (bibliothèque, images, recherche d'extracteur, écriture, coffre à secrets).
+//! (bibliothèque, images, recherche, tâches, renommage, réglages, coffre à secrets).
 //!
-//! Aujourd'hui alimentée par [`SourceFactice`] (données de `donnees.rs`, images générées
-//! localement, résultats de recherche simulés). L'intégration fournira une implémentation
-//! adossée aux crates `app` / `store` / `scrapers` sans toucher aux vues.
+//! Deux implémentations :
+//! - [`SourceApplication`](crate::source_application::SourceApplication) : services réels
+//!   (`mediamanager_app::Application`) ;
+//! - [`SourceFactice`] : démonstration et tests visuels (données de `donnees.rs`, images
+//!   générées localement, recherche et tâches simulées).
 
+use crate::dialogues::appliquer_resultat;
 use crate::donnees::films_factices;
+use crate::etat::Message;
 use crate::modele::{Film, normaliser};
+use crate::renommage::{self, ApercuFilm};
+use crate::taches::{IssueTache, Repaint};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::mpsc::Sender;
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
+
+/// Nom du secret de la clé d'API TMDB transmis par l'interface.
+pub const SECRET_CLE_TMDB: &str = "tmdb.cle_api";
 
 /// Types d'illustration affichés par le panneau de détails.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -37,6 +49,11 @@ impl GenreImage {
         }
     }
 
+    /// Rang dans [`GenreImage::TOUS`].
+    pub fn rang(self) -> usize {
+        self as usize
+    }
+
     fn suffixe(self) -> &'static str {
         match self {
             GenreImage::Affiche => "affiche",
@@ -60,6 +77,8 @@ impl GenreImage {
 /// Paramètres d'une recherche d'extracteur (dialogue de choix d'un résultat).
 #[derive(Clone, Debug, PartialEq)]
 pub struct RequeteRecherche {
+    /// Film pour lequel on cherche.
+    pub film: u64,
     pub extracteur: String,
     pub langue: String,
     pub texte: String,
@@ -79,11 +98,128 @@ pub struct ResultatRecherche {
     pub affiche: Option<PathBuf>,
 }
 
-/// Ce que l'intégration devra fournir. Les méthodes bloquantes (`rechercher`,
-/// `enregistrer_film`) sont appelées hors du thread de l'interface.
+/// Canal de retour vers l'interface : messages appliqués par l'état à la prochaine image.
+#[derive(Clone)]
+pub struct Retour {
+    pub tx: Sender<Message>,
+    pub repaint: Repaint,
+}
+
+impl Retour {
+    /// Envoie un message et réveille l'interface ; `false` si l'interface a disparu.
+    pub fn envoyer(&self, m: Message) -> bool {
+        let ok = self.tx.send(m).is_ok();
+        (self.repaint)();
+        ok
+    }
+}
+
+/// Traitements longs demandés par l'interface (exécutés en tâches par la source).
+#[derive(Clone, Debug, PartialEq)]
+pub enum Travail {
+    /// Toutes les sources : films puis séries.
+    MettreAJourSources,
+    /// Sources de séries uniquement.
+    MettreAJourSeries,
+    /// Récupération automatique (meilleur résultat) ; `artwork` = images comprises.
+    RecupererAuto {
+        ids: Vec<u64>,
+        artwork: bool,
+    },
+    /// Résultat choisi dans le dialogue de recherche.
+    AppliquerResultat {
+        film: u64,
+        resultat: ResultatRecherche,
+        ne_pas_remplacer: bool,
+    },
+    EcrireNfo {
+        ids: Vec<u64>,
+    },
+    Renommer {
+        ids: Vec<u64>,
+    },
+}
+
+impl Travail {
+    /// Clé de traduction du nom de la tâche.
+    pub fn cle_nom(&self) -> &'static str {
+        match self {
+            Travail::MettreAJourSources => "gui.task.update",
+            Travail::MettreAJourSeries => "gui.task.updatetv",
+            Travail::RecupererAuto { .. } | Travail::AppliquerResultat { .. } => "gui.task.scrape",
+            Travail::EcrireNfo { .. } => "gui.task.nfo",
+            Travail::Renommer { .. } => "gui.task.rename",
+        }
+    }
+}
+
+/// Réglages des services modifiables depuis l'interface (miroir d'une partie du fichier de
+/// réglages du stockage ; les secrets restent dans le coffre).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ReglagesServices {
+    pub sources_films: Vec<String>,
+    pub sources_series: Vec<String>,
+    /// Dossiers ignorés par le scan des films.
+    pub dossiers_ignores: Vec<String>,
+    pub langue_scraping: String,
+    pub gabarit_dossier_film: String,
+    pub gabarit_fichier_film: String,
+    pub remplacer_espaces: bool,
+    pub caractere_espace: String,
+    pub ascii_seulement: bool,
+    pub caractere_remplacement: String,
+    pub supprimer_dossiers_vides: bool,
+    pub renommer_apres_scraping: bool,
+    pub proxy_hote: String,
+    pub proxy_port: String,
+    pub proxy_utilisateur: String,
+    /// Secret : confié au coffre à l'enregistrement, jamais écrit dans `ui.json`.
+    pub proxy_mot_de_passe: String,
+    pub ignorer_erreurs_ssl: bool,
+    pub threads_telechargement: u32,
+    pub corbeille: bool,
+    pub cache_images: bool,
+}
+
+/// Épisode affiché dans l'arbre des séries.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct EpisodeAffichage {
+    pub episode: i32,
+    pub titre: String,
+    pub fichier: String,
+    pub vu: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SaisonAffichage {
+    pub numero: i32,
+    pub titre: String,
+    pub episodes: Vec<EpisodeAffichage>,
+}
+
+/// Série affichée (arbre série → saisons → épisodes).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SerieAffichage {
+    pub id: String,
+    pub titre: String,
+    pub annee: u32,
+    pub chemin: String,
+    pub saisons: Vec<SaisonAffichage>,
+}
+
+impl SerieAffichage {
+    pub fn nombre_episodes(&self) -> usize {
+        self.saisons.iter().map(|s| s.episodes.len()).sum()
+    }
+}
+
+/// Ce que l'interface attend des services. Les méthodes bloquantes (`rechercher`) sont
+/// appelées hors du thread de l'interface ; les autres sont courtes.
 pub trait SourceDonnees: Send + Sync {
     /// Instantané de la bibliothèque de films.
     fn films(&self) -> Vec<Film>;
+    /// Instantané des séries.
+    fn series(&self) -> Vec<SerieAffichage>;
     /// Chemin local d'une illustration du film, s'il existe.
     fn chemin_image(&self, film: &Film, genre: GenreImage) -> Option<PathBuf>;
     /// Recherche auprès d'un extracteur (bloquant).
@@ -92,10 +228,25 @@ pub trait SourceDonnees: Send + Sync {
     fn extracteurs(&self) -> Vec<String> {
         vec!["TMDB".into()]
     }
-    /// Écrit un film modifié (base + NFO plus tard).
-    fn enregistrer_film(&self, film: &Film) -> Result<(), String>;
+    /// Écrit des films modifiés dans l'interface (base, puis NFO en tâche).
+    fn enregistrer_films(&self, films: &[Film]) -> Result<(), String>;
+    /// Retire des films de la base (et supprime leurs fichiers si demandé).
+    fn retirer_films(&self, ids: &[u64], supprimer_fichiers: bool) -> Result<(), String>;
     /// Transmet un secret (clé d'API...) au coffre à secrets. Jamais écrit dans `ui.json`.
-    fn transmettre_secret(&self, nom: &str, valeur: &str);
+    fn transmettre_secret(&self, nom: &str, valeur: &str) -> Result<(), String>;
+    /// Réglages courants des services.
+    fn reglages_services(&self) -> ReglagesServices;
+    /// Enregistre les réglages des services.
+    fn enregistrer_reglages_services(&self, r: &ReglagesServices) -> Result<(), String>;
+    /// Plan de renommage d'une sélection (rien n'est écrit).
+    fn apercu_renommage(&self, ids: &[u64]) -> Result<Vec<ApercuFilm>, String>;
+    /// Lance un traitement long ; son cycle de vie arrive par `retour` (ou par le canal
+    /// installé par [`brancher`](Self::brancher)).
+    fn lancer(&self, travail: Travail, retour: &Retour) -> Result<(), String>;
+    /// Demande l'annulation d'une tâche.
+    fn annuler_tache(&self, id: u64);
+    /// Installe le canal de retour des événements spontanés des services.
+    fn brancher(&self, _retour: Retour) {}
 }
 
 /// Similarité de deux titres : coefficient de Dice sur les bigrammes de caractères normalisés.
@@ -173,12 +324,18 @@ pub fn titre_nettoye(nom: &str) -> (String, Option<u32>) {
 }
 
 /// Source factice : films de démonstration, images générées dans un dossier temporaire,
-/// recherche simulée sur un petit catalogue.
+/// recherche et tâches simulées (les effets sont appliqués à la fin de la tâche).
 pub struct SourceFactice {
     dossier_images: PathBuf,
+    films: Arc<Mutex<Vec<Film>>>,
+    services: Arc<Mutex<ReglagesServices>>,
     secrets: Mutex<HashMap<String, String>>,
+    annulations: Arc<Mutex<HashMap<u64, Arc<AtomicBool>>>>,
+    prochain_id: AtomicU64,
     /// Latence simulée de la recherche.
-    pub latence: std::time::Duration,
+    pub latence: Duration,
+    /// Durée d'une unité de travail des tâches simulées.
+    pub pas: Duration,
 }
 
 impl Default for SourceFactice {
@@ -187,16 +344,39 @@ impl Default for SourceFactice {
     }
 }
 
+/// Réglages de démonstration.
+pub fn reglages_demo() -> ReglagesServices {
+    ReglagesServices {
+        sources_films: vec!["D:\\Films".into(), "E:\\Films 4K".into()],
+        sources_series: vec!["D:\\Séries".into()],
+        dossiers_ignores: vec!["@eaDir".into(), "$RECYCLE.BIN".into()],
+        langue_scraping: "fr".into(),
+        gabarit_dossier_film: "${title} (${year})".into(),
+        gabarit_fichier_film: "${title} (${year})".into(),
+        caractere_espace: "_".into(),
+        supprimer_dossiers_vides: true,
+        threads_telechargement: 2,
+        corbeille: true,
+        cache_images: true,
+        ..ReglagesServices::default()
+    }
+}
+
 impl SourceFactice {
     pub fn new(dossier_images: PathBuf) -> Self {
         Self {
             dossier_images,
+            films: Arc::new(Mutex::new(films_factices())),
+            services: Arc::new(Mutex::new(reglages_demo())),
             secrets: Mutex::new(HashMap::new()),
-            latence: std::time::Duration::from_millis(250),
+            annulations: Arc::default(),
+            prochain_id: AtomicU64::new(1),
+            latence: Duration::from_millis(250),
+            pas: Duration::from_millis(80),
         }
     }
 
-    /// Secret reçu (tests uniquement : l'intégration le confiera au coffre).
+    /// Secret reçu (tests uniquement).
     pub fn secret(&self, nom: &str) -> Option<String> {
         self.secrets.lock().ok()?.get(nom).cloned()
     }
@@ -236,6 +416,96 @@ impl SourceFactice {
     }
 }
 
+/// Effet d'une tâche simulée sur les films de démonstration ; renvoie les films modifiés.
+fn effet_simule(travail: &Travail, films: &mut [Film], services: &ReglagesServices) -> Vec<Film> {
+    let mut modifies = Vec::new();
+    match travail {
+        Travail::AppliquerResultat {
+            film,
+            resultat,
+            ne_pas_remplacer,
+        } => {
+            if let Some(f) = films.iter_mut().find(|f| f.id == *film) {
+                appliquer_resultat(f, resultat, *ne_pas_remplacer);
+                modifies.push(f.clone());
+            }
+        }
+        Travail::RecupererAuto { ids, .. } => {
+            for f in films.iter_mut().filter(|f| ids.contains(&f.id)) {
+                f.metadonnees_ok = true;
+                modifies.push(f.clone());
+            }
+        }
+        Travail::Renommer { ids } => {
+            let refs: Vec<&Film> = films.iter().filter(|f| ids.contains(&f.id)).collect();
+            let apercus = renommage::calculer(
+                &refs,
+                &services.gabarit_dossier_film,
+                &services.gabarit_fichier_film,
+            );
+            for a in apercus.into_iter().filter(ApercuFilm::executable) {
+                if let Some(f) = films.iter_mut().find(|f| f.id == a.id) {
+                    f.dossier = a.nouveau_dossier.clone();
+                    for (fic, ligne) in f.fichiers.iter_mut().zip(&a.fichiers) {
+                        fic.nom = ligne.nouveau.clone();
+                    }
+                    if let Some(v) = f
+                        .fichiers
+                        .iter()
+                        .find(|x| x.type_fichier == crate::modele::TypeFichier::Video)
+                    {
+                        f.nom_fichier = v.nom.clone();
+                    }
+                    modifies.push(f.clone());
+                }
+            }
+        }
+        Travail::MettreAJourSources | Travail::MettreAJourSeries | Travail::EcrireNfo { .. } => {}
+    }
+    modifies
+}
+
+/// Séries de démonstration.
+pub fn series_demo() -> Vec<SerieAffichage> {
+    let ep = |episode: i32, titre: &str, vu: bool| EpisodeAffichage {
+        episode,
+        titre: titre.into(),
+        fichier: format!("S01E{episode:02}.mkv"),
+        vu,
+    };
+    vec![
+        SerieAffichage {
+            id: "demo-1".into(),
+            titre: "Série Exemple".into(),
+            annee: 2019,
+            chemin: "D:\\Séries\\Série Exemple (2019)".into(),
+            saisons: vec![
+                SaisonAffichage {
+                    numero: 1,
+                    titre: String::new(),
+                    episodes: vec![ep(1, "Pilote", true), ep(2, "La suite", false)],
+                },
+                SaisonAffichage {
+                    numero: 2,
+                    titre: String::new(),
+                    episodes: vec![ep(1, "Le retour", false)],
+                },
+            ],
+        },
+        SerieAffichage {
+            id: "demo-2".into(),
+            titre: "Autre Série".into(),
+            annee: 2023,
+            chemin: "D:\\Séries\\Autre Série (2023)".into(),
+            saisons: vec![SaisonAffichage {
+                numero: 1,
+                titre: String::new(),
+                episodes: vec![ep(1, "Commencement", false)],
+            }],
+        },
+    ]
+}
+
 /// Image de démonstration : dégradé dont la teinte dépend de la graine, bandeau sombre en bas.
 pub fn generer_image_demo(
     chemin: &Path,
@@ -267,7 +537,11 @@ pub fn generer_image_demo(
 
 impl SourceDonnees for SourceFactice {
     fn films(&self) -> Vec<Film> {
-        films_factices()
+        self.films.lock().map(|f| f.clone()).unwrap_or_default()
+    }
+
+    fn series(&self) -> Vec<SerieAffichage> {
+        series_demo()
     }
 
     fn chemin_image(&self, film: &Film, genre: GenreImage) -> Option<PathBuf> {
@@ -309,13 +583,114 @@ impl SourceDonnees for SourceFactice {
         Ok(v)
     }
 
-    fn enregistrer_film(&self, _film: &Film) -> Result<(), String> {
+    fn enregistrer_films(&self, films: &[Film]) -> Result<(), String> {
+        let mut tous = self.films.lock().map_err(|e| e.to_string())?;
+        for f in films {
+            if let Some(x) = tous.iter_mut().find(|x| x.id == f.id) {
+                *x = f.clone();
+            }
+        }
         Ok(())
     }
 
-    fn transmettre_secret(&self, nom: &str, valeur: &str) {
-        if let Ok(mut s) = self.secrets.lock() {
-            s.insert(nom.to_string(), valeur.to_string());
+    fn retirer_films(&self, ids: &[u64], _supprimer_fichiers: bool) -> Result<(), String> {
+        let mut tous = self.films.lock().map_err(|e| e.to_string())?;
+        tous.retain(|f| !ids.contains(&f.id));
+        Ok(())
+    }
+
+    fn transmettre_secret(&self, nom: &str, valeur: &str) -> Result<(), String> {
+        let mut s = self.secrets.lock().map_err(|e| e.to_string())?;
+        s.insert(nom.to_string(), valeur.to_string());
+        Ok(())
+    }
+
+    fn reglages_services(&self) -> ReglagesServices {
+        self.services.lock().map(|s| s.clone()).unwrap_or_default()
+    }
+
+    fn enregistrer_reglages_services(&self, r: &ReglagesServices) -> Result<(), String> {
+        *self.services.lock().map_err(|e| e.to_string())? = r.clone();
+        Ok(())
+    }
+
+    fn apercu_renommage(&self, ids: &[u64]) -> Result<Vec<ApercuFilm>, String> {
+        let services = self.reglages_services();
+        let films = self.films.lock().map_err(|e| e.to_string())?;
+        let refs: Vec<&Film> = films.iter().filter(|f| ids.contains(&f.id)).collect();
+        Ok(renommage::calculer(
+            &refs,
+            &services.gabarit_dossier_film,
+            &services.gabarit_fichier_film,
+        ))
+    }
+
+    fn lancer(&self, travail: Travail, retour: &Retour) -> Result<(), String> {
+        let id = self.prochain_id.fetch_add(1, Ordering::SeqCst);
+        let annulation = Arc::new(AtomicBool::new(false));
+        if let Ok(mut a) = self.annulations.lock() {
+            a.insert(id, annulation.clone());
+        }
+        let total: u32 = match travail {
+            Travail::MettreAJourSources => 40,
+            Travail::RecupererAuto { .. } => 25,
+            _ => 10,
+        };
+        let (pas, films, services, annulations, retour) = (
+            self.pas,
+            self.films.clone(),
+            self.services.clone(),
+            self.annulations.clone(),
+            retour.clone(),
+        );
+        std::thread::spawn(move || {
+            retour.envoyer(Message::TacheDemarree {
+                id,
+                nom: travail.cle_nom().to_string(),
+                principale: true,
+            });
+            let mut issue = IssueTache::Reussie;
+            for fait in 1..=total {
+                std::thread::sleep(pas);
+                if annulation.load(Ordering::Relaxed) {
+                    issue = IssueTache::Annulee;
+                    break;
+                }
+                if !retour.envoyer(Message::TacheProgression {
+                    id,
+                    fait,
+                    total,
+                    description: String::new(),
+                }) {
+                    return;
+                }
+            }
+            if issue == IssueTache::Reussie {
+                let services = services.lock().map(|s| s.clone()).unwrap_or_default();
+                let modifies = match films.lock() {
+                    Ok(mut f) => effet_simule(&travail, &mut f, &services),
+                    Err(_) => Vec::new(),
+                };
+                for f in modifies {
+                    retour.envoyer(Message::FilmActualise(Box::new(f)));
+                }
+            }
+            if let Ok(mut a) = annulations.lock() {
+                a.remove(&id);
+            }
+            retour.envoyer(Message::TacheTerminee { id, issue });
+        });
+        Ok(())
+    }
+
+    fn annuler_tache(&self, id: u64) {
+        if let Some(a) = self
+            .annulations
+            .lock()
+            .ok()
+            .and_then(|a| a.get(&id).cloned())
+        {
+            a.store(true, Ordering::Relaxed);
         }
     }
 }
@@ -354,6 +729,7 @@ mod tests {
         s.latence = std::time::Duration::ZERO;
         let r = s
             .rechercher(&RequeteRecherche {
+                film: 2,
                 extracteur: "TMDB".into(),
                 langue: "fr".into(),
                 texte: "Blade Runner 2049".into(),
@@ -370,7 +746,7 @@ mod tests {
     #[test]
     fn secrets_conserves_en_memoire() {
         let s = SourceFactice::default();
-        s.transmettre_secret("tmdb", "abc");
+        s.transmettre_secret("tmdb", "abc").unwrap();
         assert_eq!(s.secret("tmdb").as_deref(), Some("abc"));
     }
 }
