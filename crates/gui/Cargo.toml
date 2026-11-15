@@ -3,13 +3,19 @@ name = "mediamanager-gui"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+description = "Interface graphique (egui) de MediaManagerRust"
+
+[lib]
+name = "mediamanager_gui"
+path = "src/lib.rs"
 
 [[bin]]
 name = "mediamanager-gui"
 path = "src/main.rs"
 
 [dependencies]
-mediamanager-core.workspace = true
-mediamanager-scrapers.workspace = true
-mediamanager-store.workspace = true
+# L'intégration avec mediamanager-core / -store / -scrapers viendra plus tard :
+# pour l'instant la GUI travaille sur ses propres structures d'affichage.
 eframe = "0.37"
+egui_extras = "0.37"
+regex.workspace = true

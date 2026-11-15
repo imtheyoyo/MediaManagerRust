@@ -4,26 +4,24 @@ Gestionnaire de médiathèque films et séries, écrit en Rust, avec interface g
 
 ## État du projet
 
-Squelette en cours de construction. Fonctions visées :
+| Crate | Rôle | État |
+|---|---|---|
+| `crates/core` | modèle de données, scan des dossiers de films | fait (73 tests) — NFO et renommage à venir |
+| `crates/gabarit` | moteur de gabarits du renommeur (`${titre}`, conditions, boucles, nettoyage des noms) | fait (74 tests) |
+| `crates/scrapers` | client HTTP avec cache, correspondance, fournisseur TMDB films | fait (32 tests) |
+| `crates/store` | persistance (SQLite prévu) | à faire |
+| `crates/gui` | interface egui : tableau, détails, thèmes, réglages, aperçu du renommage | coque faite (41 tests), données factices |
+| `crates/cli` | outil en ligne de commande | à faire |
 
-- scan des dossiers de films et de séries ;
-- récupération des métadonnées en ligne (TMDB, IMDb, TheTVDB…) ;
-- lecture et écriture des fichiers NFO ;
-- renommage et rangement par gabarits, avec aperçu ;
-- interface graphique en français, thèmes clair et sombre.
+Prochaines étapes : lecture/écriture NFO, renommeur films, stockage SQLite, branchement de l'interface sur le cœur.
 
-## Organisation
+## Clé TMDB
 
-| Crate | Rôle |
-|---|---|
-| `crates/core` | modèle de données, scan, NFO, renommage |
-| `crates/scrapers` | métadonnées en ligne |
-| `crates/store` | persistance de la bibliothèque et des réglages |
-| `crates/cli` | outil en ligne de commande (`mediamanager`) |
-| `crates/gui` | application graphique (`mediamanager-gui`) |
+La récupération des métadonnées nécessite votre propre clé API TMDB, à saisir dans les réglages. Aucune clé n'est fournie.
 
 ## Compilation
 
 ```
 cargo build --release
+cargo test --workspace
 ```

@@ -7,3 +7,5 @@ license.workspace = true
 
 [dependencies]
 thiserror.workspace = true
+regex.workspace = true
+unicode-normalization = "0.1"
