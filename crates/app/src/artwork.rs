@@ -173,6 +173,12 @@ pub async fn telecharger(client: &reqwest::Client, url: &str) -> Resultat<Vec<u8
 
 /// Ajoute (ou remplace) un fichier dans la liste du film.
 pub fn ajouter_fichier(film: &mut Film, chemin: &Path, t: TypeFichier) {
+    ajouter_fichier_liste(&mut film.fichiers, chemin, t);
+}
+
+/// Ajoute (ou remplace) un fichier dans une liste quelconque (série, saison,
+/// épisode), avec sa taille et sa date lues sur le disque.
+pub fn ajouter_fichier_liste(liste: &mut Vec<FichierMedia>, chemin: &Path, t: TypeFichier) {
     let mut f = FichierMedia::nouveau(chemin, t);
     if let Ok(m) = std::fs::metadata(chemin) {
         f.taille = m.len();
@@ -183,10 +189,19 @@ pub fn ajouter_fichier(film: &mut Film, chemin: &Path, t: TypeFichier) {
             .map(|d| d.as_millis() as i64)
             .unwrap_or(0);
     }
-    film.fichiers.retain(|x| x.chemin_complet() != chemin);
-    film.fichiers.push(f);
-    film.fichiers
-        .sort_by(mediamanager_core::modele::comparer_fichiers_film);
+    liste.retain(|x| x.chemin_complet() != chemin);
+    liste.push(f);
+    liste.sort_by(mediamanager_core::modele::comparer_fichiers_film);
+}
+
+/// Client HTTP des téléchargements d'images.
+pub(crate) fn client_telechargement() -> Resultat<reqwest::Client> {
+    reqwest::Client::builder()
+        .user_agent(mediamanager_scrapers::ConfigHttp::default().user_agent)
+        .connect_timeout(std::time::Duration::from_secs(30))
+        .timeout(std::time::Duration::from_secs(120))
+        .build()
+        .map_err(|e| ErreurApp::Interne(format!("client HTTP : {e}")))
 }
 
 /// Image à télécharger : type, URL, destinations.

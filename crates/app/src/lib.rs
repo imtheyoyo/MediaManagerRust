@@ -31,27 +31,46 @@
 //! - [`conversion`] : types des scrapers ↔ modèle partagé ;
 //! - [`metadonnees`], [`artwork`], [`ecriture_nfo`] : scraping, images, NFO ;
 //! - [`renommage`] : aperçu et exécution du renommage ;
+//! - [`series`], [`conversion_serie`], [`renommage_serie`] : séries
+//!   (scraping, épisodes, images, NFO, renommage) ;
+//! - [`gestion_films`] : sélection, films manquants d'une saga, retrait,
+//!   annulation du renommage ;
 //! - [`journal`] : journalisation dans `logs/`.
 
 pub mod application;
 pub mod artwork;
 pub mod conversion;
+pub mod conversion_serie;
 pub mod ecriture_nfo;
 pub mod erreur;
 pub mod evenements;
+pub mod gestion_films;
 pub mod journal;
 pub mod metadonnees;
 pub mod renommage;
+pub mod renommage_serie;
+pub mod series;
 pub mod sources;
 pub mod taches;
 
 pub use application::{Application, ConfigServices, OptionsDemarrage};
 pub use artwork::ConfigArtwork;
 pub use conversion::ConfigMetadonnees;
+pub use conversion_serie::ConfigSerie;
 pub use erreur::{ErreurApp, Resultat};
 pub use evenements::{Evenement, IdTache, IssueTache, NiveauMessage};
+pub use gestion_films::{DOSSIER_CORBEILLE_SOURCE, RapportRetrait};
 pub use journal::OptionsJournal;
 pub use metadonnees::{RapportScrap, RequeteFilm};
-pub use renommage::RapportRenommage;
+pub use renommage::{ApercuRenommage, RapportRenommage};
+pub use series::RequeteSerie;
 pub use sources::{OptionsMiseAJour, RapportMiseAJour, TraitementDisparus};
 pub use taches::{GestionnaireTaches, InfoTache, PoigneeTache, TypeTache};
+
+/// Types des fournisseurs de métadonnées utiles aux interfaces (résultats
+/// de recherche, collections, séries).
+pub use mediamanager_scrapers::{
+    ArtworkEtendu, CollectionFilm, GroupeEpisodes as GroupeEpisodesFournisseur, MetadonneesEpisode,
+    MetadonneesSaison, MetadonneesSerie, PartieCollection, ResultatRecherche,
+    StatutDiffusion as StatutDiffusionFournisseur, TypeArtworkEtendu, TypeGroupeEpisodes,
+};

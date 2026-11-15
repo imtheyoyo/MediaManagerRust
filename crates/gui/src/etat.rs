@@ -1,6 +1,7 @@
 //! Modèle d'état (`Etat`), messages et logique de mise à jour (sans aucune dépendance egui :
 //! entièrement testable). La vue lit un `&Etat` et émet des `Message`.
 
+use crate::collections::NoeudSaga;
 use crate::commandes::Commande;
 use crate::dialogues::{
     ActionAssistant, ActionConfirmee, ActionEditeur, ActionRecherche, EtatAssistant,
@@ -10,13 +11,14 @@ use crate::filtres::{ActionFiltre, ContexteFiltre, FiltresAvances, OngletFiltre}
 use crate::i18n::{I18n, Langue};
 use crate::mise_a_jour::{self, ConfigMiseAJour, EtapeInstallation, Publication, Verdict};
 use crate::modele::{Colonne, ColonneEtat, Film, Ordre, colonnes_par_defaut, normaliser};
+use crate::ouverture::{self, CibleOuverture, Lanceur, Systeme};
 use crate::persistance::{ColonnePersistee, EtatInterface, GeometrieFenetre, TriPersiste};
 use crate::reglages::{Page, Reglages, Theme};
 use crate::renommage::ApercuFilm;
 use crate::selecteur::{self, CibleDossier, SelecteurDossier};
 use crate::source_donnees::{
-    ReglagesServices, RequeteRecherche, ResultatRecherche, Retour, SECRET_CLE_TMDB, SerieAffichage,
-    SourceDonnees, SourceFactice, Travail, titre_nettoye,
+    ReglagesServices, RequeteRecherche, ResultatRecherche, Retour, SECRET_CLE_TMDB, SagaAffichage,
+    SerieAffichage, SourceDonnees, SourceFactice, Travail, titre_nettoye,
 };
 use crate::taches::{IssueTache, Repaint, Tache};
 use regex::Regex;
@@ -304,6 +306,12 @@ pub enum Message {
     BasculerNoeudSerie(String, Option<i32>),
     /// Sélectionne un nœud de l'arbre des séries.
     SelectionnerNoeudSerie(NoeudSerie),
+    /// Déploie / replie une saga dans l'arbre des collections.
+    BasculerSaga(String),
+    /// Sélectionne un nœud de l'arbre des collections.
+    SelectionnerNoeudSaga(NoeudSaga),
+    /// Ouvre un dossier, un fichier ou une adresse avec le système (non bloquant).
+    Ouvrir(CibleOuverture),
     // ---- messages publiés par la source de données
     TacheDemarree {
         id: u64,
@@ -342,6 +350,15 @@ pub struct Etat {
     pub series_deployees: BTreeSet<(String, Option<i32>)>,
     /// Nœud sélectionné dans l'arbre des séries.
     pub noeud_serie: Option<NoeudSerie>,
+    /// Sagas (module Collections).
+    pub sagas: Vec<SagaAffichage>,
+    /// Sagas déployées dans l'arbre.
+    pub sagas_deployees: BTreeSet<String>,
+    /// Nœud sélectionné dans l'arbre des sagas.
+    pub noeud_saga: Option<NoeudSaga>,
+    /// Lancement des commandes du système (remplaçable en test) et système cible.
+    pub lanceur: Lanceur,
+    pub systeme: Systeme,
     pub module: Module,
     pub onglet: OngletDetails,
     pub recherche: String,
@@ -388,6 +405,7 @@ pub struct Etat {
     /// Vue dérivée ou séries à recalculer après un lot de messages.
     a_recalculer: bool,
     series_a_recharger: bool,
+    sagas_a_recharger: bool,
 }
 
 impl Etat {
@@ -422,6 +440,7 @@ impl Etat {
         source.brancher(retour.clone());
         let services = source.reglages_services();
         let series = source.series();
+        let sagas = source.sagas();
         let mut etat = Self {
             i18n: I18n::new(reglages.langue),
             reglages,
@@ -432,6 +451,11 @@ impl Etat {
             series,
             series_deployees: BTreeSet::new(),
             noeud_serie: None,
+            sagas,
+            sagas_deployees: BTreeSet::new(),
+            noeud_saga: None,
+            lanceur: ouverture::lanceur_systeme(),
+            systeme: Systeme::courant(),
             module: Module::Films,
             onglet: OngletDetails::Details,
             recherche: String::new(),
@@ -470,6 +494,7 @@ impl Etat {
             prochain_id_requete: 1,
             a_recalculer: false,
             series_a_recharger: false,
+            sagas_a_recharger: false,
         };
         etat.recalculer();
         etat
@@ -605,6 +630,26 @@ impl Etat {
         self.films.iter().find(|f| f.id == id)
     }
 
+    pub fn saga(&self, id: &str) -> Option<&SagaAffichage> {
+        self.sagas.iter().find(|s| s.id == id)
+    }
+
+    /// Film du nœud sélectionné dans l'arbre des sagas.
+    pub fn film_collection(&self) -> Option<&Film> {
+        match &self.noeud_saga {
+            Some(NoeudSaga::Film(_, id)) => self.film(*id),
+            _ => None,
+        }
+    }
+
+    /// Film visé par les actions sur les fichiers selon le module affiché.
+    pub fn film_cible(&self) -> Option<&Film> {
+        match self.module {
+            Module::Collections => self.film_collection(),
+            _ => self.film_principal(),
+        }
+    }
+
     /// Film affiché dans le panneau de détails (le premier de la sélection).
     pub fn film_principal(&self) -> Option<&Film> {
         self.principal.and_then(|id| self.film(id))
@@ -683,6 +728,9 @@ impl Etat {
         }
         if std::mem::take(&mut self.series_a_recharger) {
             self.series = self.source.series();
+        }
+        if std::mem::take(&mut self.sagas_a_recharger) {
+            self.sagas = self.source.sagas();
         }
     }
 
@@ -860,6 +908,19 @@ impl Etat {
                 }
             }
             Message::SelectionnerNoeudSerie(noeud) => self.noeud_serie = Some(noeud),
+            Message::BasculerSaga(id) => {
+                if !self.sagas_deployees.remove(&id) {
+                    self.sagas_deployees.insert(id);
+                }
+            }
+            Message::SelectionnerNoeudSaga(noeud) => {
+                // Un film choisi dans une saga déploie celle-ci (sélection depuis les détails).
+                if let NoeudSaga::Film(id, _) = &noeud {
+                    self.sagas_deployees.insert(id.clone());
+                }
+                self.noeud_saga = Some(noeud);
+            }
+            Message::Ouvrir(cible) => self.ouvrir(cible),
             Message::TacheDemarree {
                 id,
                 nom,
@@ -905,10 +966,12 @@ impl Etat {
                     None => self.films.push(*f),
                 }
                 self.a_recalculer = true;
+                self.sagas_a_recharger = true;
             }
             Message::FilmRetire(id) => {
                 self.films.retain(|f| f.id != id);
                 self.a_recalculer = true;
+                self.sagas_a_recharger = true;
             }
             Message::SeriesModifiees => self.series_a_recharger = true,
         }
@@ -1088,7 +1151,56 @@ impl Etat {
 
     // ---------------------------------------------------------------- commandes
 
+    /// Lance l'ouverture d'une cible dans un fil dédié ; une erreur revient en notification.
+    fn ouvrir(&mut self, cible: CibleOuverture) {
+        if let CibleOuverture::Adresse(u) = &cible
+            && !ouverture::adresse_valide(u)
+        {
+            let texte = self.i18n.t_args("gui.open.badurl", &[("url", u.as_str())]);
+            self.notifier(Niveau::Avertissement, texte);
+            return;
+        }
+        let commande = ouverture::commande(&cible, self.systeme);
+        let (lanceur, retour) = (self.lanceur.clone(), self.retour.clone());
+        let prefixe = self.i18n.t("gui.open.error");
+        let lancement = std::thread::Builder::new()
+            .name("mm-gui-ouverture".into())
+            .spawn(move || {
+                if let Err(e) = lanceur(commande) {
+                    retour.envoyer(Message::Notifier(Niveau::Erreur, format!("{prefixe} {e}")));
+                }
+            });
+        if let Err(e) = lancement {
+            self.notifier(Niveau::Erreur, e.to_string());
+        }
+    }
+
+    /// « Ouvrir le dossier » et « Lire » pour le film visé.
+    fn action_fichier(&mut self, commande: Commande) {
+        let Some(film) = self.film_cible() else {
+            let texte = self.i18n.t("app.nothingselected");
+            self.notifier(Niveau::Avertissement, texte);
+            return;
+        };
+        let cible = if commande == Commande::Lire {
+            match film.chemin_video() {
+                Some(v) => CibleOuverture::Fichier(v),
+                None => {
+                    let texte = self.i18n.t("gui.play.novideo");
+                    self.notifier(Niveau::Avertissement, texte);
+                    return;
+                }
+            }
+        } else {
+            ouverture::cible_dossier(&film.chemin(), Some(&film.nom_fichier))
+        };
+        self.ouvrir(cible);
+    }
+
     fn executer(&mut self, commande: Commande) {
+        if matches!(commande, Commande::OuvrirDossier | Commande::Lire) {
+            return self.action_fichier(commande);
+        }
         if commande.requiert_selection() && self.selection.is_empty() {
             let texte = self.i18n.t("app.nothingselected");
             self.notifier(Niveau::Avertissement, texte);
@@ -2096,6 +2208,135 @@ mod tests {
             }
         }
         assert!(fini(e), "délai dépassé");
+    }
+
+    /// Lanceur factice : mémorise les commandes, échoue sur demande.
+    fn lanceur_espion(echec: bool) -> (Lanceur, Arc<Mutex<Vec<ouverture::CommandeSysteme>>>) {
+        let vues: Arc<Mutex<Vec<ouverture::CommandeSysteme>>> = Arc::default();
+        let copie = vues.clone();
+        let l: Lanceur = Arc::new(move |c| {
+            copie.lock().unwrap().push(c);
+            if echec { Err("refusé".into()) } else { Ok(()) }
+        });
+        (l, vues)
+    }
+
+    #[test]
+    fn ouvrir_le_dossier_et_lire_le_film() {
+        let mut e = Etat::nouveau();
+        let (l, vues) = lanceur_espion(false);
+        e.lanceur = l;
+        e.systeme = Systeme::Windows;
+        let film = e.film_principal().unwrap().clone();
+        e.appliquer(Message::Commande(Commande::OuvrirDossier));
+        e.appliquer(Message::Commande(Commande::Lire));
+        attendre(&mut e, |_| vues.lock().unwrap().len() == 2);
+        let v = vues.lock().unwrap().clone();
+        assert_eq!(v[0].programme, "explorer");
+        assert!(v[0].bruts);
+        assert!(v[0].arguments[0].starts_with("/select,\""));
+        assert!(v[0].arguments[0].ends_with(&format!("{}\"", film.nom_fichier)));
+        assert_eq!(v[1].arguments.len(), 1);
+        assert!(v[1].arguments[0].ends_with(&film.nom_fichier));
+        assert!(!v[1].bruts);
+        // Adresse refusée sans lancement ; film sans vidéo : avertissement.
+        e.appliquer(Message::Ouvrir(CibleOuverture::Adresse(
+            "javascript:x".into(),
+        )));
+        assert_eq!(
+            e.notifications.last().unwrap().niveau,
+            Niveau::Avertissement
+        );
+        let id = film.id;
+        if let Some(f) = e.films.iter_mut().find(|f| f.id == id) {
+            f.nom_fichier.clear();
+        }
+        e.appliquer(Message::Commande(Commande::Lire));
+        assert!(e.notifications.last().unwrap().texte.contains("vidéo"));
+        assert_eq!(vues.lock().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn echec_d_ouverture_notifie() {
+        let mut e = Etat::nouveau();
+        let (l, _) = lanceur_espion(true);
+        e.lanceur = l;
+        e.appliquer(Message::Ouvrir(CibleOuverture::Fichier("/x.mkv".into())));
+        attendre(&mut e, |e| {
+            e.notifications
+                .iter()
+                .any(|n| n.niveau == Niveau::Erreur && n.texte.contains("refusé"))
+        });
+    }
+
+    #[test]
+    fn collections_selection_et_film_cible() {
+        let mut e = Etat::nouveau();
+        assert_eq!(e.sagas.len(), 2);
+        let dune = e.saga("demo-saga-dune").unwrap().clone();
+        assert_eq!(dune.films.len(), 2);
+        e.appliquer(Message::ChoisirModule(Module::Collections));
+        assert!(e.film_cible().is_none());
+        e.appliquer(Message::SelectionnerNoeudSaga(NoeudSaga::Film(
+            dune.id.clone(),
+            3,
+        )));
+        assert!(e.sagas_deployees.contains(&dune.id));
+        assert_eq!(e.film_cible().map(|f| f.id), Some(3));
+        e.appliquer(Message::BasculerSaga(dune.id.clone()));
+        assert!(!e.sagas_deployees.contains(&dune.id));
+        e.appliquer(Message::ChoisirModule(Module::Films));
+        assert_eq!(e.film_cible().map(|f| f.id), e.principal);
+    }
+
+    #[test]
+    fn tri_des_colonnes_taille_chemin_date_et_format() {
+        let mut e = Etat::nouveau();
+        let colonne_triee = |e: &mut Etat, c: Colonne| -> Vec<u64> {
+            e.appliquer(Message::Trier {
+                colonne: c,
+                additif: false,
+            });
+            e.visibles.iter().map(|&i| e.films[i].id).collect()
+        };
+        for c in [
+            Colonne::TailleFichier,
+            Colonne::Chemin,
+            Colonne::DateAjout,
+            Colonne::FormatVideo,
+        ] {
+            let ids = colonne_triee(&mut e, c);
+            let films: Vec<&Film> = ids.iter().map(|id| e.film(*id).unwrap()).collect();
+            assert!(
+                films.windows(2).all(|w| c.comparer(w[0], w[1]).is_le()),
+                "{c:?} croissant"
+            );
+            // Second clic : ordre décroissant.
+            let ids = colonne_triee(&mut e, c);
+            let films: Vec<&Film> = ids.iter().map(|id| e.film(*id).unwrap()).collect();
+            assert!(
+                films.windows(2).all(|w| c.comparer(w[0], w[1]).is_ge()),
+                "{c:?} décroissant"
+            );
+        }
+        // Taille numérique (et non lexicographique) ; chemin sans casse ni accents.
+        let a = Film {
+            taille_octets: 9_000_000_000,
+            source: "/films".into(),
+            dossier: "évadés".into(),
+            date_ajout: "2026-01-02 10:00".into(),
+            ..Film::default()
+        };
+        let b = Film {
+            taille_octets: 10_000_000_000,
+            source: "/films".into(),
+            dossier: "Fargo".into(),
+            date_ajout: "2026-11-01 09:00".into(),
+            ..Film::default()
+        };
+        assert!(Colonne::TailleFichier.comparer(&a, &b).is_lt());
+        assert!(Colonne::Chemin.comparer(&a, &b).is_lt());
+        assert!(Colonne::DateAjout.comparer(&a, &b).is_lt());
     }
 
     #[test]

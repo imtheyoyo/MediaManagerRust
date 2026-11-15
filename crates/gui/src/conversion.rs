@@ -1,10 +1,10 @@
 //! Conversions entre le modèle des services (`mediamanager_core`, `mediamanager_store`) et les
 //! structures d'affichage de l'interface. Fonctions pures, testées sans interface.
 
-use crate::modele::{FichierFilm, Film, TypeFichier};
+use crate::modele::{BandeAnnonceFilm, FichierFilm, Film, TypeFichier};
 use crate::renommage::{ApercuFilm, LigneFichier};
 use crate::source_donnees::{
-    EpisodeAffichage, GenreImage, ReglagesServices, SaisonAffichage, SerieAffichage,
+    EpisodeAffichage, GenreImage, ReglagesServices, SagaAffichage, SaisonAffichage, SerieAffichage,
 };
 use mediamanager_core::modele::commun::cles_id;
 use mediamanager_core::modele::{
@@ -165,6 +165,7 @@ pub fn film(f: &cm::Film, id: u64, ctx: &ContexteConversion) -> Film {
         duree_min: duree,
         genres: f.genres.clone(),
         realisateurs: f.realisateurs().iter().map(|p| p.nom.clone()).collect(),
+        scenaristes: f.scenaristes().iter().map(|p| p.nom.clone()).collect(),
         pays: liste(&f.pays, '/'),
         production: liste(&f.societe_production, '/'),
         slogan: f.slogan.clone(),
@@ -203,29 +204,84 @@ pub fn film(f: &cm::Film, id: u64, ctx: &ContexteConversion) -> Film {
         fichiers: f
             .fichiers
             .iter()
-            .map(|x| FichierFilm {
-                type_fichier: type_fichier(x.type_fichier),
-                suffixe: suffixe(&x.nom, &base_video),
-                nom: x.nom.clone(),
-                taille_octets: x.taille,
-            })
+            .map(|x| fichier_affiche(x, &base_video))
             .collect(),
         bandes_annonces: f
             .bandes_annonces
             .iter()
-            .map(|b| {
-                let details: Vec<&str> = [b.fournisseur.as_str(), b.qualite.as_str()]
-                    .into_iter()
-                    .filter(|x| !x.is_empty())
-                    .collect();
-                let nom = if b.nom.is_empty() { &b.url } else { &b.nom };
-                if details.is_empty() {
-                    nom.clone()
-                } else {
-                    format!("{nom} ({})", details.join(", "))
-                }
+            .map(|b| BandeAnnonceFilm {
+                nom: b.nom.clone(),
+                source: b.fournisseur.clone(),
+                qualite: b.qualite.clone(),
+                url: b.url.clone(),
             })
             .collect(),
+    }
+}
+
+/// Fichier du modèle → ligne de l'onglet « Fichiers médias » (colonnes de flux vides si
+/// l'analyse n'a pas eu lieu).
+pub fn fichier_affiche(x: &FichierMedia, base_video: &str) -> FichierFilm {
+    let v = &x.video;
+    let audio = x
+        .flux_audio
+        .iter()
+        .map(|a| {
+            let mut t = a.codec.to_uppercase();
+            if a.canaux > 0 {
+                t.push_str(&format!(" {}ch", a.canaux));
+            }
+            if !a.langue.is_empty() {
+                t.push(' ');
+                t.push_str(&a.langue);
+            }
+            t
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    let sous_titres = x
+        .sous_titres
+        .iter()
+        .map(|s| {
+            if s.langue.is_empty() {
+                s.codec.clone()
+            } else {
+                s.langue.clone()
+            }
+        })
+        .filter(|s| !s.is_empty())
+        .collect::<Vec<_>>()
+        .join(", ");
+    FichierFilm {
+        type_fichier: type_fichier(x.type_fichier),
+        suffixe: suffixe(&x.nom, base_video),
+        nom: x.nom.clone(),
+        taille_octets: x.taille,
+        chemin: texte_chemin(&x.chemin_complet()),
+        codec: v.codec.to_uppercase(),
+        resolution: if v.largeur > 0 && v.hauteur > 0 {
+            format!("{}x{}", v.largeur, v.hauteur)
+        } else {
+            String::new()
+        },
+        audio,
+        sous_titres,
+    }
+}
+
+/// Saga du modèle → saga affichée (`id_de` : identifiant affiché d'un film, `None` si le film
+/// est inconnu de la bibliothèque).
+pub fn saga(s: &cm::Saga, id_de: impl Fn(&str) -> Option<u64>) -> SagaAffichage {
+    let images = chemins_images(&s.fichiers);
+    SagaAffichage {
+        id: s.id.clone(),
+        titre: s.titre.clone(),
+        titre_original: s.titre_original.clone(),
+        resume: s.resume.clone(),
+        films: s.films.iter().filter_map(|id| id_de(id)).collect(),
+        affiche: images[GenreImage::Affiche.rang()].clone(),
+        fanart: images[GenreImage::Fanart.rang()].clone(),
+        banniere: images[GenreImage::Banniere.rang()].clone(),
     }
 }
 
@@ -549,7 +605,13 @@ mod tests {
         assert_eq!(g.date_ajout, "1970-01-02 00:00");
         assert!(g.nouveau && g.metadonnees_ok && g.images_ok && g.sous_titres);
         assert!(g.bande_annonce);
-        assert_eq!(g.bandes_annonces, ["Officielle (youtube)"]);
+        assert_eq!(g.bandes_annonces[0].libelle(), "Officielle (youtube)");
+        let video = &g.fichiers[0];
+        assert_eq!(video.codec, "H264");
+        assert!(video.chemin.ends_with("Alien.mkv"));
+        assert_eq!(g.chemin_video(), Some(PathBuf::from(&video.chemin)));
+        // Analyse des flux absente : colonnes vides.
+        assert!(g.fichiers[1].codec.is_empty() && g.fichiers[1].resolution.is_empty());
         let st = g
             .fichiers
             .iter()
@@ -622,6 +684,24 @@ mod tests {
         assert_eq!(a.saisons[0].episodes[0].titre, "S1E1");
         assert_eq!(a.saisons[1].numero, 2);
         assert_eq!(a.nombre_episodes(), 3);
+    }
+
+    #[test]
+    fn conversion_d_une_saga() {
+        let s = cm::Saga {
+            id: "s".into(),
+            titre: "Alien".into(),
+            films: vec!["a".into(), "inconnu".into(), "b".into()],
+            ..cm::Saga::default()
+        };
+        let a = saga(&s, |id| match id {
+            "a" => Some(1),
+            "b" => Some(2),
+            _ => None,
+        });
+        assert_eq!(a.films, [1, 2]);
+        assert_eq!(a.titre, "Alien");
+        assert!(a.affiche.is_none());
     }
 
     #[test]

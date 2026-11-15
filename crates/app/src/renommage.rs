@@ -30,6 +30,15 @@ pub struct RapportRenommage {
     pub verrouilles: Vec<String>,
 }
 
+/// Aperçu d'un renommage : plan (aucune écriture) et entités verrouillées
+/// exclues de la sélection.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct ApercuRenommage {
+    pub plan: PlanRenommage,
+    /// Identifiants des entités verrouillées, exclues du plan.
+    pub verrouilles: Vec<String>,
+}
+
 /// Profil de renommage des films construit depuis les réglages.
 pub fn profil_renommage_film(r: &Reglages, artwork: &ConfigArtwork) -> ProfilRenommageFilm {
     let rr = &r.renommeur;
@@ -74,15 +83,18 @@ fn charger(n: &Noyau, ids: &[String]) -> Resultat<(Vec<Film>, Vec<String>, Vec<S
 
 /// Aperçu : plan de renommage d'une sélection (aucune écriture).
 pub(crate) fn apercu_films(n: &Noyau, ids: &[String]) -> Resultat<PlanRenommage> {
-    let (films, _, sagas) = charger(n, ids)?;
+    Ok(apercu_films_detaille(n, ids)?.plan)
+}
+
+/// Aperçu détaillé : plan et films verrouillés exclus.
+pub(crate) fn apercu_films_detaille(n: &Noyau, ids: &[String]) -> Resultat<ApercuRenommage> {
+    let (films, verrouilles, sagas) = charger(n, ids)?;
     let profil = profil_renommage_film(&n.reglages(), &n.config.artwork);
     let refs: Vec<&Film> = films.iter().collect();
-    Ok(planifier_films(
-        &refs,
-        &sagas,
-        &profil,
-        &SondeSystemeFichiers,
-    ))
+    Ok(ApercuRenommage {
+        plan: planifier_films(&refs, &sagas, &profil, &SondeSystemeFichiers),
+        verrouilles,
+    })
 }
 
 /// Tâche (ou étape) : renommage d'une sélection.

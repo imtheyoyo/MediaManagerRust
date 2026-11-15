@@ -13,7 +13,7 @@ use crate::modele::Film;
 use crate::renommage::ApercuFilm;
 use crate::source_donnees::{
     GenreImage, ReglagesServices, RequeteRecherche, ResultatRecherche, Retour, SECRET_CLE_TMDB,
-    SerieAffichage, SourceDonnees, Travail,
+    SagaAffichage, SerieAffichage, SourceDonnees, Travail,
 };
 use crate::taches::{IssueTache, compteur};
 use mediamanager_app::{
@@ -303,6 +303,19 @@ impl SourceDonnees for SourceApplication {
         self.avec_app(|app| app.series().map_err(|e| e.to_string()))
             .map(|v| v.iter().map(conversion::serie).collect())
             .unwrap_or_default()
+    }
+
+    fn sagas(&self) -> Vec<SagaAffichage> {
+        let i = &self.interne;
+        let sagas = self
+            .avec_app(|app| app.sagas().map_err(|e| e.to_string()))
+            .unwrap_or_default();
+        // Seuls les films déjà connus de l'interface sont rattachés (identifiants affichés).
+        let c = verrou(&i.ids);
+        sagas
+            .iter()
+            .map(|s| conversion::saga(s, |id| c.vers_affichage.get(id).copied()))
+            .collect()
     }
 
     fn chemin_image(&self, film: &Film, genre: GenreImage) -> Option<PathBuf> {

@@ -2,6 +2,7 @@
 //! images, persistance de l'interface, branchement sur les services.
 
 pub mod app;
+pub mod collections;
 pub mod commandes;
 pub mod conversion;
 pub mod dialogues;
@@ -13,6 +14,7 @@ pub mod icones;
 pub mod images;
 pub mod mise_a_jour;
 pub mod modele;
+pub mod ouverture;
 pub mod persistance;
 pub mod polices;
 pub mod reglages;

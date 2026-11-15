@@ -373,7 +373,7 @@ pub fn afficher_details(
                 .auto_shrink([false, false])
                 .show(ui, |ui| {
                     if actif == 1 {
-                        fichiers(ui, etat, serie, noeud);
+                        fichiers(ui, etat, serie, noeud, sortie);
                         return;
                     }
                     ui.horizontal_top(|ui| {
@@ -385,13 +385,19 @@ pub fn afficher_details(
                         ];
                         colonne_images(ui, etat, images, chemins, sortie);
                         ui.add_space(14.0);
-                        ui.vertical(|ui| infos(ui, etat, serie, noeud));
+                        ui.vertical(|ui| infos(ui, etat, serie, noeud, sortie));
                     });
                 });
         });
 }
 
-fn infos(ui: &mut egui::Ui, etat: &Etat, serie: &SerieAffichage, noeud: &NoeudSerie) {
+fn infos(
+    ui: &mut egui::Ui,
+    etat: &Etat,
+    serie: &SerieAffichage,
+    noeud: &NoeudSerie,
+    sortie: &mut Sortie,
+) {
     let i = &etat.i18n;
     let saison = |n: i32| serie.saisons.iter().find(|s| s.numero == n);
     let libelles = vec![
@@ -420,7 +426,7 @@ fn infos(ui: &mut egui::Ui, etat: &Etat, serie: &SerieAffichage, noeud: &NoeudSe
                     ligne(ui, &libelles[1], &serie.saisons.len().to_string());
                     ligne(ui, &libelles[2], &serie.nombre_episodes().to_string());
                     ui.label(RichText::new(&libelles[4]).strong());
-                    lien_chemin(ui, &serie.chemin);
+                    lien_chemin(ui, &serie.chemin, sortie);
                     ui.end_row();
                 });
         }
@@ -457,10 +463,16 @@ fn infos(ui: &mut egui::Ui, etat: &Etat, serie: &SerieAffichage, noeud: &NoeudSe
     }
 }
 
-fn fichiers(ui: &mut egui::Ui, etat: &Etat, serie: &SerieAffichage, noeud: &NoeudSerie) {
+fn fichiers(
+    ui: &mut egui::Ui,
+    etat: &Etat,
+    serie: &SerieAffichage,
+    noeud: &NoeudSerie,
+    sortie: &mut Sortie,
+) {
     ui.horizontal(|ui| {
         ui.label(RichText::new(etat.i18n.t("metatag.path")).strong());
-        lien_chemin(ui, &serie.chemin);
+        lien_chemin(ui, &serie.chemin, sortie);
     });
     ui.separator();
     for s in &serie.saisons {

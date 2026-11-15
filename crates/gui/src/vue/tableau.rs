@@ -7,7 +7,7 @@ use super::details::bandeau_onglets;
 use super::{Sortie, menus};
 use crate::commandes::MENU_CONTEXTUEL;
 use crate::etat::{Etat, FiltreRapide, Message};
-use crate::icones::{self, Icone, cellule_etat, etat_film, icone_entete};
+use crate::icones::{self, EtatCellule, Icone, cellule_etat, etat_film, icone_entete};
 use crate::modele::{Colonne, Film, Ordre, gigaoctets};
 use crate::polices;
 use crate::theme::{BLEU, FILET_TABLEAU, ICONE_REPOS, ROUGE};
@@ -206,9 +206,8 @@ fn table(ui: &mut egui::Ui, etat: &Etat, sortie: &mut Sortie) {
         let c = if col.est_booleenne() {
             Column::exact(LARGEUR_ETAT)
         } else if *col == Colonne::Titre {
-            Column::initial(etat.largeur_colonne(*col))
-                .at_least(120.0)
-                .clip(true)
+            // Le titre absorbe l'espace libre du tableau (pas de zone vide à droite).
+            Column::remainder().at_least(120.0).clip(true)
         } else {
             Column::initial(etat.largeur_colonne(*col))
                 .at_least(40.0)
@@ -232,7 +231,9 @@ fn table(ui: &mut egui::Ui, etat: &Etat, sortie: &mut Sortie) {
                     .iter()
                     .zip(body.widths())
                     .filter(|(c, w)| {
-                        !c.est_booleenne() && (etat.largeur_colonne(**c) - **w).abs() > 0.5
+                        !c.est_booleenne()
+                            && **c != Colonne::Titre
+                            && (etat.largeur_colonne(**c) - **w).abs() > 0.5
                     })
                     .map(|(c, w)| (*c, *w))
                     .collect();
@@ -344,10 +345,26 @@ fn entete(ui: &mut egui::Ui, etat: &Etat, col: Colonne, sortie: &mut Sortie) {
     });
 }
 
+/// Info-bulle d'une cellule d'état (`None` pour une cellule vide).
+pub fn infobulle_etat(etat: &Etat, col: Colonne, e: EtatCellule) -> Option<String> {
+    let nom = etat.i18n.t(col.cle_i18n());
+    let cle = match e {
+        EtatCellule::Oui => "gui.state.yes",
+        EtatCellule::Non => "gui.state.no",
+        EtatCellule::Attention => "gui.state.partial",
+        EtatCellule::Nouveau => return Some(etat.i18n.t("gui.state.new")),
+        EtatCellule::Vide => return None,
+    };
+    Some(etat.i18n.t_args(cle, &[("column", nom.as_str())]))
+}
+
 fn cellule(ui: &mut egui::Ui, etat: &Etat, film: &Film, col: Colonne) {
     if let Some(e) = etat_film(film, col) {
         filets(ui);
-        cellule_etat(ui, e);
+        let reponse = cellule_etat(ui, e);
+        if let Some(texte) = infobulle_etat(etat, col, e) {
+            reponse.on_hover_text(texte);
+        }
         return;
     }
     let i = &etat.i18n;
@@ -410,7 +427,9 @@ fn cellule(ui: &mut egui::Ui, etat: &Etat, film: &Film, col: Colonne) {
             ui.add(Label::new(&film.audio).truncate());
         }
         Colonne::Chemin => {
-            ui.add(Label::new(film.chemin()).truncate());
+            let chemin = film.chemin();
+            ui.add(Label::new(&chemin).truncate())
+                .on_hover_text(&chemin);
         }
         Colonne::NomFichier => {
             ui.add(Label::new(&film.nom_fichier).truncate());

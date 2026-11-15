@@ -112,7 +112,7 @@ pub fn lire_marques(s: &Stockage, cle: &str) -> Resultat<Vec<String>> {
         .unwrap_or_default())
 }
 
-fn ecrire_marques(s: &mut Stockage, cle: &str, ids: &BTreeSet<String>) -> Resultat<()> {
+pub(crate) fn ecrire_marques(s: &mut Stockage, cle: &str, ids: &BTreeSet<String>) -> Resultat<()> {
     let v: Vec<&String> = ids.iter().collect();
     let json = serde_json::to_string(&v).unwrap_or_else(|_| "[]".into());
     s.bibliotheque.ecrire_valeur(cle, &json)?;
@@ -131,7 +131,7 @@ pub fn source_de<'a>(chemin: &Path, sources: &'a [PathBuf]) -> Option<&'a PathBu
         .max_by_key(|s| s.components().count())
 }
 
-fn options_scan(
+pub(crate) fn options_scan(
     ignores: &[String],
     nomedia: bool,
     mots: &[String],
@@ -178,7 +178,7 @@ fn fusionner_fichiers(existants: &[FichierMedia], scannes: &[FichierMedia]) -> V
     v
 }
 
-fn enregistrer_par_lots<E: mediamanager_store::Entite>(
+pub(crate) fn enregistrer_par_lots<E: mediamanager_store::Entite>(
     s: &mut Stockage,
     entites: &mut [E],
     supprimer: &[String],
@@ -433,7 +433,7 @@ pub(crate) fn mettre_a_jour_films(n: &Noyau, ctx: &ContexteTache) -> Resultat<Ra
     Ok(rapport)
 }
 
-fn retirer_des_sagas(s: &mut Stockage, supprimes: &[String]) -> Resultat<()> {
+pub(crate) fn retirer_des_sagas(s: &mut Stockage, supprimes: &[String]) -> Resultat<()> {
     let mut sagas = s.bibliotheque.lister::<Saga>()?;
     let mut modifiees: Vec<Saga> = Vec::new();
     for saga in sagas.iter_mut() {

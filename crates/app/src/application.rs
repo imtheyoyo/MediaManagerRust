@@ -5,10 +5,10 @@ use std::sync::mpsc::Receiver;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
-use mediamanager_core::modele::{Film, Saga, Serie};
-use mediamanager_core::nfo::NommageNfoFilm;
+use mediamanager_core::modele::{Episode, Film, Saga, Serie};
+use mediamanager_core::nfo::{NommageNfoFilm, NommageNfoSaison};
 use mediamanager_core::renommage::PlanRenommage;
-use mediamanager_scrapers::ResultatRecherche;
+use mediamanager_scrapers::{PartieCollection, ResultatRecherche};
 use mediamanager_store::reglages::noms_secrets;
 use mediamanager_store::{
     CoffreSecrets, DossiersApplication, RapportDemarrage, Reglages, Stockage,
@@ -16,11 +16,15 @@ use mediamanager_store::{
 
 use crate::artwork::ConfigArtwork;
 use crate::conversion::ConfigMetadonnees;
+use crate::conversion_serie::ConfigSerie;
 use crate::erreur::{ErreurApp, Resultat};
 use crate::evenements::{Diffuseur, Evenement};
+use crate::gestion_films::{self, RapportRetrait};
 use crate::journal::{self, OptionsJournal};
 use crate::metadonnees::{self, RapportScrap, RequeteFilm};
+use crate::renommage::ApercuRenommage;
 use crate::renommage::{self, RapportRenommage};
+use crate::series::{self, RequeteSerie};
 use crate::sources::{self, OptionsMiseAJour, RapportMiseAJour};
 use crate::taches::{GestionnaireTaches, PoigneeTache, TypeTache};
 
@@ -37,6 +41,8 @@ pub struct ConfigServices {
     pub nommage_nfo_film: Vec<NommageNfoFilm>,
     /// Horodatage dans l'en-tête des NFO (faux : sorties reproductibles).
     pub horodatage_nfo: bool,
+    /// Nom des NFO de saisons ; `None` (défaut) = aucun NFO de saison.
+    pub nommage_nfo_saison: Option<NommageNfoSaison>,
 }
 
 impl Default for ConfigServices {
@@ -48,6 +54,7 @@ impl Default for ConfigServices {
             artwork: ConfigArtwork::default(),
             nommage_nfo_film: vec![NommageNfoFilm::NomFichier],
             horodatage_nfo: true,
+            nommage_nfo_saison: None,
         }
     }
 }
@@ -381,6 +388,187 @@ impl Application {
             "Renommage des films",
             TypeTache::Principale,
             move |n, ctx| renommage::renommer_films(n, ctx, &ids),
+        )
+    }
+
+    // -- Films : gestion ------------------------------------------------------
+
+    /// Recherche des candidats pour un film dans une langue donnée
+    /// (`None` = langue des réglages).
+    pub fn rechercher_film_dans_langue(
+        &self,
+        id_film: &str,
+        requete: Option<RequeteFilm>,
+        langue: Option<String>,
+    ) -> PoigneeTache<Vec<ResultatRecherche>> {
+        let id = id_film.to_string();
+        self.lancer("Recherche de film", TypeTache::Fond, move |n, ctx| {
+            metadonnees::rechercher_dans_langue(n, ctx, &id, requete, langue)
+        })
+    }
+
+    /// Aperçu du renommage avec la liste des films verrouillés exclus.
+    pub fn apercu_renommage_films_detaille(&self, ids: &[String]) -> Resultat<ApercuRenommage> {
+        renommage::apercu_films_detaille(&self.noyau, ids)
+    }
+
+    /// Mise à jour limitée aux dossiers des films choisis (tâche principale).
+    pub fn mettre_a_jour_selection_films(
+        &self,
+        ids: Vec<String>,
+    ) -> PoigneeTache<RapportMiseAJour> {
+        self.lancer(
+            "Mise à jour de la sélection",
+            TypeTache::Principale,
+            move |n, ctx| gestion_films::mettre_a_jour_selection(n, ctx, &ids),
+        )
+    }
+
+    /// Films de la collection du fournisseur absents de la bibliothèque
+    /// (tâche de fond).
+    pub fn films_manquants_saga(&self, id_saga: &str) -> PoigneeTache<Vec<PartieCollection>> {
+        let id = id_saga.to_string();
+        self.lancer(
+            "Films manquants de la saga",
+            TypeTache::Fond,
+            move |n, ctx| gestion_films::films_manquants_saga(n, ctx, &id),
+        )
+    }
+
+    /// Enregistre un film modifié (édition manuelle) ; publie `FilmModifie`
+    /// (ou `FilmAjoute` s'il n'avait pas encore d'identifiant).
+    pub fn enregistrer_film(&self, mut film: Film) -> Resultat<Film> {
+        let nouveau = film.id.is_empty();
+        self.noyau.verrou().bibliotheque.enregistrer(&mut film)?;
+        let id = film.id.clone();
+        self.diffuseur.publier(&if nouveau {
+            Evenement::FilmAjoute { id }
+        } else {
+            Evenement::FilmModifie { id }
+        });
+        Ok(film)
+    }
+
+    /// Retire des films de la base (tâche principale). Avec
+    /// `supprimer_fichiers`, leurs fichiers vont dans `<source>/.corbeille`
+    /// (jamais de suppression définitive).
+    pub fn retirer_films(
+        &self,
+        ids: Vec<String>,
+        supprimer_fichiers: bool,
+    ) -> PoigneeTache<RapportRetrait> {
+        self.lancer("Retrait de films", TypeTache::Principale, move |n, ctx| {
+            gestion_films::retirer_films(n, ctx, &ids, supprimer_fichiers)
+        })
+    }
+
+    /// Annule le dernier renommage d'un film (tâche principale).
+    pub fn annuler_renommage_film(&self, id_film: &str) -> PoigneeTache<Film> {
+        let id = id_film.to_string();
+        self.lancer(
+            "Annulation du renommage",
+            TypeTache::Principale,
+            move |n, ctx| gestion_films::annuler_renommage(n, ctx, &id),
+        )
+    }
+
+    // -- Séries ---------------------------------------------------------------
+
+    /// Série par identifiant interne.
+    pub fn serie(&self, id: &str) -> Resultat<Option<Serie>> {
+        Ok(self.noyau.verrou().bibliotheque.obtenir::<Serie>(id)?)
+    }
+
+    /// Enregistre une série modifiée ; publie `SerieModifiee` (ou
+    /// `SerieAjoutee`).
+    pub fn enregistrer_serie(&self, mut serie: Serie) -> Resultat<Serie> {
+        let nouvelle = serie.id.is_empty();
+        self.noyau.verrou().bibliotheque.enregistrer(&mut serie)?;
+        let id = serie.id.clone();
+        self.diffuseur.publier(&if nouvelle {
+            Evenement::SerieAjoutee { id }
+        } else {
+            Evenement::SerieModifiee { id }
+        });
+        Ok(serie)
+    }
+
+    /// Épisodes à afficher : réels, plus les manquants autorisés par les
+    /// réglages (épisodes manquants, spéciaux, non diffusés).
+    pub fn episodes_a_afficher(&self, id_serie: &str) -> Resultat<Vec<Episode>> {
+        let serie = series::charger_serie(&self.noyau, id_serie)?;
+        Ok(series::episodes_affiches(&serie, &self.reglages()))
+    }
+
+    /// Épisodes scrapés sans fichier local.
+    pub fn episodes_manquants(&self, id_serie: &str) -> Resultat<Vec<Episode>> {
+        let serie = series::charger_serie(&self.noyau, id_serie)?;
+        Ok(series::episodes_absents(&serie))
+    }
+
+    /// Recherche des candidats pour une série (tâche de fond) : résultats
+    /// triés par score décroissant.
+    pub fn rechercher_serie(
+        &self,
+        id_serie: &str,
+        requete: Option<RequeteSerie>,
+    ) -> PoigneeTache<Vec<ResultatRecherche>> {
+        let id = id_serie.to_string();
+        self.lancer("Recherche de série", TypeTache::Fond, move |n, ctx| {
+            series::rechercher(n, ctx, &id, requete)
+        })
+    }
+
+    /// Applique le résultat choisi : série, épisodes, images, NFO, base
+    /// (tâche principale). Renvoie la série mise à jour.
+    pub fn appliquer_resultat_serie(
+        &self,
+        id_serie: &str,
+        choix: ResultatRecherche,
+        config: ConfigSerie,
+    ) -> PoigneeTache<Serie> {
+        let id = id_serie.to_string();
+        self.lancer(
+            "Récupération des métadonnées de la série",
+            TypeTache::Principale,
+            move |n, ctx| series::appliquer_choix(n, ctx, &id, &choix, &config),
+        )
+    }
+
+    /// Récupération automatique (seuil fixe des séries) pour une sélection
+    /// (tâche principale).
+    pub fn scraper_series(
+        &self,
+        ids: Vec<String>,
+        config: ConfigSerie,
+    ) -> PoigneeTache<RapportScrap> {
+        self.lancer(
+            "Récupération automatique des métadonnées des séries",
+            TypeTache::Principale,
+            move |n, ctx| series::scraper_automatiquement(n, ctx, &ids, &config),
+        )
+    }
+
+    /// Réécrit les NFO (série, épisodes, saisons) d'une sélection.
+    pub fn ecrire_nfo_series(&self, ids: Vec<String>) -> PoigneeTache<usize> {
+        self.lancer(
+            "Écriture des NFO des séries",
+            TypeTache::Principale,
+            move |n, ctx| series::reecrire_nfo(n, ctx, &ids),
+        )
+    }
+
+    /// Aperçu du renommage d'une sélection de séries (rien n'est écrit).
+    pub fn apercu_renommage_series(&self, ids: &[String]) -> Resultat<ApercuRenommage> {
+        crate::renommage_serie::apercu_series(&self.noyau, ids)
+    }
+
+    /// Renomme une sélection de séries et leurs épisodes (tâche principale).
+    pub fn renommer_series(&self, ids: Vec<String>) -> PoigneeTache<RapportRenommage> {
+        self.lancer(
+            "Renommage des séries",
+            TypeTache::Principale,
+            move |n, ctx| crate::renommage_serie::renommer_series(n, ctx, &ids),
         )
     }
 }

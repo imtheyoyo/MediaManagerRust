@@ -4,6 +4,7 @@ pub mod barre_etat;
 pub mod barre_menus;
 pub mod barre_modules;
 pub mod barre_outils;
+pub mod collections;
 pub mod details;
 pub mod dialogue_assistant;
 pub mod dialogue_confirmation;

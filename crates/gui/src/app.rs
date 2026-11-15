@@ -10,7 +10,8 @@ use crate::source_donnees::SourceDonnees;
 use crate::taches::Repaint;
 use crate::theme;
 use crate::vue::{
-    self, Sortie, barre_etat, barre_menus, barre_modules, barre_outils, details, series, tableau,
+    self, Sortie, barre_etat, barre_menus, barre_modules, barre_outils, collections, details,
+    series, tableau,
 };
 use eframe::egui::{
     self, CentralPanel, CursorIcon, Event, Frame, Id, Key, Margin, Rect, Sense, UiBuilder,
@@ -289,16 +290,6 @@ impl Application {
             .show(ui, |ui| {
                 let zone = ui.available_rect_before_wrap();
                 ui.allocate_rect(zone, Sense::hover());
-                if self.etat.module == Module::Collections {
-                    let nom = self.etat.i18n.t(Module::Collections.cle());
-                    let mut enfant = ui.new_child(UiBuilder::new().max_rect(zone.shrink(24.0)));
-                    enfant.label(
-                        self.etat
-                            .i18n
-                            .t_args("gui.module.placeholder", &[("module", nom.as_str())]),
-                    );
-                    return;
-                }
                 let largeur = separateur(ui, &self.etat, zone, &mut sortie);
                 let (liste, _, details) = decouper(zone, largeur);
                 for (rect, est_liste) in [(liste, true), (details, false)] {
@@ -315,6 +306,15 @@ impl Application {
                             series::afficher(&mut enfant, &self.etat, &mut sortie)
                         }
                         (Module::Series, false) => series::afficher_details(
+                            &mut enfant,
+                            &self.etat,
+                            &mut self.images,
+                            &mut sortie,
+                        ),
+                        (Module::Collections, true) => {
+                            collections::afficher(&mut enfant, &self.etat, &mut sortie)
+                        }
+                        (Module::Collections, false) => collections::afficher_details(
                             &mut enfant,
                             &self.etat,
                             &mut self.images,
@@ -462,7 +462,30 @@ mod tests {
             Message::SelectionnerNoeudSerie(crate::etat::NoeudSerie::Serie("inexistante".into())),
             Message::ChoisirOnglet(crate::etat::OngletDetails::FichiersMedias),
             Message::ChoisirModule(crate::etat::Module::Collections),
+            Message::SelectionnerNoeudSaga(crate::collections::NoeudSaga::Saga(
+                "demo-saga-dune".into(),
+            )),
+            Message::BasculerSaga("demo-saga-dune".into()),
+            Message::SelectionnerNoeudSaga(crate::collections::NoeudSaga::Film(
+                "demo-saga-dune".into(),
+                3,
+            )),
+            Message::ChoisirOnglet(crate::etat::OngletDetails::Distribution),
+            Message::SelectionnerNoeudSaga(crate::collections::NoeudSaga::Saga(
+                "inexistante".into(),
+            )),
             Message::ChoisirModule(crate::etat::Module::Films),
+            Message::ChoisirOnglet(crate::etat::OngletDetails::Distribution),
+            Message::ChoisirOnglet(crate::etat::OngletDetails::FichiersMedias),
+            Message::ChoisirOnglet(crate::etat::OngletDetails::BandeAnnonce),
+            Message::ColonneVisible(crate::modele::Colonne::TailleFichier, true),
+            Message::ColonneVisible(crate::modele::Colonne::Chemin, true),
+            Message::ColonneVisible(crate::modele::Colonne::DateAjout, true),
+            Message::ColonneVisible(crate::modele::Colonne::FormatVideo, true),
+            Message::Trier {
+                colonne: crate::modele::Colonne::TailleFichier,
+                additif: false,
+            },
             Message::ChoisirOnglet(crate::etat::OngletDetails::Illustration),
             Message::OuvrirVisionneuse(dossier.join("absente.png")),
         ]);

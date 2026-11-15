@@ -5,10 +5,11 @@
 use super::{Sortie, image_ou_emplacement};
 use crate::etat::{Etat, Message, OngletDetails};
 use crate::images::GestionnaireImages;
-use crate::modele::{Film, gigaoctets};
+use crate::modele::{Film, TypeFichier, gigaoctets};
+use crate::ouverture::{self, CibleOuverture};
 use crate::polices;
 use crate::source_donnees::GenreImage;
-use crate::theme::{FOND_BARRES, ONGLET_ACTIF, fond_alterne};
+use crate::theme::{FOND_BARRES, LIEN, ONGLET_ACTIF, fond_alterne};
 use eframe::egui::{
     self, Align, Align2, Color32, CornerRadius, FontId, Id, Label, Layout, Margin, Rect, RichText,
     ScrollArea, Sense, Shape, Stroke, Vec2, pos2, vec2,
@@ -95,6 +96,17 @@ pub fn afficher(
     images: &mut GestionnaireImages,
     sortie: &mut Sortie,
 ) {
+    afficher_film(ui, etat, images, etat.film_principal(), sortie);
+}
+
+/// Panneau de détails à cinq onglets pour un film donné (module Films ou film d'une saga).
+pub fn afficher_film(
+    ui: &mut egui::Ui,
+    etat: &Etat,
+    images: &mut GestionnaireImages,
+    film: Option<&Film>,
+    sortie: &mut Sortie,
+) {
     let libelles: Vec<String> = OngletDetails::TOUS
         .iter()
         .map(|o| etat.i18n.t(o.cle()))
@@ -114,7 +126,7 @@ pub fn afficher(
             bottom: 6,
         })
         .show(ui, |ui| {
-            let Some(film) = etat.film_principal() else {
+            let Some(film) = film else {
                 ui.add_space(12.0);
                 ui.label(RichText::new(etat.i18n.t("gui.selection.none")).weak());
                 return;
@@ -122,9 +134,9 @@ pub fn afficher(
             match etat.onglet {
                 OngletDetails::Details => onglet_details(ui, etat, images, film, sortie),
                 OngletDetails::Distribution => onglet_distribution(ui, etat, film),
-                OngletDetails::FichiersMedias => onglet_fichiers(ui, etat, film),
+                OngletDetails::FichiersMedias => onglet_fichiers(ui, etat, film, sortie),
                 OngletDetails::Illustration => onglet_illustration(ui, etat, images, film, sortie),
-                OngletDetails::BandeAnnonce => onglet_bande_annonce(ui, etat, film),
+                OngletDetails::BandeAnnonce => onglet_bande_annonce(ui, etat, film, sortie),
             }
         });
 }
@@ -172,16 +184,67 @@ pub fn url_fichier(chemin: &str) -> String {
     }
 }
 
-/// Chemin affiché comme un lien (ouvre le dossier).
-pub fn lien_chemin(ui: &mut egui::Ui, chemin: &str) {
+/// Chemin affiché comme un lien : clic = ouverture du dossier dans le gestionnaire de fichiers
+/// (avec `selection` sélectionné si possible).
+pub fn lien_chemin_selection(
+    ui: &mut egui::Ui,
+    chemin: &str,
+    selection: Option<&str>,
+    sortie: &mut Sortie,
+) {
     if chemin.is_empty() {
         ui.label("");
-    } else {
-        ui.add(egui::Hyperlink::from_label_and_url(
-            chemin,
-            url_fichier(chemin),
-        ));
+        return;
     }
+    let reponse = ui
+        .add(Label::new(RichText::new(chemin).color(LIEN).underline()).sense(Sense::click()))
+        .on_hover_cursor(egui::CursorIcon::PointingHand)
+        .on_hover_text(url_fichier(chemin));
+    if reponse.clicked() {
+        sortie.push(Message::Ouvrir(ouverture::cible_dossier(chemin, selection)));
+    }
+}
+
+/// Chemin de dossier affiché comme un lien (ouvre le dossier).
+pub fn lien_chemin(ui: &mut egui::Ui, chemin: &str, sortie: &mut Sortie) {
+    lien_chemin_selection(ui, chemin, None, sortie);
+}
+
+/// Boutons « Lire » (vidéo principale, application par défaut) et « Ouvrir le dossier ».
+pub fn boutons_fichier(ui: &mut egui::Ui, etat: &Etat, film: &Film, sortie: &mut Sortie) {
+    ui.horizontal(|ui| {
+        let video = film.chemin_video();
+        let lire = ui
+            .add_enabled(
+                video.is_some(),
+                egui::Button::new(format!("{} {}", polices::LIRE, etat.i18n.t("movie.play"))),
+            )
+            .on_hover_text(
+                video
+                    .as_ref()
+                    .map(|v| v.display().to_string())
+                    .unwrap_or_else(|| etat.i18n.t("gui.play.novideo")),
+            );
+        if lire.clicked()
+            && let Some(v) = video
+        {
+            sortie.push(Message::Ouvrir(CibleOuverture::Fichier(v)));
+        }
+        let chemin = film.chemin();
+        if ui
+            .add_enabled(
+                !chemin.is_empty(),
+                egui::Button::new(etat.i18n.t("gui.open.folder")),
+            )
+            .on_hover_text(&chemin)
+            .clicked()
+        {
+            sortie.push(Message::Ouvrir(ouverture::cible_dossier(
+                &chemin,
+                Some(&film.nom_fichier),
+            )));
+        }
+    });
 }
 
 /// Dimensions réelles d'une image (lecture de l'en-tête, mémorisée par chemin).
@@ -316,6 +379,8 @@ fn onglet_details(
                 ui.add_space(14.0);
                 ui.vertical(|ui| {
                     titres(ui, &film.titre, &film.titre_original);
+                    boutons_fichier(ui, etat, film, sortie);
+                    ui.add_space(4.0);
                     let libelles: Vec<String> = [
                         "metatag.year",
                         "metatag.releasedate",
@@ -419,7 +484,12 @@ fn onglet_details(
                         .show(ui, |ui| {
                             ligne(ui, &i.t("metatag.tags"), "");
                             ui.label(RichText::new(i.t("metatag.path")).strong());
-                            lien_chemin(ui, &film.chemin());
+                            lien_chemin_selection(
+                                ui,
+                                &film.chemin(),
+                                Some(&film.nom_fichier),
+                                sortie,
+                            );
                             ui.end_row();
                             ligne(ui, &i.t("metatag.dateadded"), &film.date_ajout);
                         });
@@ -428,41 +498,115 @@ fn onglet_details(
         });
 }
 
-fn onglet_distribution(ui: &mut egui::Ui, etat: &Etat, film: &Film) {
-    TableBuilder::new(ui)
-        .id_salt("table_distribution")
+/// Lignes de l'onglet « Équipe » : réalisateurs puis scénaristes (nom, fonction).
+pub fn lignes_equipe(etat: &Etat, film: &Film) -> Vec<(String, String)> {
+    let realisateur = etat.i18n.t("metatag.director");
+    let scenariste = etat.i18n.t("metatag.writer");
+    film.realisateurs
+        .iter()
+        .map(|n| (n.clone(), realisateur.clone()))
+        .chain(
+            film.scenaristes
+                .iter()
+                .map(|n| (n.clone(), scenariste.clone())),
+        )
+        .collect()
+}
+
+/// Grille rayée à deux colonnes (nom, rôle / fonction) avec en-tête.
+fn grille_personnes(
+    ui: &mut egui::Ui,
+    id: &str,
+    entetes: [String; 2],
+    lignes: &[(String, String)],
+) {
+    let largeur = ((ui.available_width() - 20.0) * 0.5).max(120.0);
+    egui::Grid::new(id)
+        .num_columns(2)
         .striped(true)
-        .column(Column::remainder().at_least(120.0))
-        .column(Column::remainder().at_least(120.0))
-        .header(22.0, |mut h| {
-            h.col(|ui| {
-                ui.strong(etat.i18n.t("metatag.actor"));
-            });
-            h.col(|ui| {
-                ui.strong(etat.i18n.t("metatag.role"));
-            });
-        })
-        .body(|body| {
-            body.rows(22.0, film.acteurs.len(), |mut ligne| {
-                let (nom, role) = &film.acteurs[ligne.index()];
-                ligne.col(|ui| {
-                    ui.label(nom);
-                });
-                ligne.col(|ui| {
-                    ui.label(role);
-                });
-            });
+        .min_col_width(largeur)
+        .spacing([12.0, 4.0])
+        .show(ui, |ui| {
+            for e in entetes {
+                ui.label(RichText::new(e).strong());
+            }
+            ui.end_row();
+            for (nom, role) in lignes {
+                ui.add(Label::new(nom).truncate());
+                ui.add(Label::new(RichText::new(role).weak()).truncate());
+                ui.end_row();
+            }
         });
 }
 
-fn onglet_fichiers(ui: &mut egui::Ui, etat: &Etat, film: &Film) {
+fn onglet_distribution(ui: &mut egui::Ui, etat: &Etat, film: &Film) {
+    let i = &etat.i18n;
+    let equipe = lignes_equipe(etat, film);
+    if film.acteurs.is_empty() && equipe.is_empty() {
+        ui.label(RichText::new(i.t("gui.cast.none")).weak());
+        return;
+    }
+    ScrollArea::vertical()
+        .id_salt("defilement_distribution")
+        .auto_shrink([false, false])
+        .show(ui, |ui| {
+            ui.label(RichText::new(i.t("gui.cast.actors")).size(14.0).strong());
+            ui.add_space(2.0);
+            grille_personnes(
+                ui,
+                "grille_acteurs",
+                [i.t("metatag.actor"), i.t("metatag.role")],
+                &film.acteurs,
+            );
+            ui.add_space(14.0);
+            ui.label(RichText::new(i.t("gui.cast.crew")).size(14.0).strong());
+            ui.add_space(2.0);
+            grille_personnes(
+                ui,
+                "grille_equipe",
+                [i.t("metatag.actor"), i.t("gui.cast.function")],
+                &equipe,
+            );
+        });
+}
+
+/// Colonnes du tableau des fichiers : type, nom, taille, codec, résolution, audio, sous-titres.
+pub const COLONNES_FICHIERS: [&str; 7] = [
+    "renamer.type",
+    "metatag.filename",
+    "metatag.filesize",
+    "metatag.codec",
+    "gui.media.resolution",
+    "metatag.audio",
+    "metatag.subtitles",
+];
+
+/// Taille lisible (G au-delà de 100 Mo, sinon Mo / Ko).
+pub fn taille_lisible(etat: &Etat, octets: u64) -> String {
+    let i = &etat.i18n;
+    if octets >= 100_000_000 {
+        format!(
+            "{} {}",
+            i.decimal(gigaoctets(octets), 2),
+            i.t("gui.unit.gigabyte")
+        )
+    } else if octets >= 1_000_000 {
+        format!("{} Mo", i.decimal(octets as f64 / 1e6, 1))
+    } else if octets > 0 {
+        format!("{} Ko", i.decimal(octets as f64 / 1e3, 0))
+    } else {
+        String::new()
+    }
+}
+
+fn onglet_fichiers(ui: &mut egui::Ui, etat: &Etat, film: &Film, sortie: &mut Sortie) {
     let i = &etat.i18n;
     egui::Grid::new("grille_fichiers")
         .num_columns(2)
         .spacing([14.0, 4.0])
         .show(ui, |ui| {
             ui.label(RichText::new(i.t("metatag.path")).strong());
-            lien_chemin(ui, &film.chemin());
+            lien_chemin_selection(ui, &film.chemin(), Some(&film.nom_fichier), sortie);
             ui.end_row();
             champ(ui, etat, "metatag.datasource", &film.source);
             champ(ui, etat, "metatag.dateadded", &film.date_ajout);
@@ -481,16 +625,32 @@ fn onglet_fichiers(ui: &mut egui::Ui, etat: &Etat, film: &Film) {
                 .as_str(),
             );
         });
+    ui.add_space(4.0);
+    boutons_fichier(ui, etat, film, sortie);
     ui.add_space(8.0);
     ui.label(RichText::new(i.t("gui.media.files")).strong());
+    let analyse = film
+        .fichiers
+        .iter()
+        .any(|f| !f.codec.is_empty() || !f.resolution.is_empty() || !f.audio.is_empty());
+    if !analyse && !film.fichiers.is_empty() {
+        ui.label(RichText::new(i.t("gui.media.nostreams")).weak().size(12.0));
+    }
+    ui.add_space(2.0);
     TableBuilder::new(ui)
         .id_salt("table_fichiers")
         .striped(true)
-        .column(Column::initial(80.0))
-        .column(Column::remainder().clip(true))
-        .column(Column::initial(90.0))
+        .resizable(true)
+        .cell_layout(Layout::left_to_right(Align::Center))
+        .column(Column::initial(72.0).at_least(50.0).clip(true))
+        .column(Column::remainder().at_least(140.0).clip(true))
+        .column(Column::initial(78.0).at_least(50.0))
+        .column(Column::initial(60.0).at_least(40.0).clip(true))
+        .column(Column::initial(84.0).at_least(50.0).clip(true))
+        .column(Column::initial(140.0).at_least(60.0).clip(true))
+        .column(Column::initial(80.0).at_least(50.0).clip(true))
         .header(22.0, |mut h| {
-            for cle in ["renamer.type", "metatag.filename", "metatag.filesize"] {
+            for cle in COLONNES_FICHIERS {
                 h.col(|ui| {
                     ui.strong(i.t(cle));
                 });
@@ -499,21 +659,80 @@ fn onglet_fichiers(ui: &mut egui::Ui, etat: &Etat, film: &Film) {
         .body(|body| {
             body.rows(22.0, film.fichiers.len(), |mut ligne| {
                 let f = &film.fichiers[ligne.index()];
+                let chemin = film.chemin_fichier(f);
                 ligne.col(|ui| {
                     ui.label(f.type_fichier.libelle());
                 });
                 ligne.col(|ui| {
-                    ui.label(&f.nom);
+                    let r = ui
+                        .add(Label::new(&f.nom).truncate().sense(Sense::click()))
+                        .on_hover_text(chemin.display().to_string());
+                    if r.double_clicked() {
+                        sortie.push(Message::Ouvrir(CibleOuverture::Fichier(chemin.clone())));
+                    }
                 });
                 ligne.col(|ui| {
-                    ui.label(format!(
-                        "{} {}",
-                        i.decimal(gigaoctets(f.taille_octets), 3),
-                        i.t("gui.unit.gigabyte")
-                    ));
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        ui.label(taille_lisible(etat, f.taille_octets));
+                    });
                 });
+                for valeur in [&f.codec, &f.resolution, &f.audio, &f.sous_titres] {
+                    ligne.col(|ui| {
+                        ui.add(Label::new(valeur.as_str()).truncate());
+                    });
+                }
             });
         });
+}
+
+/// Image locale d'un film : genre (si c'est une illustration principale), nom, chemin.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ImageLocale {
+    pub genre: Option<GenreImage>,
+    pub nom: String,
+    pub chemin: PathBuf,
+}
+
+/// Toutes les images locales d'un film : illustrations principales connues de la source, puis
+/// les autres fichiers image du film qui existent (sans doublon).
+pub fn images_locales(
+    film: &Film,
+    principales: [Option<PathBuf>; 4],
+    existe: impl Fn(&Path) -> bool,
+) -> Vec<ImageLocale> {
+    let mut v: Vec<ImageLocale> = GenreImage::TOUS
+        .iter()
+        .zip(principales)
+        .filter_map(|(g, p)| {
+            p.map(|chemin| ImageLocale {
+                genre: Some(*g),
+                nom: chemin
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_default(),
+                chemin,
+            })
+        })
+        .collect();
+    for f in film.fichiers.iter().filter(|f| f.est_image()) {
+        let chemin = film.chemin_fichier(f);
+        if v.iter().any(|x| x.chemin == chemin) || !existe(&chemin) {
+            continue;
+        }
+        let genre = match f.type_fichier {
+            TypeFichier::Affiche => Some(GenreImage::Affiche),
+            TypeFichier::Fanart => Some(GenreImage::Fanart),
+            TypeFichier::Banniere => Some(GenreImage::Banniere),
+            TypeFichier::Miniature => Some(GenreImage::Miniature),
+            _ => None,
+        };
+        v.push(ImageLocale {
+            genre,
+            nom: f.nom.clone(),
+            chemin,
+        });
+    }
+    v
 }
 
 fn onglet_illustration(
@@ -523,41 +742,105 @@ fn onglet_illustration(
     film: &Film,
     sortie: &mut Sortie,
 ) {
+    let principales = GenreImage::TOUS.map(|g| etat.source.chemin_image(film, g));
+    let liste = images_locales(film, principales, |p| p.is_file());
+    if liste.is_empty() {
+        ui.label(RichText::new(etat.i18n.t("gui.artwork.none")).weak());
+        return;
+    }
     ScrollArea::vertical()
         .id_salt("illustrations")
         .auto_shrink([false, false])
         .show(ui, |ui| {
+            ui.spacing_mut().item_spacing = vec2(12.0, 12.0);
             ui.horizontal_wrapped(|ui| {
-                let tailles = [
-                    (GenreImage::Affiche, Vec2::new(140.0, 210.0)),
-                    (GenreImage::Fanart, Vec2::new(280.0, 158.0)),
-                    (GenreImage::Banniere, Vec2::new(280.0, 52.0)),
-                    (GenreImage::Miniature, Vec2::new(200.0, 112.0)),
-                ];
-                for (genre, taille) in tailles {
+                for img in &liste {
+                    let taille = match img.genre {
+                        Some(GenreImage::Affiche) => vec2(150.0, 220.0),
+                        Some(GenreImage::Banniere) => vec2(300.0, 56.0),
+                        _ => vec2(260.0, 146.0),
+                    };
                     ui.vertical(|ui| {
-                        let chemin = etat.source.chemin_image(film, genre);
-                        illustration_legendee(ui, etat, images, chemin, genre, taille, sortie);
+                        ui.spacing_mut().item_spacing.y = 2.0;
+                        let libelle = img
+                            .genre
+                            .map(|g| etat.i18n.t(g.cle()))
+                            .unwrap_or_else(|| img.nom.clone());
+                        let reponse =
+                            image_ou_emplacement(ui, images, Some(&img.chemin), taille, &libelle);
+                        let dims = dimensions(ui, &img.chemin);
+                        ui.add_sized(
+                            vec2(taille.x, 16.0),
+                            Label::new(RichText::new(legende(&libelle, dims)).size(12.0))
+                                .truncate(),
+                        )
+                        .on_hover_text(img.chemin.display().to_string());
+                        if reponse.clicked() {
+                            sortie.push(Message::OuvrirVisionneuse(img.chemin.clone()));
+                        }
                     });
                 }
             });
         });
 }
 
-fn onglet_bande_annonce(ui: &mut egui::Ui, etat: &Etat, film: &Film) {
+fn onglet_bande_annonce(ui: &mut egui::Ui, etat: &Etat, film: &Film, sortie: &mut Sortie) {
+    let i = &etat.i18n;
     if film.bandes_annonces.is_empty() {
-        ui.label(RichText::new(etat.i18n.t("gui.trailer.none")).weak());
+        ui.label(RichText::new(i.t("gui.trailer.none")).weak());
         return;
     }
-    for b in &film.bandes_annonces {
-        ui.horizontal(|ui| {
-            ui.label(b);
-            if ui
-                .button(format!("{} {}", polices::LIRE, etat.i18n.t("Button.play")))
-                .clicked()
-            {}
+    TableBuilder::new(ui)
+        .id_salt("table_bandes_annonces")
+        .striped(true)
+        .resizable(true)
+        .cell_layout(Layout::left_to_right(Align::Center))
+        .column(Column::remainder().at_least(140.0).clip(true))
+        .column(Column::initial(80.0).at_least(50.0).clip(true))
+        .column(Column::initial(70.0).at_least(40.0).clip(true))
+        .column(Column::initial(200.0).at_least(60.0).clip(true))
+        .column(Column::initial(36.0))
+        .header(22.0, |mut h| {
+            for cle in [
+                "metatag.title",
+                "gui.trailer.source",
+                "gui.trailer.quality",
+                "gui.trailer.url",
+            ] {
+                h.col(|ui| {
+                    ui.strong(i.t(cle));
+                });
+            }
+            h.col(|_| {});
+        })
+        .body(|body| {
+            body.rows(24.0, film.bandes_annonces.len(), |mut ligne| {
+                let b = &film.bandes_annonces[ligne.index()];
+                let valide = ouverture::adresse_valide(&b.url);
+                ligne.col(|ui| {
+                    ui.add(Label::new(if b.nom.is_empty() { &b.url } else { &b.nom }).truncate());
+                });
+                ligne.col(|ui| {
+                    ui.label(&b.source);
+                });
+                ligne.col(|ui| {
+                    ui.label(&b.qualite);
+                });
+                ligne.col(|ui| {
+                    ui.add(Label::new(RichText::new(&b.url).weak()).truncate())
+                        .on_hover_text(&b.url);
+                });
+                ligne.col(|ui| {
+                    if ui
+                        .add_enabled(valide, egui::Button::new(polices::LIRE).small())
+                        .on_hover_text(i.t("gui.trailer.open"))
+                        .clicked()
+                    {
+                        sortie.push(Message::Ouvrir(CibleOuverture::Adresse(b.url.clone())));
+                    }
+                });
+            });
         });
-    }
 }
 
 /// Couleur de fond des zones de contenu (liste et détails).
@@ -578,6 +861,64 @@ mod tests {
         assert_eq!(url_fichier("\\\\NAS\\Films"), "file://NAS/Films");
         assert_eq!(largeur_colonne_images(400.0), 120.0);
         assert_eq!(largeur_colonne_images(5000.0), 190.0);
+    }
+
+    #[test]
+    fn images_locales_sans_doublon() {
+        use crate::modele::FichierFilm;
+        let film = Film {
+            source: "/films".into(),
+            dossier: "Alien".into(),
+            fichiers: vec![
+                FichierFilm {
+                    type_fichier: TypeFichier::Affiche,
+                    nom: "poster.jpg".into(),
+                    ..Default::default()
+                },
+                FichierFilm {
+                    type_fichier: TypeFichier::Autre,
+                    nom: "clearart.png".into(),
+                    ..Default::default()
+                },
+                FichierFilm {
+                    type_fichier: TypeFichier::Autre,
+                    nom: "absent.jpg".into(),
+                    ..Default::default()
+                },
+                FichierFilm {
+                    type_fichier: TypeFichier::Video,
+                    nom: "Alien.mkv".into(),
+                    ..Default::default()
+                },
+            ],
+            ..Film::default()
+        };
+        let affiche = Path::new("/films/Alien/poster.jpg").to_path_buf();
+        let v = images_locales(&film, [Some(affiche.clone()), None, None, None], |p| {
+            !p.ends_with("absent.jpg")
+        });
+        assert_eq!(v.len(), 2);
+        assert_eq!(v[0].genre, Some(GenreImage::Affiche));
+        assert_eq!(v[0].chemin, affiche);
+        assert_eq!(v[1].nom, "clearart.png");
+        assert_eq!(v[1].genre, None);
+    }
+
+    #[test]
+    fn equipe_realisateurs_puis_scenaristes() {
+        let etat = Etat::nouveau();
+        let film = Film {
+            realisateurs: vec!["R".into()],
+            scenaristes: vec!["S1".into(), "S2".into()],
+            ..Film::default()
+        };
+        let l = lignes_equipe(&etat, &film);
+        assert_eq!(l.len(), 3);
+        assert_eq!(l[0], ("R".into(), "Réalisateur".into()));
+        assert_eq!(l[2], ("S2".into(), "Scénariste".into()));
+        assert_eq!(taille_lisible(&etat, 2_960_000_000), "2,96 G");
+        assert_eq!(taille_lisible(&etat, 4_200), "4 Ko");
+        assert_eq!(taille_lisible(&etat, 0), "");
     }
 
     #[test]

@@ -1,6 +1,6 @@
 //! Données factices pour montrer l'écran (à remplacer par la bibliothèque réelle).
 
-use crate::modele::{FichierFilm, Film, TypeFichier};
+use crate::modele::{BandeAnnonceFilm, FichierFilm, Film, TypeFichier};
 
 fn s(v: &str) -> String {
     v.to_string()
@@ -19,24 +19,32 @@ fn fichiers(nom_fichier: &str, avec_st: bool, taille: u64) -> Vec<FichierFilm> {
             nom: nom_fichier.to_string(),
             suffixe: Some(format!(".{ext}")),
             taille_octets: taille,
+            codec: "H.264".into(),
+            resolution: "1920x1080".into(),
+            audio: "DTS 6ch fra, AC3 2ch eng".into(),
+            sous_titres: "fra".into(),
+            ..FichierFilm::default()
         },
         FichierFilm {
             type_fichier: TypeFichier::Nfo,
             nom: format!("{base}.nfo"),
             suffixe: Some(".nfo".into()),
             taille_octets: 4_200,
+            ..FichierFilm::default()
         },
         FichierFilm {
             type_fichier: TypeFichier::Affiche,
             nom: s("poster.jpg"),
             suffixe: None,
             taille_octets: 310_000,
+            ..FichierFilm::default()
         },
         FichierFilm {
             type_fichier: TypeFichier::Fanart,
             nom: s("fanart.jpg"),
             suffixe: None,
             taille_octets: 820_000,
+            ..FichierFilm::default()
         },
     ];
     if avec_st {
@@ -45,6 +53,7 @@ fn fichiers(nom_fichier: &str, avec_st: bool, taille: u64) -> Vec<FichierFilm> {
             nom: format!("{base}.fr.srt"),
             suffixe: Some(".fr.srt".into()),
             taille_octets: 68_000,
+            ..FichierFilm::default()
         });
     }
     v
@@ -89,6 +98,7 @@ fn film(
         duree_min: duree,
         genres: liste(&["Science-fiction", "Drame"]),
         realisateurs: liste(&["Réalisateur Exemple"]),
+        scenaristes: liste(&["Scénariste Exemple"]),
         pays: liste(&["États-Unis"]),
         production: liste(&["Studio Exemple"]),
         slogan: format!("Le slogan de « {titre} »."),
@@ -128,13 +138,22 @@ fn film(
         ],
         fichiers: fichiers(fichier, a('s'), (taille_go * 1e9) as u64),
         bandes_annonces: if a('b') {
-            vec![s("Bande-annonce officielle (YouTube, 1080p)")]
+            vec![BandeAnnonceFilm {
+                nom: s("Bande-annonce officielle"),
+                source: s("YouTube"),
+                qualite: s("1080p"),
+                url: format!("https://www.youtube.com/watch?v=demo{id}"),
+            }]
         } else {
             vec![]
         },
         saga: None,
     }
 }
+
+/// Sagas de démonstration (titre).
+pub const SAGA_DUNE: &str = "Dune - La saga";
+pub const SAGA_MATRIX: &str = "Matrix - La trilogie";
 
 /// Quelques films factices (suffisants pour tester tri, filtre et sélection).
 pub fn films_factices() -> Vec<Film> {
@@ -322,8 +341,12 @@ pub fn films_factices() -> Vec<Film> {
             "ns",
         ),
     ];
-    for f in v.iter_mut().filter(|f| f.id == 3 || f.id == 4) {
-        f.saga = None;
+    for f in v.iter_mut() {
+        f.saga = match f.id {
+            3 | 4 => Some(s(SAGA_DUNE)),
+            9 => Some(s(SAGA_MATRIX)),
+            _ => None,
+        };
     }
     v
 }

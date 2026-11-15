@@ -51,7 +51,7 @@ pub struct RapportScrap {
 }
 
 /// Scraper TMDB configuré (clé du coffre, cache HTTP, URL de test).
-fn fournisseur(n: &Noyau) -> Resultat<TmdbFilm> {
+pub(crate) fn fournisseur(n: &Noyau) -> Resultat<TmdbFilm> {
     let cle = n.cle_tmdb()?;
     let mut cfg = ConfigTmdb::nouvelle(cle);
     cfg.url_api = n.config.url_api_tmdb.clone();
@@ -62,7 +62,7 @@ fn fournisseur(n: &Noyau) -> Resultat<TmdbFilm> {
     Ok(TmdbFilm::new(cfg, http)?)
 }
 
-fn charger_film(n: &Noyau, id: &str) -> Resultat<Film> {
+pub(crate) fn charger_film(n: &Noyau, id: &str) -> Resultat<Film> {
     n.verrou()
         .bibliotheque
         .obtenir::<Film>(id)?
@@ -76,6 +76,18 @@ pub(crate) fn rechercher(
     id: &str,
     requete: Option<RequeteFilm>,
 ) -> Resultat<Vec<ResultatRecherche>> {
+    rechercher_dans_langue(n, ctx, id, requete, None)
+}
+
+/// Tâche : recherche de candidats dans une langue donnée (`None` = langue
+/// des réglages).
+pub(crate) fn rechercher_dans_langue(
+    n: &Noyau,
+    ctx: &ContexteTache,
+    id: &str,
+    requete: Option<RequeteFilm>,
+    langue: Option<String>,
+) -> Resultat<Vec<ResultatRecherche>> {
     let film = charger_film(n, id)?;
     let reglages = n.reglages();
     let f = fournisseur(n)?;
@@ -84,6 +96,9 @@ pub(crate) fn rechercher(
         o.requete = r.texte;
         o.annee = r.annee;
         o.ids = r.ids;
+    }
+    if let Some(l) = langue.filter(|l| !l.trim().is_empty()) {
+        o.langue = l;
     }
     ctx.progression(0, 1, format!("Recherche de « {} »", o.requete));
     let r = ctx.bloquer(f.rechercher(&o))?;

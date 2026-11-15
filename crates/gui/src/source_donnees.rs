@@ -213,6 +213,21 @@ impl SerieAffichage {
     }
 }
 
+/// Saga (collection de films) affichée par le module Collections.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct SagaAffichage {
+    pub id: String,
+    pub titre: String,
+    pub titre_original: String,
+    pub resume: String,
+    /// Identifiants affichés des films de la saga (ceux absents de la bibliothèque sont ignorés).
+    pub films: Vec<u64>,
+    /// Illustrations locales existantes de la saga.
+    pub affiche: Option<PathBuf>,
+    pub fanart: Option<PathBuf>,
+    pub banniere: Option<PathBuf>,
+}
+
 /// Ce que l'interface attend des services. Les méthodes bloquantes (`rechercher`) sont
 /// appelées hors du thread de l'interface ; les autres sont courtes.
 pub trait SourceDonnees: Send + Sync {
@@ -220,6 +235,10 @@ pub trait SourceDonnees: Send + Sync {
     fn films(&self) -> Vec<Film>;
     /// Instantané des séries.
     fn series(&self) -> Vec<SerieAffichage>;
+    /// Instantané des sagas (par défaut : aucune).
+    fn sagas(&self) -> Vec<SagaAffichage> {
+        Vec::new()
+    }
     /// Chemin local d'une illustration du film, s'il existe.
     fn chemin_image(&self, film: &Film, genre: GenreImage) -> Option<PathBuf>;
     /// Recherche auprès d'un extracteur (bloquant).
@@ -542,6 +561,30 @@ impl SourceDonnees for SourceFactice {
 
     fn series(&self) -> Vec<SerieAffichage> {
         series_demo()
+    }
+
+    fn sagas(&self) -> Vec<SagaAffichage> {
+        let films = self.films();
+        [
+            ("demo-saga-dune", crate::donnees::SAGA_DUNE, 901u64),
+            ("demo-saga-matrix", crate::donnees::SAGA_MATRIX, 902),
+        ]
+        .into_iter()
+        .map(|(id, titre, graine)| SagaAffichage {
+            id: id.into(),
+            titre: titre.into(),
+            titre_original: String::new(),
+            resume: format!("Résumé factice de la collection « {titre} »."),
+            films: films
+                .iter()
+                .filter(|f| f.saga.as_deref() == Some(titre))
+                .map(|f| f.id)
+                .collect(),
+            affiche: self.image_demo(id, GenreImage::Affiche, graine),
+            fanart: self.image_demo(id, GenreImage::Fanart, graine),
+            banniere: None,
+        })
+        .collect()
     }
 
     fn chemin_image(&self, film: &Film, genre: GenreImage) -> Option<PathBuf> {

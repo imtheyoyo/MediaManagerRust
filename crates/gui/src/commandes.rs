@@ -27,6 +27,7 @@ pub enum Commande {
     AnnulerRenommage,
     Nettoyer,
     OuvrirDossier,
+    Lire,
     RetirerBase,
     SupprimerFichiers,
 }
@@ -94,6 +95,7 @@ pub const MENU_CONTEXTUEL: &[Entree] = &[
     Sep,
     Cmd(C::Exporter),
     Cmd(C::OuvrirDossier),
+    Cmd(C::Lire),
     Sep,
     Cmd(C::RetirerBase),
     Cmd(C::SupprimerFichiers),
@@ -125,6 +127,7 @@ impl Commande {
             C::AnnulerRenommage => "movie.undorename",
             C::Nettoyer => "movie.cleanup",
             C::OuvrirDossier => "movie.openfolder",
+            C::Lire => "movie.play",
             C::RetirerBase => "movie.remove",
             C::SupprimerFichiers => "movie.delete",
         }
@@ -174,7 +177,7 @@ impl Commande {
         self.raccourci().map(|(t, _, _)| t)
     }
 
-    pub const TOUTES: [Commande; 24] = [
+    pub const TOUTES: [Commande; 25] = [
         C::MettreAJourToutesSources,
         C::MettreAJourSelection,
         C::TrouverManquants,
@@ -197,6 +200,7 @@ impl Commande {
         C::AnnulerRenommage,
         C::Nettoyer,
         C::OuvrirDossier,
+        C::Lire,
         C::RetirerBase,
         C::SupprimerFichiers,
     ];

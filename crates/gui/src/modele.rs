@@ -4,7 +4,7 @@
 use std::cmp::Ordering;
 
 /// Type de fichier associé à un film (aperçu du renommage, onglet « Fichiers médias »).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum TypeFichier {
     Video,
     Nfo,
@@ -14,6 +14,7 @@ pub enum TypeFichier {
     Banniere,
     Miniature,
     BandeAnnonce,
+    #[default]
     Autre,
 }
 
@@ -33,13 +34,65 @@ impl TypeFichier {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct FichierFilm {
     pub type_fichier: TypeFichier,
     pub nom: String,
     /// Suffixe conservé au renommage (`.mkv`, `.fr.srt`...). `None` : fichier non renommé.
     pub suffixe: Option<String>,
     pub taille_octets: u64,
+    /// Chemin complet du fichier (vide si inconnu : il est alors déduit du dossier du film).
+    pub chemin: String,
+    /// Codec vidéo (vide si l'analyse des flux n'a pas eu lieu).
+    pub codec: String,
+    /// Résolution `LxH` (vide si inconnue).
+    pub resolution: String,
+    /// Pistes audio résumées (`AC3 6ch fra, ...`).
+    pub audio: String,
+    /// Langues des sous-titres internes.
+    pub sous_titres: String,
+}
+
+/// Extensions reconnues comme images (onglet « Illustration »).
+pub const EXTENSIONS_IMAGES: [&str; 7] = ["jpg", "jpeg", "png", "webp", "bmp", "gif", "tbn"];
+
+impl FichierFilm {
+    /// Vrai si le fichier est une image (d'après son extension).
+    pub fn est_image(&self) -> bool {
+        self.nom
+            .rsplit_once('.')
+            .is_some_and(|(_, ext)| EXTENSIONS_IMAGES.contains(&ext.to_lowercase().as_str()))
+    }
+}
+
+/// Bande-annonce affichée (onglet « Bande annonce »).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct BandeAnnonceFilm {
+    pub nom: String,
+    pub source: String,
+    pub qualite: String,
+    /// Adresse (web ou fichier local) ; vide si inconnue.
+    pub url: String,
+}
+
+impl BandeAnnonceFilm {
+    /// Libellé : nom (ou URL) suivi de la source et de la qualité entre parenthèses.
+    pub fn libelle(&self) -> String {
+        let nom = if self.nom.is_empty() {
+            &self.url
+        } else {
+            &self.nom
+        };
+        let details: Vec<&str> = [self.source.as_str(), self.qualite.as_str()]
+            .into_iter()
+            .filter(|x| !x.is_empty())
+            .collect();
+        if details.is_empty() {
+            nom.clone()
+        } else {
+            format!("{nom} ({})", details.join(", "))
+        }
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -58,6 +111,7 @@ pub struct Film {
     pub duree_min: u32,
     pub genres: Vec<String>,
     pub realisateurs: Vec<String>,
+    pub scenaristes: Vec<String>,
     pub pays: Vec<String>,
     pub production: Vec<String>,
     pub slogan: String,
@@ -82,7 +136,7 @@ pub struct Film {
     pub vu: bool,
     pub acteurs: Vec<(String, String)>,
     pub fichiers: Vec<FichierFilm>,
-    pub bandes_annonces: Vec<String>,
+    pub bandes_annonces: Vec<BandeAnnonceFilm>,
 }
 
 impl Film {
@@ -97,6 +151,28 @@ impl Film {
                 .join(&self.dossier)
                 .display()
                 .to_string()
+        }
+    }
+
+    /// Chemin complet du fichier vidéo principal (`None` si le film n'a pas de vidéo).
+    pub fn chemin_video(&self) -> Option<std::path::PathBuf> {
+        if self.nom_fichier.is_empty() {
+            return None;
+        }
+        self.fichiers
+            .iter()
+            .find(|f| f.type_fichier == TypeFichier::Video && f.nom == self.nom_fichier)
+            .filter(|f| !f.chemin.is_empty())
+            .map(|f| std::path::PathBuf::from(&f.chemin))
+            .or_else(|| Some(std::path::Path::new(&self.chemin()).join(&self.nom_fichier)))
+    }
+
+    /// Chemin complet d'un fichier du film.
+    pub fn chemin_fichier(&self, f: &FichierFilm) -> std::path::PathBuf {
+        if f.chemin.is_empty() {
+            std::path::Path::new(&self.chemin()).join(&f.nom)
+        } else {
+            std::path::PathBuf::from(&f.chemin)
         }
     }
 
@@ -354,8 +430,8 @@ impl Colonne {
             Colonne::CodecVideo => a.codec_video.cmp(&b.codec_video),
             Colonne::Audio => a.audio.cmp(&b.audio),
             Colonne::TailleFichier => a.taille_octets.cmp(&b.taille_octets),
-            Colonne::Chemin => a.chemin().cmp(&b.chemin()),
-            Colonne::NomFichier => a.nom_fichier.cmp(&b.nom_fichier),
+            Colonne::Chemin => normaliser(&a.chemin()).cmp(&normaliser(&b.chemin())),
+            Colonne::NomFichier => normaliser(&a.nom_fichier).cmp(&normaliser(&b.nom_fichier)),
             Colonne::Nouveau => a.nouveau.cmp(&b.nouveau),
             Colonne::Metadonnees => a.metadonnees_ok.cmp(&b.metadonnees_ok),
             Colonne::Images => a.images_ok.cmp(&b.images_ok),
