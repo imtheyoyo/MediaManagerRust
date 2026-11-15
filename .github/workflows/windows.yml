@@ -19,6 +19,8 @@ jobs:
       - name: Tests
         run: cargo test --workspace --release --no-fail-fast
       - name: Compilation
+        env:
+          MMR_BUILD: ${{ github.sha }}
         run: cargo build --workspace --release
       - name: Archive
         shell: pwsh
@@ -44,3 +46,6 @@ jobs:
           files: MediaManagerRust-windows-x64.zip
           prerelease: true
           make_latest: true
+          body: |
+            Préversion compilée automatiquement depuis main.
+            build: ${{ github.sha }}
