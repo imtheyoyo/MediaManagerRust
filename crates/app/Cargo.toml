@@ -1,0 +1,16 @@
+[package]
+name = "mediamanager-app"
+description = "Services de l'application : orchestration du scan, des scrapers, des NFO, du renommage et du stockage"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+mediamanager-core.workspace = true
+mediamanager-scrapers.workspace = true
+mediamanager-store.workspace = true
+mediamanager-gabarit.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tracing.workspace = true

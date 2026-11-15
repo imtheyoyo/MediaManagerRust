@@ -2372,6 +2372,20 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4050469837a6ff301cd14c1f8f24f88549e6d548f24f64e2148eb0f72cebc51f"
 
 [[package]]
+name = "mediamanager-app"
+version = "0.1.0"
+dependencies = [
+ "mediamanager-core",
+ "mediamanager-gabarit",
+ "mediamanager-scrapers",
+ "mediamanager-store",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.21",
+ "tracing",
+]
+
+[[package]]
 name = "mediamanager-cli"
 version = "0.1.0"
 dependencies = [

@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/gabarit", "crates/core", "crates/scrapers", "crates/store", "crates/cli", "crates/gui"]
+members = ["crates/gabarit", "crates/core", "crates/scrapers", "crates/store", "crates/app", "crates/cli", "crates/gui"]
 
 [workspace.package]
 version = "0.1.0"
@@ -21,3 +21,4 @@ mediamanager-core = { path = "crates/core" }
 mediamanager-gabarit = { path = "crates/gabarit" }
 mediamanager-scrapers = { path = "crates/scrapers" }
 mediamanager-store = { path = "crates/store" }
+mediamanager-app = { path = "crates/app" }
