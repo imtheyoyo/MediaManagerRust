@@ -87,6 +87,7 @@ const BALISES_FILM: &[&str] = &[
     "original_filename",
     "user_note",
     "locked",
+    "tmm_locked",
     "set",
     "sets",
     "collectionnumber",

@@ -3,17 +3,16 @@
 //! Règles (par ordre de priorité) :
 //! 1. variable d'environnement [`VARIABLE_DOSSIER`] non vide : ce dossier est la
 //!    racine du contenu (mode « explicite ») ;
-//! 2. à côté de l'exécutable, un fichier marqueur [`MARQUEUR_PORTABLE`] ou un
-//!    dossier `data/` existant, **et** le dossier est inscriptible : mode
-//!    portable, tout est stocké à côté de l'exécutable ;
-//! 3. sinon : dossiers utilisateur standard (crate `directories`) ; sous Linux
-//!    dans un conteneur (présence de `/.dockerenv`) : `/data`.
+//! 2. **mode portable par défaut** : si le dossier de l'exécutable est
+//!    inscriptible et ne contient pas le marqueur [`MARQUEUR_NON_PORTABLE`],
+//!    tout est stocké à côté de l'exécutable (`data/`, `cache/`, `logs/`,
+//!    `backup/`) ;
+//! 3. sinon (dossier en lecture seule, par exemple `Program Files`, ou
+//!    marqueur présent) : dossiers utilisateur standard (crate `directories`) ;
+//!    sous Linux dans un conteneur (présence de `/.dockerenv`) : `/data`.
 //!
-//! Choix : un dossier d'exécutable simplement inscriptible ne suffit **pas** à
-//! passer en mode portable (sinon une compilation dans `target/` ou un binaire
-//! posé dans « Téléchargements » y sèmerait ses données) ; il faut le marqueur
-//! ou un `data/` déjà présent. Un marqueur dans un dossier en lecture seule est
-//! ignoré (avec un avertissement) au profit des dossiers utilisateur.
+//! Le marqueur [`MARQUEUR_PORTABLE`] reste reconnu (il force le mode portable
+//! même en présence du marqueur inverse).
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -22,6 +21,8 @@ use crate::erreur::{ErreurStockage, Resultat};
 
 /// Nom du fichier marqueur du mode portable.
 pub const MARQUEUR_PORTABLE: &str = "portable";
+/// Nom du fichier marqueur désactivant le mode portable par défaut.
+pub const MARQUEUR_NON_PORTABLE: &str = "non-portable";
 /// Variable d'environnement forçant la racine du contenu.
 pub const VARIABLE_DOSSIER: &str = "MEDIAMANAGER_DOSSIER";
 /// Nom de l'application pour les dossiers utilisateur.
@@ -85,8 +86,9 @@ impl DossiersApplication {
             return Ok(Self::depuis_racine(racine, ModeDossiers::Explicite));
         }
         if let Some(exe) = dossier_exe {
-            let demande = exe.join(MARQUEUR_PORTABLE).is_file() || exe.join("data").is_dir();
-            if demande {
+            let force = exe.join(MARQUEUR_PORTABLE).is_file();
+            let refuse = exe.join(MARQUEUR_NON_PORTABLE).is_file();
+            if force || !refuse {
                 if est_inscriptible(exe) {
                     return Ok(Self::depuis_racine(exe, ModeDossiers::Portable));
                 }

@@ -8,7 +8,9 @@ use mediamanager_core::modele::{Episode, Film, Saga, Serie};
 use tempfile::TempDir;
 
 use crate::base::{Bibliotheque, NOM_BASE, VERSION_SCHEMA};
-use crate::dossiers::{DossiersApplication, MARQUEUR_PORTABLE, ModeDossiers};
+use crate::dossiers::{
+    DossiersApplication, MARQUEUR_NON_PORTABLE, MARQUEUR_PORTABLE, ModeDossiers,
+};
 use crate::erreur::ErreurStockage;
 use crate::reglages::{GestionnaireReglages, Reglages, TailleImage, noms_secrets};
 use crate::sauvegarde::{self, EtatOuverture, EtatSauvegarde};
@@ -696,16 +698,16 @@ fn resolution_des_dossiers() {
     assert_eq!(p.journaux, t.path().join("logs"));
     assert_eq!(p.cache, t.path().join("cache"));
 
-    // Sans marqueur ni data/ : dossiers utilisateur.
+    // Sans marqueur : mode portable par défaut (dossier inscriptible).
     let vide = tempfile::tempdir().unwrap();
+    let p2 = DossiersApplication::resoudre_avec(None, Some(vide.path())).unwrap();
+    assert_eq!(p2.mode, ModeDossiers::Portable);
+
+    // Marqueur « non-portable » : dossiers utilisateur.
+    fs::write(vide.path().join(MARQUEUR_NON_PORTABLE), "").unwrap();
     let u = DossiersApplication::resoudre_avec(None, Some(vide.path())).unwrap();
     assert_eq!(u.mode, ModeDossiers::Utilisateur);
     assert!(!u.racine.starts_with(vide.path()));
-
-    // Un data/ existant suffit.
-    fs::create_dir(vide.path().join("data")).unwrap();
-    let p2 = DossiersApplication::resoudre_avec(None, Some(vide.path())).unwrap();
-    assert_eq!(p2.mode, ModeDossiers::Portable);
 }
 
 // ---------------------------------------------------------------------------

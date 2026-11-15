@@ -1011,9 +1011,16 @@ pub fn crc32(f: &FichierMedia) -> Option<&str> {
         .filter(|v| !v.is_empty())
 }
 
-/// Booléen `locked` du bloc de métadonnées propres.
+/// Balise de verrou écrite par d'anciens NFO (lue seulement, jamais écrite).
+pub const BALISE_VERROU_ANCIENNE: &str = "tmm_locked";
+
+/// Booléen de verrou du bloc de métadonnées propres : `locked`, ou par
+/// compatibilité avec d'anciens NFO la balise [`BALISE_VERROU_ANCIENNE`].
 pub fn lire_verrou(racine: &Element) -> bool {
     racine.texte_unique("locked").is_some_and(|v| booleen(&v))
+        || racine
+            .texte_unique(BALISE_VERROU_ANCIENNE)
+            .is_some_and(|v| booleen(&v))
 }
 
 /// Ajoute un nœud texte non vide (utilitaire d'écriture).
@@ -1027,4 +1034,20 @@ pub fn ajouter_si_non_vide(e: &mut Element, balise: &str, texte: &str) {
 pub fn ajouter_commentaire_meta(e: &mut Element) {
     e.enfants
         .push(Noeud::Commentaire(format!("{NOM_LOGICIEL} meta data")));
+}
+
+#[cfg(test)]
+mod tests_verrou_ancien {
+    use crate::nfo::lire_nfo_film;
+
+    #[test]
+    fn verrou_ancien_relu() {
+        let nfo =
+            "<?xml version=\"1.0\"?><movie><title>A</title><tmm_locked>true</tmm_locked></movie>";
+        assert!(lire_nfo_film(nfo).film.verrouille);
+        let nfo2 = "<movie><title>A</title><locked>true</locked></movie>";
+        assert!(lire_nfo_film(nfo2).film.verrouille);
+        let nfo3 = "<movie><title>A</title></movie>";
+        assert!(!lire_nfo_film(nfo3).film.verrouille);
+    }
 }

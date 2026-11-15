@@ -78,6 +78,7 @@ const BALISES_SERIE: &[&str] = &[
     "english_title",
     "crew",
     "locked",
+    "tmm_locked",
     "set",
     "fileinfo",
 ];
