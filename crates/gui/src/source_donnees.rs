@@ -9,9 +9,9 @@
 
 use crate::dialogues::appliquer_resultat;
 use crate::donnees::films_factices;
-use crate::etat::Message;
+use crate::etat::{Message, Niveau};
 use crate::modele::{Film, normaliser};
-use crate::renommage::{self, ApercuFilm};
+use crate::renommage::{self, ApercuFilm, LigneFichier};
 use crate::taches::{IssueTache, Repaint};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -121,6 +121,10 @@ pub enum Travail {
     MettreAJourSources,
     /// Sources de séries uniquement.
     MettreAJourSeries,
+    /// Mise à jour limitée aux dossiers des films choisis.
+    MettreAJourSelection {
+        ids: Vec<u64>,
+    },
     /// Récupération automatique (meilleur résultat) ; `artwork` = images comprises.
     RecupererAuto {
         ids: Vec<u64>,
@@ -138,6 +142,32 @@ pub enum Travail {
     Renommer {
         ids: Vec<u64>,
     },
+    /// Annule le dernier renommage des films choisis.
+    AnnulerRenommage {
+        ids: Vec<u64>,
+    },
+    /// Analyse des flux (ffprobe, MediaInfo) des fichiers des films et des séries choisis.
+    AnalyserMedias {
+        films: Vec<u64>,
+        series: Vec<String>,
+    },
+    /// Récupération automatique pour des séries ; `artwork` = images comprises.
+    RecupererSeries {
+        ids: Vec<String>,
+        artwork: bool,
+    },
+    /// Résultat choisi dans le dialogue de recherche d'une série.
+    AppliquerResultatSerie {
+        serie: String,
+        resultat: ResultatRecherche,
+        ne_pas_remplacer: bool,
+    },
+    EcrireNfoSeries {
+        ids: Vec<String>,
+    },
+    RenommerSeries {
+        ids: Vec<String>,
+    },
 }
 
 impl Travail {
@@ -146,9 +176,17 @@ impl Travail {
         match self {
             Travail::MettreAJourSources => "gui.task.update",
             Travail::MettreAJourSeries => "gui.task.updatetv",
+            Travail::MettreAJourSelection { .. } => "gui.task.updateselection",
             Travail::RecupererAuto { .. } | Travail::AppliquerResultat { .. } => "gui.task.scrape",
+            Travail::RecupererSeries { .. } | Travail::AppliquerResultatSerie { .. } => {
+                "gui.task.scrapetv"
+            }
             Travail::EcrireNfo { .. } => "gui.task.nfo",
+            Travail::EcrireNfoSeries { .. } => "gui.task.nfotv",
             Travail::Renommer { .. } => "gui.task.rename",
+            Travail::RenommerSeries { .. } => "gui.task.renametv",
+            Travail::AnnulerRenommage { .. } => "gui.task.undorename",
+            Travail::AnalyserMedias { .. } => "gui.task.mediainfo",
         }
     }
 }
@@ -179,37 +217,158 @@ pub struct ReglagesServices {
     pub threads_telechargement: u32,
     pub corbeille: bool,
     pub cache_images: bool,
+    /// Chemin de ffprobe / MediaInfo (fichier ou dossier) ; vide = recherche automatique
+    /// (dossier `outils/` de l'application, puis `PATH`).
+    pub chemin_outils: String,
+    pub gabarit_dossier_serie: String,
+    pub gabarit_dossier_saison: String,
+    pub gabarit_fichier_episode: String,
+    /// Épisodes scrapés sans fichier local affichés dans l'arbre des séries.
+    pub afficher_episodes_manquants: bool,
+    pub afficher_speciaux_manquants: bool,
+    pub afficher_non_diffuses: bool,
 }
 
 /// Épisode affiché dans l'arbre des séries.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct EpisodeAffichage {
     pub episode: i32,
     pub titre: String,
     pub fichier: String,
     pub vu: bool,
+    /// Épisode connu du fournisseur mais sans fichier local.
+    pub manquant: bool,
+    /// Résumé technique du fichier (« 1080p H264 · AC3 6ch · 44 min ») ; vide sans analyse.
+    pub infos_media: String,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct SaisonAffichage {
     pub numero: i32,
     pub titre: String,
     pub episodes: Vec<EpisodeAffichage>,
 }
 
-/// Série affichée (arbre série → saisons → épisodes).
-#[derive(Clone, Debug, PartialEq, Eq)]
+/// Statut de diffusion d'une série.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum StatutSerie {
+    #[default]
+    Inconnu,
+    EnCours,
+    Terminee,
+    Annulee,
+}
+
+impl StatutSerie {
+    pub const TOUS: [StatutSerie; 4] = [
+        StatutSerie::Inconnu,
+        StatutSerie::EnCours,
+        StatutSerie::Terminee,
+        StatutSerie::Annulee,
+    ];
+
+    /// Clé de traduction du libellé.
+    pub fn cle(self) -> &'static str {
+        match self {
+            StatutSerie::Inconnu => "gui.series.status.unknown",
+            StatutSerie::EnCours => "gui.series.status.running",
+            StatutSerie::Terminee => "gui.series.status.ended",
+            StatutSerie::Annulee => "gui.series.status.cancelled",
+        }
+    }
+}
+
+/// Série affichée (arbre série → saisons → épisodes) avec les champs modifiables par
+/// l'éditeur de série.
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct SerieAffichage {
     pub id: String,
     pub titre: String,
+    pub titre_original: String,
     pub annee: u32,
     pub chemin: String,
+    pub resume: String,
+    pub genres: Vec<String>,
+    pub statut: StatutSerie,
+    /// Note sur 10 (0 = absente).
+    pub note: f32,
+    pub imdb: String,
+    pub tmdb: String,
+    pub tvdb: String,
+    pub verrouillee: bool,
     pub saisons: Vec<SaisonAffichage>,
 }
 
 impl SerieAffichage {
+    /// Épisodes présents sur le disque.
     pub fn nombre_episodes(&self) -> usize {
-        self.saisons.iter().map(|s| s.episodes.len()).sum()
+        self.saisons
+            .iter()
+            .flat_map(|s| &s.episodes)
+            .filter(|e| !e.manquant)
+            .count()
+    }
+
+    /// Épisodes connus du fournisseur mais absents du disque (affichés selon les réglages).
+    pub fn nombre_manquants(&self) -> usize {
+        self.saisons
+            .iter()
+            .flat_map(|s| &s.episodes)
+            .filter(|e| e.manquant)
+            .count()
+    }
+
+    /// Métadonnées déjà récupérées auprès d'un fournisseur.
+    pub fn traitee(&self) -> bool {
+        !self.tmdb.is_empty() || !self.tvdb.is_empty() || !self.imdb.is_empty()
+    }
+}
+
+/// Recherche d'une série (dialogue de choix d'un résultat).
+#[derive(Clone, Debug, PartialEq)]
+pub struct RequeteRechercheSerie {
+    /// Identifiant de la série cherchée.
+    pub serie: String,
+    pub texte: String,
+    pub annee: Option<u32>,
+    pub langue: String,
+}
+
+/// Élément absent de la bibliothèque (partie d'une saga, épisode).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ElementManquant {
+    pub titre: String,
+    pub titre_original: String,
+    /// Année (parties de saga) ou « S01E03 » (épisodes).
+    pub detail: String,
+    pub resume: String,
+}
+
+/// Éléments manquants d'une saga ou d'une série.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct GroupeManquants {
+    pub titre: String,
+    pub elements: Vec<ElementManquant>,
+}
+
+/// Un outil d'analyse localisé.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OutilAffiche {
+    pub chemin: String,
+    /// Version annoncée par l'outil ; `None` s'il ne répond pas.
+    pub version: Option<String>,
+}
+
+/// Résultat du test des outils d'analyse (réglage « Chemin de ffprobe / MediaInfo »).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct DiagnosticOutils {
+    pub ffprobe: Option<OutilAffiche>,
+    pub mediainfo: Option<OutilAffiche>,
+}
+
+impl DiagnosticOutils {
+    pub fn disponible(&self) -> bool {
+        self.ffprobe.is_some() || self.mediainfo.is_some()
     }
 }
 
@@ -249,8 +408,10 @@ pub trait SourceDonnees: Send + Sync {
     }
     /// Écrit des films modifiés dans l'interface (base, puis NFO en tâche).
     fn enregistrer_films(&self, films: &[Film]) -> Result<(), String>;
-    /// Retire des films de la base (et supprime leurs fichiers si demandé).
-    fn retirer_films(&self, ids: &[u64], supprimer_fichiers: bool) -> Result<(), String>;
+    /// Retire des films de la base ; avec `deplacer_fichiers`, leurs fichiers sont déplacés
+    /// dans la corbeille de leur source (`.corbeille`). Renvoie les films retirés
+    /// immédiatement ; ceux qui le sont par une tâche de fond arrivent par `FilmRetire`.
+    fn retirer_films(&self, ids: &[u64], deplacer_fichiers: bool) -> Result<Vec<u64>, String>;
     /// Transmet un secret (clé d'API...) au coffre à secrets. Jamais écrit dans `ui.json`.
     fn transmettre_secret(&self, nom: &str, valeur: &str) -> Result<(), String>;
     /// Réglages courants des services.
@@ -259,6 +420,24 @@ pub trait SourceDonnees: Send + Sync {
     fn enregistrer_reglages_services(&self, r: &ReglagesServices) -> Result<(), String>;
     /// Plan de renommage d'une sélection (rien n'est écrit).
     fn apercu_renommage(&self, ids: &[u64]) -> Result<Vec<ApercuFilm>, String>;
+    /// Plan de renommage de séries et de leurs épisodes (un aperçu par élément du plan ;
+    /// l'identifiant d'un aperçu n'est que son rang).
+    fn apercu_renommage_series(&self, ids: &[String]) -> Result<Vec<ApercuFilm>, String>;
+    /// Recherche d'une série auprès du fournisseur (bloquant).
+    fn rechercher_serie(
+        &self,
+        requete: &RequeteRechercheSerie,
+    ) -> Result<Vec<ResultatRecherche>, String>;
+    /// Écrit une série modifiée dans l'éditeur (base, puis NFO en tâche).
+    fn enregistrer_serie(&self, serie: &SerieAffichage) -> Result<(), String>;
+    /// Films de la saga présents chez le fournisseur mais absents de la bibliothèque
+    /// (bloquant : appelé hors du thread de l'interface).
+    fn films_manquants(&self, saga: &str) -> Result<Vec<ElementManquant>, String>;
+    /// Épisodes connus du fournisseur mais sans fichier local.
+    fn episodes_manquants(&self, serie: &str) -> Result<Vec<ElementManquant>, String>;
+    /// Localise ffprobe / MediaInfo pour un chemin donné (vide = recherche automatique) et
+    /// interroge leur version (bloquant : quelques secondes au plus).
+    fn tester_outils(&self, chemin: &str) -> Result<DiagnosticOutils, String>;
     /// Lance un traitement long ; son cycle de vie arrive par `retour` (ou par le canal
     /// installé par [`brancher`](Self::brancher)).
     fn lancer(&self, travail: Travail, retour: &Retour) -> Result<(), String>;
@@ -347,6 +526,7 @@ pub fn titre_nettoye(nom: &str) -> (String, Option<u32>) {
 pub struct SourceFactice {
     dossier_images: PathBuf,
     films: Arc<Mutex<Vec<Film>>>,
+    series: Arc<Mutex<Vec<SerieAffichage>>>,
     services: Arc<Mutex<ReglagesServices>>,
     secrets: Mutex<HashMap<String, String>>,
     annulations: Arc<Mutex<HashMap<u64, Arc<AtomicBool>>>>,
@@ -377,6 +557,9 @@ pub fn reglages_demo() -> ReglagesServices {
         threads_telechargement: 2,
         corbeille: true,
         cache_images: true,
+        gabarit_dossier_serie: "${showTitle} (${showYear})".into(),
+        gabarit_dossier_saison: "Saison ${seasonNr}".into(),
+        gabarit_fichier_episode: "${showTitle} - S${seasonNr2}E${episodeNr2} - ${title}".into(),
         ..ReglagesServices::default()
     }
 }
@@ -386,6 +569,7 @@ impl SourceFactice {
         Self {
             dossier_images,
             films: Arc::new(Mutex::new(films_factices())),
+            series: Arc::new(Mutex::new(series_demo())),
             services: Arc::new(Mutex::new(reglages_demo())),
             secrets: Mutex::new(HashMap::new()),
             annulations: Arc::default(),
@@ -435,9 +619,22 @@ impl SourceFactice {
     }
 }
 
-/// Effet d'une tâche simulée sur les films de démonstration ; renvoie les films modifiés.
-fn effet_simule(travail: &Travail, films: &mut [Film], services: &ReglagesServices) -> Vec<Film> {
-    let mut modifies = Vec::new();
+/// Ce qu'une tâche simulée change à sa fin.
+#[derive(Default)]
+struct Effets {
+    films: Vec<Film>,
+    series_modifiees: bool,
+    notifications: Vec<(Niveau, String)>,
+}
+
+/// Effet d'une tâche simulée sur les films et séries de démonstration.
+fn effet_simule(
+    travail: &Travail,
+    films: &mut [Film],
+    series: &mut [SerieAffichage],
+    services: &ReglagesServices,
+) -> Effets {
+    let mut effets = Effets::default();
     match travail {
         Travail::AppliquerResultat {
             film,
@@ -446,13 +643,39 @@ fn effet_simule(travail: &Travail, films: &mut [Film], services: &ReglagesServic
         } => {
             if let Some(f) = films.iter_mut().find(|f| f.id == *film) {
                 appliquer_resultat(f, resultat, *ne_pas_remplacer);
-                modifies.push(f.clone());
+                effets.films.push(f.clone());
             }
         }
         Travail::RecupererAuto { ids, .. } => {
             for f in films.iter_mut().filter(|f| ids.contains(&f.id)) {
                 f.metadonnees_ok = true;
-                modifies.push(f.clone());
+                effets.films.push(f.clone());
+            }
+        }
+        Travail::AppliquerResultatSerie {
+            serie,
+            resultat,
+            ne_pas_remplacer,
+        } => {
+            if let Some(s) = series.iter_mut().find(|s| s.id == *serie) {
+                if !*ne_pas_remplacer || s.resume.trim().is_empty() {
+                    s.resume = resultat.resume.clone();
+                }
+                if !*ne_pas_remplacer {
+                    s.titre = resultat.titre.clone();
+                    s.titre_original = resultat.titre_original.clone();
+                    s.annee = resultat.annee;
+                }
+                s.tmdb = resultat.id.clone();
+                effets.series_modifiees = true;
+            }
+        }
+        Travail::RecupererSeries { ids, .. } => {
+            for s in series.iter_mut().filter(|s| ids.contains(&s.id)) {
+                if s.tmdb.is_empty() {
+                    s.tmdb = format!("{}", 70_000 + s.titre.len());
+                }
+                effets.series_modifiees = true;
             }
         }
         Travail::Renommer { ids } => {
@@ -475,29 +698,54 @@ fn effet_simule(travail: &Travail, films: &mut [Film], services: &ReglagesServic
                     {
                         f.nom_fichier = v.nom.clone();
                     }
-                    modifies.push(f.clone());
+                    effets.films.push(f.clone());
                 }
             }
         }
-        Travail::MettreAJourSources | Travail::MettreAJourSeries | Travail::EcrireNfo { .. } => {}
+        Travail::AnalyserMedias { films: ids, series } => {
+            let n = films.iter().filter(|f| ids.contains(&f.id)).count() + series.len();
+            effets.notifications.push((
+                Niveau::Info,
+                format!("Analyse : {n} élément(s) (démonstration)"),
+            ));
+        }
+        Travail::MettreAJourSources
+        | Travail::MettreAJourSeries
+        | Travail::MettreAJourSelection { .. }
+        | Travail::AnnulerRenommage { .. }
+        | Travail::EcrireNfo { .. }
+        | Travail::EcrireNfoSeries { .. }
+        | Travail::RenommerSeries { .. } => {}
     }
-    modifies
+    effets
 }
 
-/// Séries de démonstration.
+/// Séries de démonstration (un épisode manquant, affiché selon les réglages).
 pub fn series_demo() -> Vec<SerieAffichage> {
     let ep = |episode: i32, titre: &str, vu: bool| EpisodeAffichage {
         episode,
         titre: titre.into(),
         fichier: format!("S01E{episode:02}.mkv"),
         vu,
+        infos_media: if episode == 1 {
+            "1080p H264 · AC3 6ch · 44 min".into()
+        } else {
+            String::new()
+        },
+        ..EpisodeAffichage::default()
     };
     vec![
         SerieAffichage {
             id: "demo-1".into(),
             titre: "Série Exemple".into(),
+            titre_original: "Example Show".into(),
             annee: 2019,
             chemin: "D:\\Séries\\Série Exemple (2019)".into(),
+            resume: "Résumé factice de la série de démonstration.".into(),
+            genres: vec!["Drame".into(), "Science-fiction".into()],
+            statut: StatutSerie::Terminee,
+            note: 7.8,
+            tmdb: "1399".into(),
             saisons: vec![
                 SaisonAffichage {
                     numero: 1,
@@ -507,9 +755,18 @@ pub fn series_demo() -> Vec<SerieAffichage> {
                 SaisonAffichage {
                     numero: 2,
                     titre: String::new(),
-                    episodes: vec![ep(1, "Le retour", false)],
+                    episodes: vec![
+                        ep(1, "Le retour", false),
+                        EpisodeAffichage {
+                            episode: 2,
+                            titre: "L'épisode absent".into(),
+                            manquant: true,
+                            ..EpisodeAffichage::default()
+                        },
+                    ],
                 },
             ],
+            ..SerieAffichage::default()
         },
         SerieAffichage {
             id: "demo-2".into(),
@@ -521,7 +778,34 @@ pub fn series_demo() -> Vec<SerieAffichage> {
                 titre: String::new(),
                 episodes: vec![ep(1, "Commencement", false)],
             }],
+            ..SerieAffichage::default()
         },
+    ]
+}
+
+/// Catalogue de la recherche factice de séries : (titre, titre original, année, résumé).
+fn catalogue_series() -> Vec<(&'static str, &'static str, u32, &'static str)> {
+    vec![
+        ("Série Exemple", "Example Show", 2019, "Résumé factice."),
+        ("Autre Série", "Another Show", 2023, "Autre résumé factice."),
+        (
+            "Autre Série",
+            "Another Show (remake)",
+            1998,
+            "Version ancienne.",
+        ),
+        (
+            "Les Enquêteurs",
+            "The Investigators",
+            2011,
+            "Enquêtes en série.",
+        ),
+        (
+            "Station Orbitale",
+            "Orbital Station",
+            2021,
+            "Huis clos spatial.",
+        ),
     ]
 }
 
@@ -560,7 +844,21 @@ impl SourceDonnees for SourceFactice {
     }
 
     fn series(&self) -> Vec<SerieAffichage> {
-        series_demo()
+        let manquants = self
+            .services
+            .lock()
+            .map(|s| s.afficher_episodes_manquants)
+            .unwrap_or(false);
+        let mut v = self.series.lock().map(|s| s.clone()).unwrap_or_default();
+        if !manquants {
+            for s in &mut v {
+                for saison in &mut s.saisons {
+                    saison.episodes.retain(|e| !e.manquant);
+                }
+                s.saisons.retain(|x| !x.episodes.is_empty());
+            }
+        }
+        v
     }
 
     fn sagas(&self) -> Vec<SagaAffichage> {
@@ -636,10 +934,15 @@ impl SourceDonnees for SourceFactice {
         Ok(())
     }
 
-    fn retirer_films(&self, ids: &[u64], _supprimer_fichiers: bool) -> Result<(), String> {
+    fn retirer_films(&self, ids: &[u64], _deplacer_fichiers: bool) -> Result<Vec<u64>, String> {
         let mut tous = self.films.lock().map_err(|e| e.to_string())?;
+        let retires: Vec<u64> = tous
+            .iter()
+            .map(|f| f.id)
+            .filter(|id| ids.contains(id))
+            .collect();
         tous.retain(|f| !ids.contains(&f.id));
-        Ok(())
+        Ok(retires)
     }
 
     fn transmettre_secret(&self, nom: &str, valeur: &str) -> Result<(), String> {
@@ -668,6 +971,142 @@ impl SourceDonnees for SourceFactice {
         ))
     }
 
+    fn apercu_renommage_series(&self, ids: &[String]) -> Result<Vec<ApercuFilm>, String> {
+        let series = self.series.lock().map_err(|e| e.to_string())?;
+        let mut v = Vec::new();
+        for s in series.iter().filter(|s| ids.contains(&s.id)) {
+            let ancien = s
+                .chemin
+                .rsplit(['\\', '/'])
+                .next()
+                .unwrap_or_default()
+                .to_string();
+            let nouveau = renommage::assainir(&format!("{} ({})", s.titre, s.annee));
+            let mut fichiers = Vec::new();
+            for saison in &s.saisons {
+                for e in saison.episodes.iter().filter(|e| !e.manquant) {
+                    let cible = renommage::assainir(&format!(
+                        "{} - S{:02}E{:02} - {}.mkv",
+                        s.titre, saison.numero, e.episode, e.titre
+                    ));
+                    fichiers.push(LigneFichier {
+                        type_fichier: "VIDEO".into(),
+                        inchange: e.fichier == cible,
+                        ancien: e.fichier.clone(),
+                        nouveau: cible,
+                    });
+                }
+            }
+            v.push(ApercuFilm {
+                id: v.len() as u64 + 1,
+                titre: s.titre.clone(),
+                source: "D:\\Séries".into(),
+                inchange: ancien == nouveau && fichiers.iter().all(LigneFichier::inchange),
+                ancien_dossier: ancien,
+                nouveau_dossier: nouveau,
+                fichiers,
+                conflits: Vec::new(),
+                avertissements: Vec::new(),
+            });
+        }
+        Ok(v)
+    }
+
+    fn rechercher_serie(
+        &self,
+        requete: &RequeteRechercheSerie,
+    ) -> Result<Vec<ResultatRecherche>, String> {
+        std::thread::sleep(self.latence);
+        if requete.texte.trim().is_empty() {
+            return Err("recherche vide".into());
+        }
+        let pour_score = RequeteRecherche {
+            film: 0,
+            extracteur: "TMDB".into(),
+            langue: requete.langue.clone(),
+            texte: requete.texte.clone(),
+            annee: requete.annee,
+        };
+        let mut v: Vec<ResultatRecherche> = catalogue_series()
+            .into_iter()
+            .enumerate()
+            .map(|(n, (titre, original, annee, resume))| ResultatRecherche {
+                id: format!("{}", 800_000 + n * 13),
+                titre: titre.into(),
+                titre_original: original.into(),
+                annee,
+                score: score_resultat(&pour_score, titre, original, annee),
+                resume: resume.into(),
+                affiche: self.image_demo(&format!("serie{n}"), GenreImage::Affiche, n as u64 + 300),
+            })
+            .filter(|r| r.score >= 0.3)
+            .collect();
+        v.sort_by(|a, b| b.score.total_cmp(&a.score).then(a.annee.cmp(&b.annee)));
+        Ok(v)
+    }
+
+    fn enregistrer_serie(&self, serie: &SerieAffichage) -> Result<(), String> {
+        let mut tous = self.series.lock().map_err(|e| e.to_string())?;
+        if let Some(x) = tous.iter_mut().find(|x| x.id == serie.id) {
+            let saisons = std::mem::take(&mut x.saisons);
+            *x = serie.clone();
+            x.saisons = saisons;
+        }
+        Ok(())
+    }
+
+    fn films_manquants(&self, saga: &str) -> Result<Vec<ElementManquant>, String> {
+        let element = |titre: &str, original: &str, annee: u32| ElementManquant {
+            titre: titre.into(),
+            titre_original: original.into(),
+            detail: annee.to_string(),
+            resume: format!("Résumé factice de « {titre} »."),
+        };
+        match saga {
+            "demo-saga-dune" => Ok(vec![element(
+                "Dune : Troisième partie",
+                "Dune: Part Three",
+                2026,
+            )]),
+            "demo-saga-matrix" => Ok(vec![
+                element("Matrix Revolutions", "The Matrix Revolutions", 2003),
+                element("Matrix Resurrections", "The Matrix Resurrections", 2021),
+            ]),
+            autre => Err(format!("saga {autre} inconnue")),
+        }
+    }
+
+    fn episodes_manquants(&self, serie: &str) -> Result<Vec<ElementManquant>, String> {
+        let series = self.series.lock().map_err(|e| e.to_string())?;
+        let s = series
+            .iter()
+            .find(|s| s.id == serie)
+            .ok_or_else(|| format!("série {serie} inconnue"))?;
+        Ok(s.saisons
+            .iter()
+            .flat_map(|sa| sa.episodes.iter().map(move |e| (sa.numero, e)))
+            .filter(|(_, e)| e.manquant)
+            .map(|(n, e)| ElementManquant {
+                titre: e.titre.clone(),
+                titre_original: String::new(),
+                detail: format!("S{n:02}E{:02}", e.episode),
+                resume: String::new(),
+            })
+            .collect())
+    }
+
+    fn tester_outils(&self, chemin: &str) -> Result<DiagnosticOutils, String> {
+        std::thread::sleep(self.latence);
+        let chemin = chemin.trim();
+        Ok(DiagnosticOutils {
+            ffprobe: (!chemin.is_empty()).then(|| OutilAffiche {
+                chemin: chemin.into(),
+                version: Some("ffprobe version démonstration".into()),
+            }),
+            mediainfo: None,
+        })
+    }
+
     fn lancer(&self, travail: Travail, retour: &Retour) -> Result<(), String> {
         let id = self.prochain_id.fetch_add(1, Ordering::SeqCst);
         let annulation = Arc::new(AtomicBool::new(false));
@@ -679,9 +1118,10 @@ impl SourceDonnees for SourceFactice {
             Travail::RecupererAuto { .. } => 25,
             _ => 10,
         };
-        let (pas, films, services, annulations, retour) = (
+        let (pas, films, series, services, annulations, retour) = (
             self.pas,
             self.films.clone(),
+            self.series.clone(),
             self.services.clone(),
             self.annulations.clone(),
             retour.clone(),
@@ -710,12 +1150,18 @@ impl SourceDonnees for SourceFactice {
             }
             if issue == IssueTache::Reussie {
                 let services = services.lock().map(|s| s.clone()).unwrap_or_default();
-                let modifies = match films.lock() {
-                    Ok(mut f) => effet_simule(&travail, &mut f, &services),
-                    Err(_) => Vec::new(),
+                let effets = match (films.lock(), series.lock()) {
+                    (Ok(mut f), Ok(mut s)) => effet_simule(&travail, &mut f, &mut s, &services),
+                    _ => Effets::default(),
                 };
-                for f in modifies {
+                for f in effets.films {
                     retour.envoyer(Message::FilmActualise(Box::new(f)));
+                }
+                if effets.series_modifiees {
+                    retour.envoyer(Message::SeriesModifiees);
+                }
+                for (niveau, texte) in effets.notifications {
+                    retour.envoyer(Message::Notifier(niveau, texte));
                 }
             }
             if let Ok(mut a) = annulations.lock() {

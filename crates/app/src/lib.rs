@@ -35,8 +35,10 @@
 //!   (scraping, épisodes, images, NFO, renommage) ;
 //! - [`gestion_films`] : sélection, films manquants d'une saga, retrait,
 //!   annulation du renommage ;
+//! - [`analyse`] : analyse des flux des fichiers médias (ffprobe, MediaInfo) ;
 //! - [`journal`] : journalisation dans `logs/`.
 
+pub mod analyse;
 pub mod application;
 pub mod artwork;
 pub mod conversion;
@@ -53,6 +55,7 @@ pub mod series;
 pub mod sources;
 pub mod taches;
 
+pub use analyse::{DiagnosticOutils, OutilTrouve, RapportAnalyse};
 pub use application::{Application, ConfigServices, OptionsDemarrage};
 pub use artwork::ConfigArtwork;
 pub use conversion::ConfigMetadonnees;

@@ -12,13 +12,15 @@ use crate::etat::{Message, Niveau};
 use crate::modele::Film;
 use crate::renommage::ApercuFilm;
 use crate::source_donnees::{
-    GenreImage, ReglagesServices, RequeteRecherche, ResultatRecherche, Retour, SECRET_CLE_TMDB,
+    DiagnosticOutils, ElementManquant, GenreImage, OutilAffiche, ReglagesServices,
+    RequeteRecherche, RequeteRechercheSerie, ResultatRecherche, Retour, SECRET_CLE_TMDB,
     SagaAffichage, SerieAffichage, SourceDonnees, Travail,
 };
 use crate::taches::{IssueTache, compteur};
 use mediamanager_app::{
-    Application as Services, ConfigMetadonnees, Evenement, IdTache, IssueTache as IssueServices,
-    NiveauMessage, PoigneeTache, RapportMiseAJour, RequeteFilm,
+    Application as Services, ConfigMetadonnees, ConfigSerie, Evenement, IdTache,
+    IssueTache as IssueServices, NiveauMessage, PoigneeTache, RapportMiseAJour, RapportRenommage,
+    RapportRetrait, RapportScrap, RequeteFilm, RequeteSerie,
 };
 use mediamanager_core::modele::Film as FilmModele;
 use mediamanager_scrapers::ResultatRecherche as ResultatScraper;
@@ -71,6 +73,14 @@ fn verrou<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|e| e.into_inner())
 }
 
+/// Résultat de recherche mémorisé par la dernière recherche (identifiant du dialogue).
+fn resultat_en_cache(i: &Interne, id: &str) -> Result<ResultatScraper, String> {
+    verrou(&i.resultats)
+        .get(id)
+        .cloned()
+        .ok_or_else(|| "résultat de recherche périmé : relancez la recherche".to_string())
+}
+
 fn niveau(n: NiveauMessage) -> Niveau {
     match n {
         NiveauMessage::Info => Niveau::Info,
@@ -95,6 +105,78 @@ fn bilan_mise_a_jour(r: RapportMiseAJour, quoi: &str) -> Option<(Niveau, String)
         Niveau::Avertissement
     };
     Some((n, texte))
+}
+
+/// Clé de cache d'un résultat de recherche : fournisseur et identifiants.
+fn cle_resultat(r: &ResultatScraper) -> String {
+    format!(
+        "{}:{}",
+        r.fournisseur,
+        r.ids
+            .iter()
+            .map(|(k, v)| format!("{k}={v}"))
+            .collect::<Vec<_>>()
+            .join(",")
+    )
+}
+
+fn bilan_scrap(r: RapportScrap, quoi: &str) -> Option<(Niveau, String)> {
+    let mut t = format!(
+        "{quoi} : {} réussie(s), {} sans résultat",
+        r.reussis.len(),
+        r.sans_resultat.len()
+    );
+    for (_, e) in &r.erreurs {
+        t.push_str(&format!("\n{e}"));
+    }
+    let n = if r.erreurs.is_empty() && r.sans_resultat.is_empty() {
+        Niveau::Info
+    } else {
+        Niveau::Avertissement
+    };
+    Some((n, t))
+}
+
+fn bilan_renommage(r: RapportRenommage) -> Option<(Niveau, String)> {
+    let mut t = format!(
+        "Renommage : {} renommé(s), {} inchangé(s)",
+        r.renommes.len(),
+        r.inchanges.len()
+    );
+    for (_, e) in &r.echecs {
+        t.push_str(&format!("\n{e}"));
+    }
+    let n = if r.echecs.is_empty() {
+        Niveau::Info
+    } else {
+        Niveau::Erreur
+    };
+    Some((n, t))
+}
+
+fn bilan_retrait(r: RapportRetrait, avec_fichiers: bool) -> Option<(Niveau, String)> {
+    let mut t = format!("{} film(s) retiré(s) de la base", r.retires.len());
+    if avec_fichiers {
+        t.push_str(&format!(
+            ", {} élément(s) déplacé(s) dans la corbeille de la source",
+            r.mis_a_la_corbeille.len()
+        ));
+    }
+    if !r.verrouilles.is_empty() {
+        t.push_str(&format!(
+            "\n{} film(s) verrouillé(s) ignoré(s)",
+            r.verrouilles.len()
+        ));
+    }
+    for (_, e) in &r.echecs {
+        t.push_str(&format!("\n{e}"));
+    }
+    let n = if r.echecs.is_empty() {
+        Niveau::Info
+    } else {
+        Niveau::Erreur
+    };
+    Some((n, t))
 }
 
 impl Interne {
@@ -300,9 +382,13 @@ impl SourceDonnees for SourceApplication {
     }
 
     fn series(&self) -> Vec<SerieAffichage> {
-        self.avec_app(|app| app.series().map_err(|e| e.to_string()))
-            .map(|v| v.iter().map(conversion::serie).collect())
-            .unwrap_or_default()
+        self.avec_app(|app| {
+            let r = app.reglages();
+            app.series()
+                .map(|v| v.iter().map(|s| conversion::serie(s, &r)).collect())
+                .map_err(|e| e.to_string())
+        })
+        .unwrap_or_default()
     }
 
     fn sagas(&self) -> Vec<SagaAffichage> {
@@ -353,15 +439,7 @@ impl SourceDonnees for SourceApplication {
         Ok(trouves
             .into_iter()
             .map(|r| {
-                let cle = format!(
-                    "{}:{}",
-                    r.fournisseur,
-                    r.ids
-                        .iter()
-                        .map(|(k, v)| format!("{k}={v}"))
-                        .collect::<Vec<_>>()
-                        .join(",")
-                );
+                let cle = cle_resultat(&r);
                 let affiche = ResultatRecherche {
                     id: cle.clone(),
                     titre: r.titre.clone(),
@@ -381,28 +459,20 @@ impl SourceDonnees for SourceApplication {
         let i = &self.interne;
         self.avec_app(|app| {
             let mut ids = Vec::new();
-            app.avec_stockage(|s| -> Result<(), String> {
-                for g in films {
-                    let Some(id) = i.id_modele(g.id) else {
-                        continue;
-                    };
-                    let Some(mut f) = s
-                        .bibliotheque
-                        .obtenir::<FilmModele>(&id)
-                        .map_err(|e| e.to_string())?
-                    else {
-                        continue;
-                    };
-                    conversion::appliquer_edition(g, &mut f);
-                    s.bibliotheque
-                        .enregistrer(&mut f)
-                        .map_err(|e| e.to_string())?;
-                    ids.push(id);
-                }
-                Ok(())
-            })?;
+            for g in films {
+                let Some(id) = i.id_modele(g.id) else {
+                    continue;
+                };
+                let Some(mut f) = app.film(&id).map_err(|e| e.to_string())? else {
+                    continue;
+                };
+                conversion::appliquer_edition(g, &mut f);
+                // Base, puis événement `FilmModifie` (l'affichage se rafraîchit).
+                app.enregistrer_film(f).map_err(|e| e.to_string())?;
+                ids.push(id);
+            }
             if !ids.is_empty() {
-                // Les NFO suivent la base (tâche principale ; FilmModifie rafraîchira l'affichage).
+                // Les NFO suivent la base (tâche principale).
                 let mut suivis = verrou(&i.suivis);
                 Interne::suivre(&mut suivis, app.ecrire_nfo_films(ids), true, |_| None);
             }
@@ -410,27 +480,19 @@ impl SourceDonnees for SourceApplication {
         })
     }
 
-    fn retirer_films(&self, ids: &[u64], supprimer_fichiers: bool) -> Result<(), String> {
-        if supprimer_fichiers {
-            return Err("la suppression des fichiers n'est pas encore disponible".into());
-        }
+    fn retirer_films(&self, ids: &[u64], deplacer_fichiers: bool) -> Result<Vec<u64>, String> {
         let i = &self.interne;
         let modele = i.ids_modele(ids);
         self.avec_app(|app| {
-            app.avec_stockage(|s| -> Result<(), String> {
-                for id in &modele {
-                    s.bibliotheque
-                        .supprimer::<FilmModele>(id)
-                        .map_err(|e| e.to_string())?;
-                }
-                Ok(())
-            })
+            let mut suivis = verrou(&i.suivis);
+            let p = app.retirer_films(modele, deplacer_fichiers);
+            Interne::suivre(&mut suivis, p, true, move |r| {
+                bilan_retrait(r, deplacer_fichiers)
+            });
+            Ok(())
         })?;
-        let mut images = verrou(&i.images);
-        for id in ids {
-            images.remove(id);
-        }
-        Ok(())
+        // Retrait en tâche : les films disparaissent de l'affichage par `FilmRetire`.
+        Ok(Vec::new())
     }
 
     fn transmettre_secret(&self, nom: &str, valeur: &str) -> Result<(), String> {
@@ -464,6 +526,122 @@ impl SourceDonnees for SourceApplication {
         Ok(conversion::plan_apercu(&plan, |id| i.id_affichage(id)))
     }
 
+    fn apercu_renommage_series(&self, ids: &[String]) -> Result<Vec<ApercuFilm>, String> {
+        let apercu =
+            self.avec_app(|app| app.apercu_renommage_series(ids).map_err(|e| e.to_string()))?;
+        Ok(conversion::plan_apercu_series(&apercu.plan))
+    }
+
+    fn rechercher_serie(
+        &self,
+        requete: &RequeteRechercheSerie,
+    ) -> Result<Vec<ResultatRecherche>, String> {
+        let i = &self.interne;
+        let poignee = self.avec_app(|app| {
+            let mut suivis = verrou(&i.suivis);
+            let p = app.rechercher_serie(
+                &requete.serie,
+                Some(RequeteSerie {
+                    texte: requete.texte.trim().to_string(),
+                    annee: requete.annee.and_then(|a| i32::try_from(a).ok()),
+                    ids: BTreeMap::new(),
+                    langue: Some(requete.langue.clone()).filter(|l| !l.trim().is_empty()),
+                }),
+            );
+            suivis.insert(
+                p.id,
+                Suivi {
+                    principale: false,
+                    bilan: None,
+                },
+            );
+            Ok(p)
+        })?;
+        let trouves = poignee.attendre().map_err(|e| e.to_string())?;
+        let mut cache = verrou(&i.resultats);
+        Ok(trouves
+            .into_iter()
+            .map(|r| {
+                // Préfixe « serie: » : les identifiants des films et des séries se recoupent.
+                let cle = format!("serie:{}", cle_resultat(&r));
+                let affiche = ResultatRecherche {
+                    id: cle.clone(),
+                    titre: r.titre.clone(),
+                    titre_original: r.titre_original.clone(),
+                    annee: u32::try_from(r.annee).unwrap_or(0),
+                    score: r.score.clamp(0.0, 1.0),
+                    resume: r.resume.clone(),
+                    affiche: None,
+                };
+                cache.insert(cle, r);
+                affiche
+            })
+            .collect())
+    }
+
+    fn enregistrer_serie(&self, serie: &SerieAffichage) -> Result<(), String> {
+        let i = &self.interne;
+        self.avec_app(|app| {
+            let Some(mut s) = app.serie(&serie.id).map_err(|e| e.to_string())? else {
+                return Err(format!("série {} introuvable", serie.id));
+            };
+            conversion::appliquer_edition_serie(serie, &mut s);
+            let s = app.enregistrer_serie(s).map_err(|e| e.to_string())?;
+            let mut suivis = verrou(&i.suivis);
+            Interne::suivre(&mut suivis, app.ecrire_nfo_series(vec![s.id]), true, |_| {
+                None
+            });
+            Ok(())
+        })
+    }
+
+    fn films_manquants(&self, saga: &str) -> Result<Vec<ElementManquant>, String> {
+        let i = &self.interne;
+        let poignee = self.avec_app(|app| {
+            let mut suivis = verrou(&i.suivis);
+            let p = app.films_manquants_saga(saga);
+            suivis.insert(
+                p.id,
+                Suivi {
+                    principale: false,
+                    bilan: None,
+                },
+            );
+            Ok(p)
+        })?;
+        let parties = poignee.attendre().map_err(|e| e.to_string())?;
+        Ok(parties.iter().map(conversion::partie_manquante).collect())
+    }
+
+    fn episodes_manquants(&self, serie: &str) -> Result<Vec<ElementManquant>, String> {
+        self.avec_app(|app| {
+            let Some(s) = app.serie(serie).map_err(|e| e.to_string())? else {
+                return Err(format!("série {serie} introuvable"));
+            };
+            let manquants = app.episodes_manquants(serie).map_err(|e| e.to_string())?;
+            Ok(manquants
+                .iter()
+                .map(|e| conversion::episode_manquant(e, &s.groupe_actif))
+                .collect())
+        })
+    }
+
+    fn tester_outils(&self, chemin: &str) -> Result<DiagnosticOutils, String> {
+        self.avec_app(|app| {
+            let d = app.diagnostiquer_outils(chemin);
+            let vers = |o: Option<mediamanager_app::OutilTrouve>| {
+                o.map(|o| OutilAffiche {
+                    chemin: o.chemin.display().to_string(),
+                    version: o.version,
+                })
+            };
+            Ok(DiagnosticOutils {
+                ffprobe: vers(d.ffprobe),
+                mediainfo: vers(d.mediainfo),
+            })
+        })
+    }
+
     fn lancer(&self, travail: Travail, _retour: &Retour) -> Result<(), String> {
         let i = &self.interne;
         self.avec_app(|app| {
@@ -471,6 +649,13 @@ impl SourceDonnees for SourceApplication {
             let config = |artwork: bool, ne_pas_remplacer: bool| {
                 let mut c = ConfigMetadonnees::depuis_reglages(&app.reglages().films);
                 c.artwork = artwork;
+                c.ne_pas_ecraser |= ne_pas_remplacer;
+                c
+            };
+            let config_serie = |artwork: bool, ne_pas_remplacer: bool| {
+                let mut c = ConfigSerie::depuis_reglages(&app.reglages().series);
+                c.artwork = artwork;
+                c.artwork_episodes = artwork;
                 c.ne_pas_ecraser |= ne_pas_remplacer;
                 c
             };
@@ -488,24 +673,13 @@ impl SourceDonnees for SourceApplication {
                         bilan_mise_a_jour(r, "Séries")
                     });
                 }
+                Travail::MettreAJourSelection { ids } => {
+                    let p = app.mettre_a_jour_selection_films(i.ids_modele(&ids));
+                    Interne::suivre(&mut suivis, p, true, |r| bilan_mise_a_jour(r, "Sélection"));
+                }
                 Travail::RecupererAuto { ids, artwork } => {
                     let p = app.scraper_films(i.ids_modele(&ids), config(artwork, false));
-                    Interne::suivre(&mut suivis, p, true, |r| {
-                        let mut t = format!(
-                            "Récupération : {} réussie(s), {} sans résultat",
-                            r.reussis.len(),
-                            r.sans_resultat.len()
-                        );
-                        for (_, e) in &r.erreurs {
-                            t.push_str(&format!("\n{e}"));
-                        }
-                        let n = if r.erreurs.is_empty() && r.sans_resultat.is_empty() {
-                            Niveau::Info
-                        } else {
-                            Niveau::Avertissement
-                        };
-                        Some((n, t))
-                    });
+                    Interne::suivre(&mut suivis, p, true, |r| bilan_scrap(r, "Récupération"));
                 }
                 Travail::AppliquerResultat {
                     film,
@@ -515,13 +689,7 @@ impl SourceDonnees for SourceApplication {
                     let id = i
                         .id_modele(film)
                         .ok_or_else(|| format!("film {film} inconnu"))?;
-                    let choix =
-                        verrou(&i.resultats)
-                            .get(&resultat.id)
-                            .cloned()
-                            .ok_or_else(|| {
-                                "résultat de recherche périmé : relancez la recherche".to_string()
-                            })?;
+                    let choix = resultat_en_cache(i, &resultat.id)?;
                     let p = app.appliquer_resultat(&id, choix, config(true, ne_pas_remplacer));
                     Interne::suivre(&mut suivis, p, true, |_| None);
                 }
@@ -533,22 +701,63 @@ impl SourceDonnees for SourceApplication {
                 }
                 Travail::Renommer { ids } => {
                     let p = app.renommer_films(i.ids_modele(&ids));
+                    Interne::suivre(&mut suivis, p, true, bilan_renommage);
+                }
+                Travail::AnnulerRenommage { ids } => {
+                    for id in i.ids_modele(&ids) {
+                        let p = app.annuler_renommage_film(&id);
+                        Interne::suivre(&mut suivis, p, true, |f| {
+                            Some((Niveau::Info, format!("Renommage annulé : {}", f.titre)))
+                        });
+                    }
+                }
+                Travail::AnalyserMedias { films, series } => {
+                    if !app.outils_analyse_disponibles() {
+                        return Err(mediamanager_app::ErreurApp::OutilsAnalyseAbsents.to_string());
+                    }
+                    let p = app.analyser_medias(i.ids_modele(&films), series);
                     Interne::suivre(&mut suivis, p, true, |r| {
-                        let mut t = format!(
-                            "Renommage : {} renommé(s), {} inchangé(s)",
-                            r.renommes.len(),
-                            r.inchanges.len()
-                        );
-                        for (_, e) in &r.echecs {
-                            t.push_str(&format!("\n{e}"));
+                        let mut t = format!("Analyse : {} fichier(s) analysé(s)", r.analyses);
+                        if r.aucun_fichier {
+                            t.push_str("\naucun fichier vidéo dans la sélection");
+                        }
+                        for (chemin, e) in &r.echecs {
+                            t.push_str(&format!("\n{chemin} : {e}"));
                         }
                         let n = if r.echecs.is_empty() {
                             Niveau::Info
                         } else {
-                            Niveau::Erreur
+                            Niveau::Avertissement
                         };
                         Some((n, t))
                     });
+                }
+                Travail::RecupererSeries { ids, artwork } => {
+                    let p = app.scraper_series(ids, config_serie(artwork, false));
+                    Interne::suivre(&mut suivis, p, true, |r| bilan_scrap(r, "Séries"));
+                }
+                Travail::AppliquerResultatSerie {
+                    serie,
+                    resultat,
+                    ne_pas_remplacer,
+                } => {
+                    let choix = resultat_en_cache(i, &resultat.id)?;
+                    let p = app.appliquer_resultat_serie(
+                        &serie,
+                        choix,
+                        config_serie(true, ne_pas_remplacer),
+                    );
+                    Interne::suivre(&mut suivis, p, true, |_| None);
+                }
+                Travail::EcrireNfoSeries { ids } => {
+                    let p = app.ecrire_nfo_series(ids);
+                    Interne::suivre(&mut suivis, p, true, |n| {
+                        Some((Niveau::Info, format!("NFO des séries écrits : {n}")))
+                    });
+                }
+                Travail::RenommerSeries { ids } => {
+                    let p = app.renommer_series(ids);
+                    Interne::suivre(&mut suivis, p, true, bilan_renommage);
                 }
             }
             Ok(())
@@ -737,7 +946,7 @@ pub(crate) mod tests {
         });
         e.appliquer(Message::Commande(crate::commandes::Commande::RetirerBase));
         e.appliquer(Message::Confirmer);
-        assert!(e.film(alien.id).is_none());
+        attendre(&mut e, |e| e.film(alien.id).is_none());
         assert_eq!(source.films().len(), 1);
         source.arreter().unwrap();
         source.arreter().unwrap();
@@ -811,7 +1020,9 @@ pub(crate) mod tests {
             .unwrap();
         assert_eq!(relu.resume, "Saisi dans l'éditeur");
         assert!(relu.vu);
-        assert!(source.retirer_films(&[f.id], true).is_err());
+        // Le retrait est une tâche de fond : l'appel lui-même aboutit.
+        assert!(source.retirer_films(&[f.id], false).unwrap().is_empty());
+        attendre(&mut e, |e| e.taches.is_empty());
         source.arreter().unwrap();
     }
 

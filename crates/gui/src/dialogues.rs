@@ -4,7 +4,10 @@
 use crate::i18n::Langue;
 use crate::modele::Film;
 use crate::reglages::Theme;
-use crate::source_donnees::{RequeteRecherche, ResultatRecherche};
+use crate::source_donnees::{
+    ElementManquant, GroupeManquants, RequeteRecherche, ResultatRecherche, SerieAffichage,
+    StatutSerie,
+};
 use std::fmt;
 
 // ------------------------------------------------------------------ éditeur de film
@@ -266,6 +269,8 @@ pub enum ActionEditeur {
 #[derive(Clone, Debug)]
 pub struct EtatRecherche {
     pub film_id: u64,
+    /// Série cherchée (recherche de série) ; `film_id` est alors 0.
+    pub serie: Option<String>,
     pub requete: RequeteRecherche,
     pub resultats: Vec<ResultatRecherche>,
     pub selection: Option<usize>,
@@ -323,6 +328,173 @@ pub enum ActionRecherche {
     Abandonner,
 }
 
+// ------------------------------------------------------------------ éditeur de série
+
+/// Copie éditable d'une série (champs numériques sous forme de texte pour la validation).
+#[derive(Clone, Debug, PartialEq, Default)]
+pub struct SerieEdite {
+    pub titre: String,
+    pub titre_original: String,
+    pub annee: String,
+    pub resume: String,
+    /// Genres séparés par des virgules.
+    pub genres: String,
+    pub statut: StatutSerie,
+    pub note: String,
+    pub verrouillee: bool,
+    pub imdb: String,
+    pub tmdb: String,
+    pub tvdb: String,
+}
+
+impl SerieEdite {
+    pub fn depuis(s: &SerieAffichage) -> Self {
+        Self {
+            titre: s.titre.clone(),
+            titre_original: s.titre_original.clone(),
+            annee: if s.annee > 0 {
+                s.annee.to_string()
+            } else {
+                String::new()
+            },
+            resume: s.resume.clone(),
+            genres: s.genres.join(", "),
+            statut: s.statut,
+            note: if s.note > 0.0 {
+                format!("{:.1}", s.note)
+            } else {
+                String::new()
+            },
+            verrouillee: s.verrouillee,
+            imdb: s.imdb.clone(),
+            tmdb: s.tmdb.clone(),
+            tvdb: s.tvdb.clone(),
+        }
+    }
+
+    /// Écrit le brouillon (supposé valide) dans la série affichée.
+    pub fn appliquer(&self, s: &mut SerieAffichage) {
+        s.titre = self.titre.trim().to_string();
+        s.titre_original = self.titre_original.trim().to_string();
+        s.annee = self.annee.trim().parse().unwrap_or(0);
+        s.resume = self.resume.clone();
+        s.genres = liste(&self.genres);
+        s.statut = self.statut;
+        s.note = nombre(&self.note).map(|n| n as f32).unwrap_or(0.0);
+        s.verrouillee = self.verrouillee;
+        s.imdb = self.imdb.trim().to_string();
+        s.tmdb = self.tmdb.trim().to_string();
+        s.tvdb = self.tvdb.trim().to_string();
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ChampSerie {
+    Titre,
+    Annee,
+    Note,
+    Imdb,
+    Tmdb,
+    Tvdb,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ErreurChampSerie {
+    pub champ: ChampSerie,
+    pub cle: &'static str,
+}
+
+/// Validation du brouillon d'une série ; liste vide = valide. L'année, la note et les
+/// identifiants peuvent rester vides.
+pub fn valider_serie(b: &SerieEdite) -> Vec<ErreurChampSerie> {
+    let mut e = Vec::new();
+    let mut err = |champ, cle| e.push(ErreurChampSerie { champ, cle });
+    if b.titre.trim().is_empty() {
+        err(ChampSerie::Titre, "editor.error.title");
+    }
+    let annee = b.annee.trim();
+    if !annee.is_empty()
+        && !annee
+            .parse::<u32>()
+            .is_ok_and(|a| (1870..=2100).contains(&a))
+    {
+        err(ChampSerie::Annee, "editor.error.year");
+    }
+    if !b.note.trim().is_empty() && !nombre(&b.note).is_some_and(|n| (0.0..=10.0).contains(&n)) {
+        err(ChampSerie::Note, "editor.error.rating");
+    }
+    let imdb = b.imdb.trim();
+    if !imdb.is_empty()
+        && !(imdb.starts_with("tt")
+            && imdb.len() >= 9
+            && imdb[2..].chars().all(|c| c.is_ascii_digit()))
+    {
+        err(ChampSerie::Imdb, "editor.error.imdb");
+    }
+    let tmdb = b.tmdb.trim();
+    if !tmdb.is_empty() && !tmdb.chars().all(|c| c.is_ascii_digit()) {
+        err(ChampSerie::Tmdb, "editor.error.tmdb");
+    }
+    let tvdb = b.tvdb.trim();
+    if !tvdb.is_empty() && !tvdb.chars().all(|c| c.is_ascii_digit()) {
+        err(ChampSerie::Tvdb, "editor.error.tvdb");
+    }
+    e
+}
+
+#[derive(Clone, Debug)]
+pub struct EtatEditeurSerie {
+    /// Identifiant de la série éditée.
+    pub id: String,
+    pub brouillon: SerieEdite,
+    pub erreurs: Vec<ErreurChampSerie>,
+}
+
+impl EtatEditeurSerie {
+    pub fn erreur(&self, champ: ChampSerie) -> Option<&'static str> {
+        self.erreurs
+            .iter()
+            .find(|e| e.champ == champ)
+            .map(|e| e.cle)
+    }
+}
+
+#[derive(Clone, Debug)]
+pub enum ActionEditeurSerie {
+    Brouillon(Box<SerieEdite>),
+    Valider,
+    Abandonner,
+}
+
+// ------------------------------------------------------------------ éléments manquants
+
+/// Dialogue « Trouver les manquants » : parties absentes d'une ou plusieurs sagas, ou
+/// épisodes absents d'une série.
+#[derive(Clone, Debug, Default)]
+pub struct EtatManquants {
+    /// Clé de traduction du titre du dialogue.
+    pub cle_titre: &'static str,
+    pub groupes: Vec<GroupeManquants>,
+    /// (groupe, élément) choisi pour la fiche.
+    pub selection: Option<(usize, usize)>,
+    pub en_cours: bool,
+    pub erreur: Option<String>,
+    /// Identifiant de la requête attendue : les réponses périmées sont ignorées.
+    pub id_requete: u64,
+}
+
+impl EtatManquants {
+    pub fn element_choisi(&self) -> Option<&ElementManquant> {
+        let (g, e) = self.selection?;
+        self.groupes.get(g)?.elements.get(e)
+    }
+
+    /// Nombre total d'éléments manquants.
+    pub fn total(&self) -> usize {
+        self.groupes.iter().map(|g| g.elements.len()).sum()
+    }
+}
+
 // ------------------------------------------------------------------ confirmation
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -351,6 +523,16 @@ pub struct EtatConfirmation {
     /// La case « ne plus demander » est-elle proposée ?
     pub masquable: bool,
     pub ne_plus_demander: bool,
+    /// Case à cocher propre à l'action (« déplacer les fichiers vers la corbeille »).
+    pub case: Option<CaseConfirmation>,
+}
+
+/// Case à cocher d'une confirmation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CaseConfirmation {
+    /// Clé de traduction du libellé.
+    pub cle: &'static str,
+    pub cochee: bool,
 }
 
 // ------------------------------------------------------------------ assistant

@@ -5,6 +5,7 @@ use std::sync::mpsc::Receiver;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
+use mediamanager_core::flux::ConfigOutils;
 use mediamanager_core::modele::{Episode, Film, Saga, Serie};
 use mediamanager_core::nfo::{NommageNfoFilm, NommageNfoSaison};
 use mediamanager_core::renommage::PlanRenommage;
@@ -14,6 +15,7 @@ use mediamanager_store::{
     CoffreSecrets, DossiersApplication, RapportDemarrage, Reglages, Stockage,
 };
 
+use crate::analyse::{self, DiagnosticOutils, RapportAnalyse};
 use crate::artwork::ConfigArtwork;
 use crate::conversion::ConfigMetadonnees;
 use crate::conversion_serie::ConfigSerie;
@@ -43,6 +45,10 @@ pub struct ConfigServices {
     pub horodatage_nfo: bool,
     /// Nom des NFO de saisons ; `None` (défaut) = aucun NFO de saison.
     pub nommage_nfo_saison: Option<NommageNfoSaison>,
+    /// Base de la recherche des outils d'analyse (dossier de l'application,
+    /// `PATH`) ; le chemin des réglages la complète. Défaut : exécutable
+    /// courant et `PATH` de l'environnement.
+    pub outils: ConfigOutils,
 }
 
 impl Default for ConfigServices {
@@ -55,6 +61,7 @@ impl Default for ConfigServices {
             nommage_nfo_film: vec![NommageNfoFilm::NomFichier],
             horodatage_nfo: true,
             nommage_nfo_saison: None,
+            outils: ConfigOutils::default(),
         }
     }
 }
@@ -569,6 +576,36 @@ impl Application {
             "Renommage des séries",
             TypeTache::Principale,
             move |n, ctx| crate::renommage_serie::renommer_series(n, ctx, &ids),
+        )
+    }
+    // -- Analyse des fichiers médias -------------------------------------------
+
+    /// Diagnostic des outils d'analyse pour un chemin donné (`""` =
+    /// recherche automatique) : chemins et versions. Lance les outils
+    /// (quelques secondes au plus) : à appeler hors du fil d'interface.
+    pub fn diagnostiquer_outils(&self, chemin: &str) -> DiagnosticOutils {
+        analyse::diagnostiquer(&self.noyau, chemin)
+    }
+
+    /// Vrai si un outil d'analyse est localisable avec les réglages courants
+    /// (rapide : aucun lancement).
+    pub fn outils_analyse_disponibles(&self) -> bool {
+        analyse::outils_reglages(&self.noyau).disponible()
+    }
+
+    /// Analyse les flux des fichiers vidéo des films et des séries (tous
+    /// leurs épisodes) indiqués et enregistre le résultat (tâche
+    /// principale). Échoue avec [`ErreurApp::OutilsAnalyseAbsents`] si aucun
+    /// outil n'est disponible.
+    pub fn analyser_medias(
+        &self,
+        films: Vec<String>,
+        series: Vec<String>,
+    ) -> PoigneeTache<RapportAnalyse> {
+        self.lancer(
+            "Analyse des fichiers médias",
+            TypeTache::Principale,
+            move |n, ctx| analyse::analyser_medias(n, ctx, &films, &series),
         )
     }
 }

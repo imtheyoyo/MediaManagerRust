@@ -14,12 +14,24 @@ pub fn afficher(ctx: &egui::Context, etat: &Etat, d: &EtatApercu, sortie: &mut S
     let reponse = Modal::new(egui::Id::unique("dlg_renommage")).show(ctx, |ui| {
         ui.set_min_size(Vec2::new(900.0, 460.0));
         ui.heading(i.t("renamer.title"));
-        ui.horizontal(|ui| {
-            ui.label(RichText::new(i.t("Settings.renamer.folder")).strong());
-            ui.monospace(&etat.services.gabarit_dossier_film);
-            ui.add_space(12.0);
-            ui.label(RichText::new(i.t("Settings.renamer.file")).strong());
-            ui.monospace(&etat.services.gabarit_fichier_film);
+        ui.horizontal_wrapped(|ui| {
+            let sv = &etat.services;
+            if d.series.is_some() {
+                ui.label(RichText::new(i.t("Settings.renamer.folder")).strong());
+                ui.monospace(&sv.gabarit_dossier_serie);
+                ui.add_space(12.0);
+                ui.label(RichText::new(i.t("gui.renamer.seasonfolder")).strong());
+                ui.monospace(&sv.gabarit_dossier_saison);
+                ui.add_space(12.0);
+                ui.label(RichText::new(i.t("Settings.renamer.file")).strong());
+                ui.monospace(&sv.gabarit_fichier_episode);
+            } else {
+                ui.label(RichText::new(i.t("Settings.renamer.folder")).strong());
+                ui.monospace(&sv.gabarit_dossier_film);
+                ui.add_space(12.0);
+                ui.label(RichText::new(i.t("Settings.renamer.file")).strong());
+                ui.monospace(&sv.gabarit_fichier_film);
+            }
         });
         ui.separator();
         if let Some(e) = &d.erreur {
@@ -43,7 +55,11 @@ pub fn afficher(ctx: &egui::Context, etat: &Etat, d: &EtatApercu, sortie: &mut S
                             ui.label("⚠");
                         });
                         h.col(|ui| {
-                            ui.strong(i.t("renamer.film"));
+                            ui.strong(i.t(if d.series.is_some() {
+                                "gui.renamer.element"
+                            } else {
+                                "renamer.film"
+                            }));
                         });
                     })
                     .body(|body| {

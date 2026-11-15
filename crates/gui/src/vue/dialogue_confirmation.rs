@@ -25,6 +25,12 @@ pub fn afficher(ctx: &egui::Context, etat: &Etat, c: &EtatConfirmation, sortie: 
             ui.separator();
             ui.label(&c.texte);
             ui.add_space(8.0);
+            if let Some(case) = c.case {
+                let mut v = case.cochee;
+                if ui.checkbox(&mut v, i.t(case.cle)).changed() {
+                    sortie.push(Message::Dialogue(ActionDialogue::ConfirmationCase(v)));
+                }
+            }
             if c.masquable {
                 let mut v = c.ne_plus_demander;
                 if ui.checkbox(&mut v, i.t("app.donotshowagain")).changed() {

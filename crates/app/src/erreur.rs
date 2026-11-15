@@ -27,6 +27,12 @@ pub enum ErreurApp {
     )]
     CleTmdbAbsente,
 
+    /// Ni `ffprobe` ni `mediainfo` n'ont été trouvés.
+    #[error(
+        "aucun outil d'analyse (ffprobe ou MediaInfo) n'a été trouvé : placez ffprobe.exe dans le dossier outils/ à côté de l'exécutable, ou indiquez son chemin dans les réglages (Outils externes)"
+    )]
+    OutilsAnalyseAbsents,
+
     /// Téléchargement d'une image impossible.
     #[error("téléchargement de {url} impossible : {message}")]
     Telechargement { url: String, message: String },

@@ -12,7 +12,7 @@ use super::tableau::{
 use crate::etat::{Etat, Message, NoeudSerie, OngletDetails};
 use crate::icones::{EtatCellule, Icone, cellule_etat, peindre_triangle};
 use crate::images::GestionnaireImages;
-use crate::source_donnees::{SaisonAffichage, SerieAffichage};
+use crate::source_donnees::{EpisodeAffichage, SaisonAffichage, SerieAffichage};
 use eframe::egui::{
     self, Align, Frame, Label, Layout, Margin, Panel, RichText, ScrollArea, Sense, Vec2, vec2,
 };
@@ -31,6 +31,8 @@ pub struct LigneSerie {
     pub vu: EtatCellule,
     /// `Some(déployé)` si le nœud a des enfants.
     pub deploiement: Option<bool>,
+    /// Épisode connu du fournisseur mais sans fichier local (affiché atténué).
+    pub manquant: bool,
 }
 
 fn titre_saison(etat: &Etat, s: &SaisonAffichage) -> String {
@@ -48,14 +50,20 @@ fn titre_saison(etat: &Etat, s: &SaisonAffichage) -> String {
     }
 }
 
-fn etat_vu<'a>(mut vus: impl Iterator<Item = &'a bool>, vide: bool) -> EtatCellule {
-    if vide {
+/// État « vu » des épisodes présents (les manquants ne comptent pas).
+fn etat_vu<'a>(episodes: impl Iterator<Item = &'a EpisodeAffichage>) -> EtatCellule {
+    let mut presents = episodes.filter(|e| !e.manquant).peekable();
+    if presents.peek().is_none() {
         EtatCellule::Vide
-    } else if vus.all(|v| *v) {
+    } else if presents.all(|e| e.vu) {
         EtatCellule::Oui
     } else {
         EtatCellule::Non
     }
+}
+
+fn episodes_presents(s: &SaisonAffichage) -> usize {
+    s.episodes.iter().filter(|e| !e.manquant).count()
 }
 
 /// Séries retenues par la recherche (texte contenu dans le titre, sans casse).
@@ -80,8 +88,9 @@ pub fn lignes_series(etat: &Etat) -> Vec<LigneSerie> {
             annee: s.annee,
             saisons: Some(s.saisons.len()),
             episodes: s.nombre_episodes(),
-            vu: etat_vu(episodes.map(|e| &e.vu), s.nombre_episodes() == 0),
+            vu: etat_vu(episodes),
             deploiement: (!s.saisons.is_empty()).then_some(deployee),
+            manquant: false,
         });
         if !deployee {
             continue;
@@ -96,12 +105,10 @@ pub fn lignes_series(etat: &Etat) -> Vec<LigneSerie> {
                 titre: titre_saison(etat, saison),
                 annee: 0,
                 saisons: None,
-                episodes: saison.episodes.len(),
-                vu: etat_vu(
-                    saison.episodes.iter().map(|e| &e.vu),
-                    saison.episodes.is_empty(),
-                ),
+                episodes: episodes_presents(saison),
+                vu: etat_vu(saison.episodes.iter()),
                 deploiement: (!saison.episodes.is_empty()).then_some(ouverte),
+                manquant: false,
             });
             if !ouverte {
                 continue;
@@ -117,19 +124,30 @@ pub fn lignes_series(etat: &Etat) -> Vec<LigneSerie> {
                 } else {
                     e.titre.clone()
                 };
+                let titre = if e.manquant {
+                    format!(
+                        "{numero} - {titre} ({})",
+                        etat.i18n.t("gui.tvshows.missing")
+                    )
+                } else {
+                    format!("{numero} - {titre}")
+                };
                 lignes.push(LigneSerie {
                     noeud: NoeudSerie::Episode(s.id.clone(), saison.numero, rang),
                     profondeur: 2,
-                    titre: format!("{numero} - {titre}"),
+                    titre,
                     annee: 0,
                     saisons: None,
                     episodes: 0,
-                    vu: if e.vu {
+                    vu: if e.manquant {
+                        EtatCellule::Vide
+                    } else if e.vu {
                         EtatCellule::Oui
                     } else {
                         EtatCellule::Non
                     },
                     deploiement: None,
+                    manquant: e.manquant,
                 });
             }
         }
@@ -224,7 +242,7 @@ fn episodes_du_noeud(etat: &Etat, noeud: &NoeudSerie) -> usize {
             .saisons
             .iter()
             .find(|x| x.numero == *n)
-            .map(|x| x.episodes.len())
+            .map(episodes_presents)
             .unwrap_or(0),
         NoeudSerie::Episode(..) => 1,
     }
@@ -280,6 +298,8 @@ fn table(ui: &mut egui::Ui, etat: &Etat, sortie: &mut Sortie) {
                     ui.add_space(3.0);
                     let texte = if l.profondeur == 0 {
                         RichText::new(&l.titre)
+                    } else if l.manquant {
+                        RichText::new(&l.titre).size(12.5).weak().italics()
                     } else {
                         RichText::new(&l.titre).size(12.5)
                     };
@@ -407,11 +427,16 @@ fn infos(
         i.t("metatag.watched"),
         i.t("metatag.path"),
         i.t("metatag.filename"),
+        i.t("gui.series.status"),
+        i.t("metatag.rating"),
+        i.t("metatag.genre"),
+        i.t("gui.tvshows.missingcount"),
+        i.t("gui.tvshows.mediainfo"),
     ];
     let l = largeur_libelles(ui, &libelles);
     match noeud {
         NoeudSerie::Serie(_) => {
-            titres(ui, &serie.titre, "");
+            titres(ui, &serie.titre, &serie.titre_original);
             egui::Grid::new("grille_serie")
                 .num_columns(2)
                 .min_col_width(l)
@@ -423,12 +448,26 @@ fn infos(
                         String::new()
                     };
                     ligne(ui, &libelles[0], &annee);
+                    ligne(ui, &libelles[6], &i.t(serie.statut.cle()));
+                    if serie.note > 0.0 {
+                        ligne(ui, &libelles[7], &i.decimal(f64::from(serie.note), 1));
+                    }
+                    if !serie.genres.is_empty() {
+                        ligne(ui, &libelles[8], &serie.genres.join(", "));
+                    }
                     ligne(ui, &libelles[1], &serie.saisons.len().to_string());
                     ligne(ui, &libelles[2], &serie.nombre_episodes().to_string());
+                    if serie.nombre_manquants() > 0 {
+                        ligne(ui, &libelles[9], &serie.nombre_manquants().to_string());
+                    }
                     ui.label(RichText::new(&libelles[4]).strong());
                     lien_chemin(ui, &serie.chemin, sortie);
                     ui.end_row();
                 });
+            if !serie.resume.is_empty() {
+                ui.add_space(6.0);
+                ui.add(Label::new(&serie.resume).wrap());
+            }
         }
         NoeudSerie::Saison(_, n) => {
             let Some(s) = saison(*n) else { return };
@@ -438,7 +477,7 @@ fn infos(
                 .min_col_width(l)
                 .spacing([14.0, 3.0])
                 .show(ui, |ui| {
-                    ligne(ui, &libelles[2], &s.episodes.len().to_string());
+                    ligne(ui, &libelles[2], &episodes_presents(s).to_string());
                 });
         }
         NoeudSerie::Episode(_, n, rang) => {
@@ -451,6 +490,11 @@ fn infos(
                 .min_col_width(l)
                 .spacing([14.0, 3.0])
                 .show(ui, |ui| {
+                    if e.manquant {
+                        ui.label(RichText::new(i.t("gui.tvshows.missingepisode")).weak());
+                        ui.end_row();
+                        return;
+                    }
                     let vu = if e.vu {
                         i.t("Button.yes")
                     } else {
@@ -458,11 +502,16 @@ fn infos(
                     };
                     ligne(ui, &libelles[3], &vu);
                     ligne(ui, &libelles[5], &e.fichier);
+                    if !e.infos_media.is_empty() {
+                        ligne(ui, &libelles[10], &e.infos_media);
+                    }
                 });
         }
     }
 }
 
+/// Onglet « Fichiers médias » : fichiers des épisodes présents avec leur résumé technique
+/// (rempli par la tâche « Analyser les fichiers médias »).
 fn fichiers(
     ui: &mut egui::Ui,
     etat: &Etat,
@@ -481,13 +530,16 @@ fn fichiers(
         {
             continue;
         }
-        for e in &s.episodes {
+        for e in s.episodes.iter().filter(|e| !e.manquant) {
             ui.horizontal(|ui| {
                 ui.add_sized(
                     vec2(18.0, 18.0),
                     Label::new(if e.vu { crate::polices::COCHE } else { "" }),
                 );
                 ui.label(&e.fichier);
+                if !e.infos_media.is_empty() {
+                    ui.label(RichText::new(&e.infos_media).weak());
+                }
             });
         }
     }
@@ -505,6 +557,7 @@ mod tests {
             titre: format!("Épisode {n}"),
             fichier: format!("e{n}.mkv"),
             vu,
+            ..EpisodeAffichage::default()
         };
         etat.series = vec![
             SerieAffichage {
@@ -517,6 +570,7 @@ mod tests {
                     titre: String::new(),
                     episodes: vec![ep(1, true), ep(2, false)],
                 }],
+                ..SerieAffichage::default()
             },
             SerieAffichage {
                 id: "b".into(),
@@ -528,6 +582,7 @@ mod tests {
                     titre: String::new(),
                     episodes: vec![ep(1, true)],
                 }],
+                ..SerieAffichage::default()
             },
         ];
         etat

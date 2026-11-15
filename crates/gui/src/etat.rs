@@ -4,8 +4,9 @@
 use crate::collections::NoeudSaga;
 use crate::commandes::Commande;
 use crate::dialogues::{
-    ActionAssistant, ActionConfirmee, ActionEditeur, ActionRecherche, EtatAssistant,
-    EtatConfirmation, EtatEditeur, EtatRecherche, FilmEdite, OngletEditeur, valider,
+    ActionAssistant, ActionConfirmee, ActionEditeur, ActionEditeurSerie, ActionRecherche,
+    CaseConfirmation, EtatAssistant, EtatConfirmation, EtatEditeur, EtatEditeurSerie,
+    EtatManquants, EtatRecherche, FilmEdite, OngletEditeur, SerieEdite, valider, valider_serie,
 };
 use crate::filtres::{ActionFiltre, ContexteFiltre, FiltresAvances, OngletFiltre};
 use crate::i18n::{I18n, Langue};
@@ -15,10 +16,11 @@ use crate::ouverture::{self, CibleOuverture, Lanceur, Systeme};
 use crate::persistance::{ColonnePersistee, EtatInterface, GeometrieFenetre, TriPersiste};
 use crate::reglages::{Page, Reglages, Theme};
 use crate::renommage::ApercuFilm;
-use crate::selecteur::{self, CibleDossier, SelecteurDossier};
+use crate::selecteur::{self, CibleDossier, CibleFichier, SelecteurDossier, SelecteurFichier};
 use crate::source_donnees::{
-    ReglagesServices, RequeteRecherche, ResultatRecherche, Retour, SECRET_CLE_TMDB, SagaAffichage,
-    SerieAffichage, SourceDonnees, SourceFactice, Travail, titre_nettoye,
+    DiagnosticOutils, GroupeManquants, ReglagesServices, RequeteRecherche, RequeteRechercheSerie,
+    ResultatRecherche, Retour, SECRET_CLE_TMDB, SagaAffichage, SerieAffichage, SourceDonnees,
+    SourceFactice, Travail, titre_nettoye,
 };
 use crate::taches::{IssueTache, Repaint, Tache};
 use regex::Regex;
@@ -152,6 +154,8 @@ pub struct EtatApercu {
     /// Plan de renommage calculé par la source à l'ouverture du dialogue.
     pub apercus: Vec<ApercuFilm>,
     pub erreur: Option<String>,
+    /// Séries concernées (renommage d'une série et de ses épisodes) ; `None` pour des films.
+    pub series: Option<Vec<String>>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -162,6 +166,9 @@ pub struct EtatDialogueReglages {
     pub saisie_source: String,
     pub saisie_source_serie: String,
     pub saisie_cle: String,
+    /// Test des outils d'analyse en cours / dernier résultat.
+    pub test_outils_en_cours: bool,
+    pub test_outils: Option<Result<DiagnosticOutils, String>>,
 }
 
 /// Dialogue modal affiché (un seul à la fois ; le dialogue de filtres, non modal, est à part).
@@ -172,6 +179,8 @@ pub enum Dialogue {
     Messages,
     Editeur(Box<EtatEditeur>),
     Recherche(Box<EtatRecherche>),
+    EditeurSerie(Box<EtatEditeurSerie>),
+    Manquants(EtatManquants),
     Confirmation(EtatConfirmation),
     Assistant(Box<EtatAssistant>),
     MiseAJour(EtatDialogueMiseAJour),
@@ -216,8 +225,13 @@ pub enum ActionDialogue {
     ReglagesEnregistrerCle,
     Editeur(ActionEditeur),
     Recherche(ActionRecherche),
+    EditeurSerie(ActionEditeurSerie),
     Assistant(ActionAssistant),
     ConfirmationNePlusDemander(bool),
+    /// Case propre à l'action confirmée (« déplacer les fichiers vers la corbeille »).
+    ConfirmationCase(bool),
+    /// Choisit un élément de la liste des manquants (groupe, rang).
+    ManquantsChoisir(usize, usize),
 }
 
 /// Messages : seul `Etat::appliquer` modifie l'état.
@@ -288,6 +302,19 @@ pub enum Message {
     ChoisirDossier(CibleDossier),
     /// Résultat du sélecteur (`None` : annulé).
     DossierChoisi(CibleDossier, Option<PathBuf>),
+    /// Ouvre le sélecteur de fichiers natif (thread dédié).
+    ChoisirFichier(CibleFichier),
+    /// Résultat du sélecteur de fichiers (`None` : annulé).
+    FichierChoisi(CibleFichier, Option<PathBuf>),
+    /// Teste les outils d'analyse avec le chemin saisi dans les réglages.
+    TesterOutils,
+    ResultatTestOutils(Result<DiagnosticOutils, String>),
+    /// Fin de la recherche des éléments manquants (sagas ou série).
+    ManquantsTrouves {
+        id_requete: u64,
+        groupes: Vec<GroupeManquants>,
+        erreurs: Vec<String>,
+    },
     /// Recherche d'une nouvelle version du programme (`manuel` : demandée par l'utilisateur,
     /// le dialogue s'ouvre aussitôt ; sinon vérification silencieuse au démarrage).
     RechercherMiseAJour {
@@ -335,6 +362,13 @@ pub enum Message {
     FilmRetire(u64),
     /// La liste des séries a changé.
     SeriesModifiees,
+}
+
+/// Ce dont on cherche les éléments manquants : (identifiant, titre) d'une saga ou d'une série.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum CibleManquants {
+    Saga(String, String),
+    Serie(String, String),
 }
 
 pub struct Etat {
@@ -390,6 +424,7 @@ pub struct Etat {
     /// Adresse de l'API des publications et identité du programme (remplaçables en test).
     pub config_mise_a_jour: ConfigMiseAJour,
     selecteur: SelecteurDossier,
+    selecteur_fichier: SelecteurFichier,
     /// Demandes ponctuelles consommées par l'application (effets hors état).
     pub vider_cache_images: bool,
     pub focus_recherche: bool,
@@ -483,6 +518,7 @@ impl Etat {
             assistant_termine: false,
             config_mise_a_jour: ConfigMiseAJour::default(),
             selecteur: selecteur::par_defaut(),
+            selecteur_fichier: selecteur::fichier_par_defaut(),
             vider_cache_images: false,
             focus_recherche: false,
             quitter: false,
@@ -890,6 +926,36 @@ impl Etat {
                     self.dossier_choisi(cible, c);
                 }
             }
+            Message::ChoisirFichier(cible) => self.choisir_fichier(cible),
+            Message::FichierChoisi(cible, chemin) => {
+                if let Some(c) = chemin {
+                    self.fichier_choisi(cible, c);
+                }
+            }
+            Message::TesterOutils => self.tester_outils(),
+            Message::ResultatTestOutils(r) => {
+                if let Some(Dialogue::Reglages(d)) = &mut self.dialogue {
+                    d.test_outils_en_cours = false;
+                    d.test_outils = Some(r);
+                }
+            }
+            Message::ManquantsTrouves {
+                id_requete,
+                groupes,
+                erreurs,
+            } => {
+                if let Some(Dialogue::Manquants(m)) = &mut self.dialogue
+                    && m.id_requete == id_requete
+                {
+                    m.en_cours = false;
+                    m.selection = groupes
+                        .iter()
+                        .position(|g| !g.elements.is_empty())
+                        .map(|g| (g, 0));
+                    m.groupes = groupes;
+                    m.erreur = (!erreurs.is_empty()).then(|| erreurs.join("\n"));
+                }
+            }
             Message::RechercherMiseAJour { manuel } => self.rechercher_mise_a_jour(manuel),
             Message::ResultatMiseAJour { manuel, resultat } => {
                 self.resultat_mise_a_jour(manuel, resultat)
@@ -1198,16 +1264,27 @@ impl Etat {
     }
 
     fn executer(&mut self, commande: Commande) {
+        if self.module == Module::Series {
+            return self.executer_serie(commande);
+        }
         if matches!(commande, Commande::OuvrirDossier | Commande::Lire) {
             return self.action_fichier(commande);
         }
+        // « Trouver les manquants » cherche la saga du nœud choisi dans Collections ou, à
+        // défaut, celles des films sélectionnés : il gère lui-même l'absence de sélection.
+        if commande == Commande::TrouverManquants {
+            return self.trouver_manquants_films();
+        }
         if commande.requiert_selection() && self.selection.is_empty() {
-            let texte = self.i18n.t("app.nothingselected");
-            self.notifier(Niveau::Avertissement, texte);
+            self.avertir_aucune_selection();
             return;
         }
         match commande {
             Commande::MettreAJourToutesSources => self.lancer_travail(Travail::MettreAJourSources),
+            Commande::MettreAJourSelection => {
+                let ids = self.selection_ordonnee();
+                self.lancer_travail(Travail::MettreAJourSelection { ids });
+            }
             Commande::ScrapeMeilleur | Commande::ScrapeMetadonnees => {
                 let ids = self.selection_ordonnee();
                 self.lancer_travail(Travail::RecupererAuto {
@@ -1232,6 +1309,17 @@ impl Etat {
             Commande::ReecrireNfo => {
                 let ids = self.selection_ordonnee();
                 self.lancer_travail(Travail::EcrireNfo { ids });
+            }
+            Commande::InfosMedia => {
+                let films = self.selection_ordonnee();
+                self.lancer_travail(Travail::AnalyserMedias {
+                    films,
+                    series: Vec::new(),
+                });
+            }
+            Commande::AnnulerRenommage => {
+                let ids = self.selection_ordonnee();
+                self.lancer_travail(Travail::AnnulerRenommage { ids });
             }
             Commande::AjouterSource => {
                 // Page des sources (saisie manuelle en repli) + sélecteur natif.
@@ -1269,20 +1357,332 @@ impl Etat {
             Commande::Renommer | Commande::ApercuRenommage => {
                 self.ouvrir_dialogue(TypeDialogue::ApercuRenommage)
             }
-            autre => {
-                let action = self.i18n.t(autre.cle());
-                let texte = self
-                    .i18n
-                    .t_args("gui.notimplemented", &[("action", action.as_str())]);
-                self.notifier(Niveau::Info, texte);
+            autre => self.notifier_bientot(autre),
+        }
+    }
+
+    fn avertir_aucune_selection(&mut self) {
+        let texte = self.i18n.t("app.nothingselected");
+        self.notifier(Niveau::Avertissement, texte);
+    }
+
+    /// Fonction pas encore réalisée : « bientôt disponible ».
+    fn notifier_bientot(&mut self, commande: Commande) {
+        let action = self.i18n.t(commande.cle());
+        let texte = self
+            .i18n
+            .t_args("gui.notimplemented", &[("action", action.as_str())]);
+        self.notifier(Niveau::Info, texte);
+    }
+
+    // ---- commandes du module Séries
+
+    /// Série du nœud sélectionné dans l'arbre.
+    pub fn serie_selectionnee(&self) -> Option<&SerieAffichage> {
+        let id = self.noeud_serie.as_ref()?.id_serie();
+        self.series.iter().find(|s| s.id == id)
+    }
+
+    /// Les commandes du menu s'appliquent à la série du nœud sélectionné.
+    fn executer_serie(&mut self, commande: Commande) {
+        match commande {
+            Commande::MettreAJourToutesSources | Commande::MettreAJourSelection => {
+                return self.lancer_travail(Travail::MettreAJourSeries);
+            }
+            Commande::AjouterSource => {
+                self.appliquer_sans_recalcul(Message::OuvrirReglagesPage(Page::Series));
+                return self.choisir_dossier(CibleDossier::SourceSeries);
+            }
+            Commande::ScrapeNonTraites => {
+                let ids: Vec<String> = self
+                    .series
+                    .iter()
+                    .filter(|s| !s.traitee() && !s.verrouillee)
+                    .map(|s| s.id.clone())
+                    .collect();
+                if ids.is_empty() {
+                    let texte = self.i18n.t("gui.scrape.nothingtv");
+                    self.notifier(Niveau::Info, texte);
+                } else {
+                    self.lancer_travail(Travail::RecupererSeries { ids, artwork: true });
+                }
+                return;
+            }
+            _ => {}
+        }
+        let Some(serie) = self.serie_selectionnee().cloned() else {
+            return self.avertir_aucune_selection();
+        };
+        let id = serie.id.clone();
+        match commande {
+            Commande::ScrapeInteractif => self.ouvrir_recherche_serie(&serie),
+            Commande::ScrapeMeilleur | Commande::ScrapeMetadonnees => {
+                self.lancer_travail(Travail::RecupererSeries {
+                    ids: vec![id],
+                    artwork: commande == Commande::ScrapeMeilleur,
+                });
+            }
+            Commande::Editer => self.ouvrir_editeur_serie(&serie),
+            Commande::BasculerVerrou => {
+                let mut modifiee = serie;
+                modifiee.verrouillee = !modifiee.verrouillee;
+                if let Err(e) = self.source.enregistrer_serie(&modifiee) {
+                    self.notifier(Niveau::Erreur, e);
+                } else if let Some(x) = self.series.iter_mut().find(|s| s.id == modifiee.id) {
+                    *x = modifiee;
+                }
+            }
+            Commande::ReecrireNfo => {
+                self.lancer_travail(Travail::EcrireNfoSeries { ids: vec![id] })
+            }
+            Commande::InfosMedia => self.lancer_travail(Travail::AnalyserMedias {
+                films: Vec::new(),
+                series: vec![id],
+            }),
+            Commande::Renommer | Commande::ApercuRenommage => {
+                self.ouvrir_dialogue(TypeDialogue::ApercuRenommage)
+            }
+            Commande::TrouverManquants => {
+                self.lancer_manquants(
+                    "gui.missing.titletv",
+                    vec![CibleManquants::Serie(id, serie.titre)],
+                );
+            }
+            Commande::OuvrirDossier => {
+                if serie.chemin.is_empty() {
+                    let texte = self.i18n.t("gui.open.nofolder");
+                    self.notifier(Niveau::Avertissement, texte);
+                } else {
+                    self.ouvrir(ouverture::cible_dossier(&serie.chemin, None));
+                }
+            }
+            autre => self.notifier_bientot(autre),
+        }
+    }
+
+    /// Recherche manuelle d'une série (dialogue de choix d'un résultat).
+    fn ouvrir_recherche_serie(&mut self, serie: &SerieAffichage) {
+        let dossier = std::path::Path::new(&serie.chemin)
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let (texte, annee) = titre_nettoye(&dossier);
+        let texte = if texte.is_empty() {
+            serie.titre.clone()
+        } else {
+            texte
+        };
+        let extracteur = self
+            .source
+            .extracteurs()
+            .into_iter()
+            .next()
+            .unwrap_or_default();
+        self.dialogue = Some(Dialogue::Recherche(Box::new(EtatRecherche {
+            film_id: 0,
+            serie: Some(serie.id.clone()),
+            requete: RequeteRecherche {
+                film: 0,
+                extracteur,
+                langue: self.reglages.langue.code().into(),
+                texte,
+                annee: annee.or(Some(serie.annee)).filter(|a| *a > 0),
+            },
+            resultats: Vec::new(),
+            selection: None,
+            en_cours: false,
+            id_requete: 0,
+            erreur: None,
+            ne_pas_remplacer: false,
+            file: Vec::new(),
+            total: 1,
+        })));
+        self.lancer_recherche();
+    }
+
+    // ---- éditeur de série
+
+    fn ouvrir_editeur_serie(&mut self, serie: &SerieAffichage) {
+        self.dialogue = Some(Dialogue::EditeurSerie(Box::new(EtatEditeurSerie {
+            id: serie.id.clone(),
+            brouillon: SerieEdite::depuis(serie),
+            erreurs: Vec::new(),
+        })));
+    }
+
+    fn action_editeur_serie(&mut self, action: ActionEditeurSerie) {
+        let Some(Dialogue::EditeurSerie(e)) = &mut self.dialogue else {
+            return;
+        };
+        match action {
+            ActionEditeurSerie::Brouillon(b) => {
+                e.brouillon = *b;
+                // Les erreurs disparaissent au fil de la correction.
+                if !e.erreurs.is_empty() {
+                    e.erreurs = valider_serie(&e.brouillon);
+                }
+            }
+            ActionEditeurSerie::Abandonner => self.dialogue = None,
+            ActionEditeurSerie::Valider => {
+                let erreurs = valider_serie(&e.brouillon);
+                if !erreurs.is_empty() {
+                    e.erreurs = erreurs;
+                    return;
+                }
+                let (id, brouillon) = (e.id.clone(), e.brouillon.clone());
+                self.dialogue = None;
+                let Some(serie) = self.series.iter_mut().find(|s| s.id == id) else {
+                    return;
+                };
+                brouillon.appliquer(serie);
+                let copie = serie.clone();
+                if let Err(err) = self.source.enregistrer_serie(&copie) {
+                    self.notifier(Niveau::Erreur, err);
+                }
             }
         }
     }
 
+    // ---- éléments manquants
+
+    /// Sagas dont chercher les films manquants : celle du nœud choisi dans Collections, sinon
+    /// celles des films sélectionnés.
+    fn sagas_a_verifier(&self) -> Vec<CibleManquants> {
+        let mut v: Vec<CibleManquants> = Vec::new();
+        let mut ajouter = |s: &SagaAffichage| {
+            if !v
+                .iter()
+                .any(|c| matches!(c, CibleManquants::Saga(id, _) if *id == s.id))
+            {
+                v.push(CibleManquants::Saga(s.id.clone(), s.titre.clone()));
+            }
+        };
+        if self.module == Module::Collections
+            && let Some(saga) = self
+                .noeud_saga
+                .as_ref()
+                .and_then(|n| self.saga(n.id_saga()))
+        {
+            ajouter(saga);
+            return v;
+        }
+        for f in self.films_selectionnes() {
+            if let Some(titre) = &f.saga
+                && let Some(saga) = self.sagas.iter().find(|s| &s.titre == titre)
+            {
+                ajouter(saga);
+            }
+        }
+        v
+    }
+
+    fn trouver_manquants_films(&mut self) {
+        let cibles = self.sagas_a_verifier();
+        if cibles.is_empty() {
+            let texte = self.i18n.t("gui.missing.nosaga");
+            self.notifier(Niveau::Avertissement, texte);
+            return;
+        }
+        self.lancer_manquants("gui.missing.title", cibles);
+    }
+
+    /// Ouvre le dialogue des manquants et lance la recherche hors du thread de l'interface.
+    fn lancer_manquants(&mut self, cle_titre: &'static str, cibles: Vec<CibleManquants>) {
+        let id_requete = self.prochain_id_requete;
+        self.prochain_id_requete += 1;
+        self.dialogue = Some(Dialogue::Manquants(EtatManquants {
+            cle_titre,
+            en_cours: true,
+            id_requete,
+            ..EtatManquants::default()
+        }));
+        let (source, retour) = (self.source.clone(), self.retour.clone());
+        std::thread::spawn(move || {
+            let mut groupes = Vec::new();
+            let mut erreurs = Vec::new();
+            for c in cibles {
+                let (titre, resultat) = match c {
+                    CibleManquants::Saga(id, titre) => (titre, source.films_manquants(&id)),
+                    CibleManquants::Serie(id, titre) => (titre, source.episodes_manquants(&id)),
+                };
+                match resultat {
+                    Ok(elements) => groupes.push(GroupeManquants { titre, elements }),
+                    Err(e) => erreurs.push(format!("{titre} : {e}")),
+                }
+            }
+            retour.envoyer(Message::ManquantsTrouves {
+                id_requete,
+                groupes,
+                erreurs,
+            });
+        });
+    }
+
+    // ---- sélecteur de fichiers et outils d'analyse
+
+    /// Remplace le sélecteur de fichiers (tests).
+    pub fn definir_selecteur_fichier(&mut self, selecteur: SelecteurFichier) {
+        self.selecteur_fichier = selecteur;
+    }
+
+    fn choisir_fichier(&mut self, cible: CibleFichier) {
+        let titre = self.i18n.t("gui.tools.choose");
+        let selecteur = self.selecteur_fichier.clone();
+        let retour = self.retour.clone();
+        let lance = std::thread::Builder::new()
+            .name("selecteur-fichier".into())
+            .spawn(move || {
+                let chemin = selecteur(&titre);
+                retour.envoyer(Message::FichierChoisi(cible, chemin));
+            });
+        if let Err(e) = lance {
+            self.notifier(Niveau::Erreur, e.to_string());
+        }
+    }
+
+    fn fichier_choisi(&mut self, cible: CibleFichier, chemin: PathBuf) {
+        match cible {
+            CibleFichier::OutilsAnalyse => {
+                self.services.chemin_outils = chemin.display().to_string();
+                self.services_modifies = true;
+                if let Some(Dialogue::Reglages(d)) = &mut self.dialogue {
+                    d.test_outils = None;
+                } else {
+                    self.enregistrer_services();
+                }
+            }
+        }
+    }
+
+    /// Teste les outils d'analyse avec le chemin saisi (hors du thread de l'interface).
+    fn tester_outils(&mut self) {
+        if let Some(Dialogue::Reglages(d)) = &mut self.dialogue {
+            d.test_outils_en_cours = true;
+            d.test_outils = None;
+        }
+        let chemin = self.services.chemin_outils.clone();
+        let (source, retour) = (self.source.clone(), self.retour.clone());
+        std::thread::spawn(move || {
+            retour.envoyer(Message::ResultatTestOutils(source.tester_outils(&chemin)));
+        });
+    }
+
     /// Ouvre l'incrustation de confirmation, sauf si l'utilisateur l'a masquée.
     fn demander_confirmation(&mut self, action: ActionConfirmee) {
+        // Retrait : case « déplacer les fichiers » décochée ; suppression : cochée.
+        let case = match action {
+            ActionConfirmee::RetirerBase => Some(CaseConfirmation {
+                cle: "confirm.movefiles",
+                cochee: false,
+            }),
+            ActionConfirmee::SupprimerFichiers => Some(CaseConfirmation {
+                cle: "confirm.movefiles",
+                cochee: true,
+            }),
+            ActionConfirmee::Quitter => None,
+        };
         if self.confirmations_masquees.contains(action.cle_masquage()) {
-            self.executer_confirme(action);
+            self.executer_confirme(action, case.is_some_and(|c| c.cochee));
             return;
         }
         let n = self.selection.len().to_string();
@@ -1308,6 +1708,7 @@ impl Etat {
             action,
             masquable: action != ActionConfirmee::Quitter,
             ne_plus_demander: false,
+            case,
         }));
     }
 
@@ -1319,29 +1720,34 @@ impl Etat {
             self.confirmations_masquees
                 .insert(c.action.cle_masquage().to_string());
         }
-        self.executer_confirme(c.action);
+        self.executer_confirme(c.action, c.case.is_some_and(|x| x.cochee));
     }
 
-    fn executer_confirme(&mut self, action: ActionConfirmee) {
+    fn executer_confirme(&mut self, action: ActionConfirmee, deplacer_fichiers: bool) {
         match action {
             ActionConfirmee::RetirerBase | ActionConfirmee::SupprimerFichiers => {
-                let n = self.selection.len();
                 let liste: Vec<u64> = self.selection.iter().copied().collect();
-                let supprimer = action == ActionConfirmee::SupprimerFichiers;
-                if let Err(e) = self.source.retirer_films(&liste, supprimer) {
-                    self.notifier(Niveau::Erreur, e);
+                let retires = match self.source.retirer_films(&liste, deplacer_fichiers) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        self.notifier(Niveau::Erreur, e);
+                        return;
+                    }
+                };
+                // Retrait immédiat (source de démonstration) ; avec les services, le bilan et
+                // la disparition des films arrivent à la fin de la tâche.
+                if retires.is_empty() {
                     return;
                 }
-                let ids = std::mem::take(&mut self.selection);
-                self.films.retain(|f| !ids.contains(&f.id));
+                self.films.retain(|f| !retires.contains(&f.id));
                 self.principal = None;
                 self.ancre = None;
                 self.recalculer();
-                let compte = n.to_string();
-                let cle = if action == ActionConfirmee::RetirerBase {
-                    "gui.removed"
-                } else {
+                let compte = retires.len().to_string();
+                let cle = if deplacer_fichiers {
                     "gui.deleted"
+                } else {
+                    "gui.removed"
                 };
                 let texte = self.i18n.t_args(cle, &[("count", compte.as_str())]);
                 self.notifier(Niveau::Info, texte);
@@ -1359,6 +1765,27 @@ impl Etat {
 
     fn ouvrir_dialogue(&mut self, type_dialogue: TypeDialogue) {
         match type_dialogue {
+            TypeDialogue::ApercuRenommage if self.module == Module::Series => {
+                let Some(id) = self.serie_selectionnee().map(|s| s.id.clone()) else {
+                    return self.avertir_aucune_selection();
+                };
+                let (apercus, erreur) = match self
+                    .source
+                    .apercu_renommage_series(std::slice::from_ref(&id))
+                {
+                    Ok(v) => (v, None),
+                    Err(e) => (Vec::new(), Some(e)),
+                };
+                let film_actif = apercus.first().map(|x| x.id);
+                self.dialogue = Some(Dialogue::ApercuRenommage(EtatApercu {
+                    ids: Vec::new(),
+                    masquer_inchanges: false,
+                    film_actif,
+                    apercus,
+                    erreur,
+                    series: Some(vec![id]),
+                }));
+            }
             TypeDialogue::ApercuRenommage => {
                 if self.selection.is_empty() {
                     let texte = self.i18n.t("app.nothingselected");
@@ -1378,6 +1805,7 @@ impl Etat {
                     film_actif,
                     apercus,
                     erreur,
+                    series: None,
                 }));
             }
             TypeDialogue::Reglages => {
@@ -1434,6 +1862,19 @@ impl Etat {
             (Some(Dialogue::Editeur(_)), ActionDialogue::Editeur(a)) => self.action_editeur(a),
             (Some(Dialogue::Recherche(_)), ActionDialogue::Recherche(a)) => {
                 self.action_recherche(a)
+            }
+            (Some(Dialogue::EditeurSerie(_)), ActionDialogue::EditeurSerie(a)) => {
+                self.action_editeur_serie(a)
+            }
+            (Some(Dialogue::Confirmation(c)), ActionDialogue::ConfirmationCase(v)) => {
+                if let Some(case) = &mut c.case {
+                    case.cochee = v;
+                }
+            }
+            (Some(Dialogue::Manquants(m)), ActionDialogue::ManquantsChoisir(g, e)) => {
+                if m.groupes.get(g).is_some_and(|x| e < x.elements.len()) {
+                    m.selection = Some((g, e));
+                }
             }
             (Some(Dialogue::Assistant(_)), ActionDialogue::Assistant(a)) => {
                 self.action_assistant(a)
@@ -1546,6 +1987,7 @@ impl Etat {
                 .unwrap_or_default();
             self.dialogue = Some(Dialogue::Recherche(Box::new(EtatRecherche {
                 film_id: id,
+                serie: None,
                 requete: RequeteRecherche {
                     film: id,
                     extracteur,
@@ -1581,10 +2023,19 @@ impl Etat {
         r.resultats.clear();
         r.selection = None;
         let requete = r.requete.clone();
+        let serie = r.serie.clone();
         let source = self.source.clone();
         let retour = self.retour.clone();
         std::thread::spawn(move || {
-            let resultat = source.rechercher(&requete);
+            let resultat = match serie {
+                Some(serie) => source.rechercher_serie(&RequeteRechercheSerie {
+                    serie,
+                    texte: requete.texte,
+                    annee: requete.annee,
+                    langue: requete.langue,
+                }),
+                None => source.rechercher(&requete),
+            };
             retour.envoyer(Message::ResultatsRecherche {
                 id_requete,
                 resultat,
@@ -1639,18 +2090,26 @@ impl Etat {
                 let Some(choix) = r.resultat_choisi().cloned() else {
                     return;
                 };
-                let (id, npr, mut file, total) = (
+                let (id, npr, mut file, total, serie) = (
                     r.film_id,
                     r.ne_pas_remplacer,
                     std::mem::take(&mut r.file),
                     r.total,
+                    r.serie.clone(),
                 );
-                // Métadonnées, images et NFO en tâche principale : le film sera rafraîchi
-                // à la fin (FilmActualise).
-                self.lancer_travail(Travail::AppliquerResultat {
-                    film: id,
-                    resultat: choix,
-                    ne_pas_remplacer: npr,
+                // Métadonnées, images et NFO en tâche principale : le film (ou la série) sera
+                // rafraîchi à la fin.
+                self.lancer_travail(match serie {
+                    Some(serie) => Travail::AppliquerResultatSerie {
+                        serie,
+                        resultat: choix,
+                        ne_pas_remplacer: npr,
+                    },
+                    None => Travail::AppliquerResultat {
+                        film: id,
+                        resultat: choix,
+                        ne_pas_remplacer: npr,
+                    },
                 });
                 self.recherche_suivante(&mut file, total, npr);
             }
@@ -1923,6 +2382,16 @@ impl Etat {
 
     /// « Renommer » du dialogue : lance le renommage des films sans conflit.
     fn appliquer_renommage(&mut self) {
+        if let Some(Dialogue::ApercuRenommage(a)) = &self.dialogue
+            && let Some(series) = a.series.clone()
+        {
+            let a_faire = a.apercus.iter().any(|x| x.executable());
+            self.dialogue = None;
+            if a_faire {
+                self.lancer_travail(Travail::RenommerSeries { ids: series });
+            }
+            return;
+        }
         let ids: Vec<u64> = self
             .apercu_courant()
             .iter()
@@ -2229,6 +2698,7 @@ mod tests {
         e.systeme = Systeme::Windows;
         let film = e.film_principal().unwrap().clone();
         e.appliquer(Message::Commande(Commande::OuvrirDossier));
+        attendre(&mut e, |_| vues.lock().unwrap().len() == 1);
         e.appliquer(Message::Commande(Commande::Lire));
         attendre(&mut e, |_| vues.lock().unwrap().len() == 2);
         let v = vues.lock().unwrap().clone();
@@ -2871,5 +3341,101 @@ mod tests {
             &e.dialogue,
             Some(Dialogue::MiseAJour(d)) if matches!(&d.phase, PhaseMiseAJour::Erreur(t) if t.contains("disque plein"))
         ));
+    }
+
+    // --- Câblage films / séries / analyse (source factice) ---
+
+    fn attendre_etat(e: &mut Etat, fini: impl Fn(&Etat) -> bool) {
+        let fin = Instant::now() + std::time::Duration::from_secs(10);
+        while !fini(e) && Instant::now() < fin {
+            e.drainer();
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(fini(e), "délai dépassé");
+    }
+
+    #[test]
+    fn trouver_les_manquants_ouvre_le_dialogue_puis_le_remplit() {
+        let mut e = Etat::nouveau();
+        // Sans saga concernée : simple avertissement, aucun dialogue.
+        e.appliquer(Message::Commande(Commande::TrouverManquants));
+        assert!(e.dialogue.is_none());
+        e.appliquer(Message::FermerDialogue);
+        e.appliquer(Message::ChoisirModule(Module::Collections));
+        e.appliquer(Message::SelectionnerNoeudSaga(NoeudSaga::Saga(
+            "demo-saga-dune".into(),
+        )));
+        e.appliquer(Message::Commande(Commande::TrouverManquants));
+        assert!(matches!(&e.dialogue, Some(Dialogue::Manquants(_))));
+        attendre_etat(
+            &mut e,
+            |e| matches!(&e.dialogue, Some(Dialogue::Manquants(m)) if !m.en_cours),
+        );
+        e.appliquer(Message::FermerDialogue);
+        assert!(e.dialogue.is_none());
+    }
+
+    #[test]
+    fn mise_a_jour_de_la_selection_lance_une_tache() {
+        let mut e = Etat::nouveau();
+        e.appliquer(Message::Commande(Commande::MettreAJourSelection));
+        attendre_etat(&mut e, |e| e.taches.is_empty());
+    }
+
+    #[test]
+    fn retrait_confirme_avec_la_case_des_fichiers() {
+        let mut e = Etat::nouveau();
+        let avant = e.films.len();
+        e.appliquer(Message::Commande(Commande::RetirerBase));
+        assert!(matches!(&e.dialogue, Some(Dialogue::Confirmation(_))));
+        e.appliquer(Message::Dialogue(ActionDialogue::ConfirmationCase(true)));
+        e.appliquer(Message::Confirmer);
+        attendre_etat(&mut e, |e| e.films.len() < avant);
+        assert!(e.films.len() < avant);
+    }
+
+    #[test]
+    fn annuler_le_renommage_sans_historique_ne_plante_pas() {
+        let mut e = Etat::nouveau();
+        e.appliquer(Message::Commande(Commande::AnnulerRenommage));
+        attendre_etat(&mut e, |e| e.taches.is_empty());
+    }
+
+    #[test]
+    fn module_series_recherche_et_editeur() {
+        let mut e = Etat::nouveau();
+        e.appliquer(Message::ChoisirModule(Module::Series));
+        e.appliquer(Message::SelectionnerNoeudSerie(NoeudSerie::Serie(
+            "demo-1".into(),
+        )));
+        assert!(e.serie_selectionnee().is_some());
+        e.appliquer(Message::Commande(Commande::Editer));
+        assert!(matches!(&e.dialogue, Some(Dialogue::EditeurSerie(_))));
+        e.appliquer(Message::Dialogue(ActionDialogue::EditeurSerie(
+            ActionEditeurSerie::Abandonner,
+        )));
+        assert!(e.dialogue.is_none());
+        e.appliquer(Message::Commande(Commande::ScrapeInteractif));
+        assert!(matches!(&e.dialogue, Some(Dialogue::Recherche(_))));
+        e.appliquer(Message::FermerDialogue);
+        e.appliquer(Message::Commande(Commande::ApercuRenommage));
+        assert!(matches!(&e.dialogue, Some(Dialogue::ApercuRenommage(_))));
+    }
+
+    #[test]
+    fn test_des_outils_et_choix_du_fichier() {
+        let mut e = Etat::nouveau();
+        e.appliquer(Message::OuvrirReglagesPage(
+            crate::reglages::Page::OutilsExternes,
+        ));
+        e.appliquer(Message::FichierChoisi(
+            CibleFichier::OutilsAnalyse,
+            Some(PathBuf::from("/opt/ffprobe")),
+        ));
+        e.appliquer(Message::TesterOutils);
+        attendre_etat(
+            &mut e,
+            |e| matches!(&e.dialogue, Some(Dialogue::Reglages(d)) if d.test_outils.is_some()),
+        );
     }
 }

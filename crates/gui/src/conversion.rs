@@ -4,11 +4,14 @@
 use crate::modele::{BandeAnnonceFilm, FichierFilm, Film, TypeFichier};
 use crate::renommage::{ApercuFilm, LigneFichier};
 use crate::source_donnees::{
-    EpisodeAffichage, GenreImage, ReglagesServices, SagaAffichage, SaisonAffichage, SerieAffichage,
+    ElementManquant, EpisodeAffichage, GenreImage, ReglagesServices, SagaAffichage,
+    SaisonAffichage, SerieAffichage, StatutSerie,
 };
+use mediamanager_core::flux::normalisation::format_video;
 use mediamanager_core::modele::commun::cles_id;
 use mediamanager_core::modele::{
-    self as cm, FichierMedia, Personne, Serie, TypeFichier as TypeCore, TypePersonne,
+    self as cm, Episode, FichierMedia, Note, Personne, Serie, StatutDiffusion,
+    TypeFichier as TypeCore, TypePersonne,
 };
 use mediamanager_core::renommage::{ElementPlan, NatureElement, PlanRenommage, titre_triable};
 use mediamanager_store::Reglages;
@@ -361,8 +364,83 @@ pub fn appliquer_edition(g: &Film, f: &mut cm::Film) {
     f.equipe = equipe;
 }
 
-/// Série du modèle → arbre affiché (épisodes réels, triés par saison puis numéro).
-pub fn serie(s: &Serie) -> SerieAffichage {
+/// Statut de diffusion du modèle → statut affiché.
+pub fn statut_serie(s: StatutDiffusion) -> StatutSerie {
+    match s {
+        StatutDiffusion::Inconnu => StatutSerie::Inconnu,
+        StatutDiffusion::EnCours => StatutSerie::EnCours,
+        StatutDiffusion::Terminee => StatutSerie::Terminee,
+        StatutDiffusion::Annulee => StatutSerie::Annulee,
+    }
+}
+
+/// Statut affiché → statut du modèle.
+pub fn statut_diffusion(s: StatutSerie) -> StatutDiffusion {
+    match s {
+        StatutSerie::Inconnu => StatutDiffusion::Inconnu,
+        StatutSerie::EnCours => StatutDiffusion::EnCours,
+        StatutSerie::Terminee => StatutDiffusion::Terminee,
+        StatutSerie::Annulee => StatutDiffusion::Annulee,
+    }
+}
+
+/// Résumé technique d'un fichier analysé (« 1080p H264 · AC3 6ch · 44 min ») ; vide si le
+/// fichier n'a pas été analysé.
+pub fn resume_media(f: &FichierMedia) -> String {
+    let mut parties: Vec<String> = Vec::new();
+    let v = &f.video;
+    let mut video = Vec::new();
+    if v.hauteur > 0 {
+        video.push(format_video(v.largeur, v.hauteur));
+    }
+    if !v.codec.is_empty() {
+        video.push(v.codec.to_uppercase());
+    }
+    if !video.is_empty() {
+        parties.push(video.join(" "));
+    }
+    if let Some(a) = f.flux_audio.first() {
+        let mut t = a.codec.to_uppercase();
+        if a.canaux > 0 {
+            t.push_str(&format!(" {}ch", a.canaux));
+        }
+        if !t.trim().is_empty() {
+            parties.push(t);
+        }
+    }
+    if f.duree_secondes > 0 && !parties.is_empty() {
+        parties.push(format!("{} min", f.duree_secondes.div_ceil(60)));
+    }
+    parties.join(" · ")
+}
+
+/// Note affichée d'une série : celle de l'utilisateur, sinon la première exploitable.
+fn note_serie(s: &Serie) -> Option<&Note> {
+    s.notes
+        .get("user")
+        .filter(|n| n.est_valide())
+        .or_else(|| s.notes.get("tmdb").filter(|n| n.est_valide()))
+        .or_else(|| s.notes.values().find(|n| n.est_valide()))
+}
+
+fn episode_affiche(e: &Episode, groupe: &cm::GroupeEpisodes) -> EpisodeAffichage {
+    let video = e
+        .fichiers
+        .iter()
+        .find(|f| f.type_fichier == TypeCore::Video);
+    EpisodeAffichage {
+        episode: e.episode(groupe),
+        titre: e.titre.clone(),
+        fichier: video.map(|f| f.nom.clone()).unwrap_or_default(),
+        vu: e.vu,
+        manquant: e.est_fictif(),
+        infos_media: video.map(resume_media).unwrap_or_default(),
+    }
+}
+
+/// Série du modèle → arbre affiché (épisodes réels, plus les épisodes manquants autorisés par
+/// les réglages ; triés par saison puis numéro).
+pub fn serie(s: &Serie, r: &Reglages) -> SerieAffichage {
     let mut saisons: BTreeMap<i32, SaisonAffichage> = BTreeMap::new();
     for sa in &s.saisons {
         saisons.insert(
@@ -374,36 +452,102 @@ pub fn serie(s: &Serie) -> SerieAffichage {
             },
         );
     }
-    for e in &s.episodes {
+    for e in &mediamanager_app::series::episodes_affiches(s, r) {
         let n = e.saison(&s.groupe_actif);
         let saison = saisons.entry(n).or_insert_with(|| SaisonAffichage {
             numero: n,
             titre: String::new(),
             episodes: Vec::new(),
         });
-        saison.episodes.push(EpisodeAffichage {
-            episode: e.episode(&s.groupe_actif),
-            titre: e.titre.clone(),
-            fichier: e
-                .fichiers
-                .iter()
-                .find(|f| f.type_fichier == TypeCore::Video)
-                .map(|f| f.nom.clone())
-                .unwrap_or_default(),
-            vu: e.vu,
-        });
+        saison.episodes.push(episode_affiche(e, &s.groupe_actif));
     }
     let mut saisons: Vec<SaisonAffichage> = saisons.into_values().collect();
     for sa in &mut saisons {
         sa.episodes
             .sort_by(|a, b| a.episode.cmp(&b.episode).then(a.titre.cmp(&b.titre)));
     }
+    // Une saison sans aucun épisode affiché (manquants masqués) n'apparaît pas.
+    saisons.retain(|sa| !sa.episodes.is_empty());
     SerieAffichage {
         id: s.id.clone(),
         titre: s.titre.clone(),
+        titre_original: s.titre_original.clone(),
         annee: s.annee,
         chemin: texte_chemin(&s.chemin),
+        resume: s.resume.clone(),
+        genres: s.genres.clone(),
+        statut: statut_serie(s.statut),
+        note: note_serie(s).map(Note::sur_dix).unwrap_or(0.0),
+        imdb: s.ids.imdb(),
+        tmdb: match s.ids.tmdb() {
+            n if n > 0 => n.to_string(),
+            _ => String::new(),
+        },
+        tvdb: match s.ids.tvdb() {
+            n if n > 0 => n.to_string(),
+            _ => String::new(),
+        },
+        verrouillee: s.verrouille,
         saisons,
+    }
+}
+
+/// Reporte les champs éditables d'une série affichée dans la série du modèle. Une note
+/// inchangée n'est pas recopiée comme note de l'utilisateur.
+pub fn appliquer_edition_serie(g: &SerieAffichage, s: &mut Serie) {
+    s.titre = g.titre.trim().to_string();
+    s.titre_original = g.titre_original.trim().to_string();
+    s.annee = g.annee;
+    s.resume = g.resume.clone();
+    s.genres = g
+        .genres
+        .iter()
+        .map(|x| x.trim().to_string())
+        .filter(|x| !x.is_empty())
+        .collect();
+    s.statut = statut_diffusion(g.statut);
+    s.verrouille = g.verrouillee;
+    if !g.imdb.is_empty() {
+        s.ids.definir(cles_id::IMDB, &g.imdb);
+    }
+    if !g.tmdb.is_empty() {
+        s.ids.definir(cles_id::TMDB, &g.tmdb);
+    }
+    if !g.tvdb.is_empty() {
+        s.ids.definir(cles_id::TVDB, &g.tvdb);
+    }
+    let actuelle = note_serie(s).map(Note::sur_dix).unwrap_or(0.0);
+    if g.note > 0.0 {
+        if (g.note - actuelle).abs() > 0.05 {
+            s.notes
+                .insert("user".into(), Note::nouvelle("user", g.note, 0, 10));
+        }
+    } else {
+        s.notes.remove("user");
+    }
+}
+
+/// Épisode manquant du modèle → ligne de la liste des éléments manquants.
+pub fn episode_manquant(e: &Episode, groupe: &cm::GroupeEpisodes) -> ElementManquant {
+    ElementManquant {
+        titre: e.titre.clone(),
+        titre_original: e.titre_original.clone(),
+        detail: format!("S{:02}E{:02}", e.saison(groupe), e.episode(groupe)),
+        resume: e.resume.clone(),
+    }
+}
+
+/// Partie de collection absente de la bibliothèque → ligne de la liste des éléments manquants.
+pub fn partie_manquante(p: &mediamanager_scrapers::PartieCollection) -> ElementManquant {
+    ElementManquant {
+        titre: p.titre.clone(),
+        titre_original: p.titre_original.clone(),
+        detail: if p.annee > 0 {
+            p.annee.to_string()
+        } else {
+            String::new()
+        },
+        resume: p.resume.clone(),
     }
 }
 
@@ -455,6 +599,15 @@ pub fn plan_apercu(plan: &PlanRenommage, id_de: impl Fn(&str) -> u64) -> Vec<Ape
         .collect()
 }
 
+/// Plan de renommage de séries → aperçus (série et épisodes), numérotés dans l'ordre du plan.
+pub fn plan_apercu_series(plan: &PlanRenommage) -> Vec<ApercuFilm> {
+    plan.elements
+        .iter()
+        .enumerate()
+        .map(|(n, e)| element_apercu(e, n as u64 + 1))
+        .collect()
+}
+
 fn chemins(v: &[PathBuf]) -> Vec<String> {
     v.iter().map(|p| texte_chemin(p)).collect()
 }
@@ -487,6 +640,13 @@ pub fn services(r: &Reglages) -> ReglagesServices {
         threads_telechargement: g.threads_telechargement,
         corbeille: g.corbeille_activee,
         cache_images: g.cache_images,
+        chemin_outils: g.chemin_ffmpeg.clone(),
+        gabarit_dossier_serie: rr.gabarit_dossier_serie.clone(),
+        gabarit_dossier_saison: rr.gabarit_dossier_saison.clone(),
+        gabarit_fichier_episode: rr.gabarit_fichier_episode.clone(),
+        afficher_episodes_manquants: r.series.afficher_episodes_manquants,
+        afficher_speciaux_manquants: r.series.afficher_speciaux_manquants,
+        afficher_non_diffuses: r.series.afficher_non_diffuses,
     }
 }
 
@@ -523,6 +683,13 @@ pub fn appliquer_services(s: &ReglagesServices, r: &mut Reglages) {
     g.threads_telechargement = s.threads_telechargement.max(1);
     g.corbeille_activee = s.corbeille;
     g.cache_images = s.cache_images;
+    g.chemin_ffmpeg = s.chemin_outils.trim().to_string();
+    rr.gabarit_dossier_serie = s.gabarit_dossier_serie.clone();
+    rr.gabarit_dossier_saison = s.gabarit_dossier_saison.clone();
+    rr.gabarit_fichier_episode = s.gabarit_fichier_episode.clone();
+    r.series.afficher_episodes_manquants = s.afficher_episodes_manquants;
+    r.series.afficher_speciaux_manquants = s.afficher_speciaux_manquants;
+    r.series.afficher_non_diffuses = s.afficher_non_diffuses;
 }
 
 #[cfg(test)]
@@ -676,9 +843,13 @@ mod tests {
                 saison: sa,
                 episode: ep,
             });
+            e.fichiers.push(cm::FichierMedia {
+                nom: format!("s{sa}e{ep}.mkv"),
+                ..cm::FichierMedia::default()
+            });
             s.episodes.push(e);
         }
-        let a = serie(&s);
+        let a = serie(&s, &Reglages::default());
         assert_eq!(a.saisons.len(), 2);
         assert_eq!(a.saisons[0].titre, "Première");
         assert_eq!(a.saisons[0].episodes[0].titre, "S1E1");

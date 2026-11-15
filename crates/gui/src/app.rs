@@ -355,6 +355,12 @@ impl Application {
                 d,
                 &mut sortie,
             ),
+            Some(Dialogue::EditeurSerie(d)) => {
+                vue::dialogue_editeur_serie::afficher(&ctx, &self.etat, d, &mut sortie)
+            }
+            Some(Dialogue::Manquants(d)) => {
+                vue::dialogue_manquants::afficher(&ctx, &self.etat, d, &mut sortie)
+            }
             Some(Dialogue::Confirmation(d)) => {
                 vue::dialogue_confirmation::afficher(&ctx, &self.etat, d, &mut sortie)
             }
@@ -440,6 +446,8 @@ mod tests {
             Message::FermerDialogue,
             Message::Commande(Commande::ApercuRenommage),
             Message::FermerDialogue,
+            Message::Commande(Commande::TrouverManquants),
+            Message::FermerDialogue,
         ];
         for page in [
             Page::General,
@@ -450,6 +458,7 @@ mod tests {
             Page::FilmsExtracteur,
             Page::FilmsRenommeur,
             Page::Series,
+            Page::OutilsExternes,
         ] {
             etapes.push(Message::OuvrirReglagesPage(page));
         }
@@ -461,6 +470,15 @@ mod tests {
             Message::BasculerNoeudSerie("inexistante".into(), None),
             Message::SelectionnerNoeudSerie(crate::etat::NoeudSerie::Serie("inexistante".into())),
             Message::ChoisirOnglet(crate::etat::OngletDetails::FichiersMedias),
+            Message::Commande(Commande::Editer),
+            Message::Commande(Commande::ScrapeInteractif),
+            Message::FermerDialogue,
+            Message::Commande(Commande::TrouverManquants),
+            Message::FermerDialogue,
+            Message::Commande(Commande::ApercuRenommage),
+            Message::FermerDialogue,
+            Message::Commande(Commande::RetirerBase),
+            Message::FermerDialogue,
             Message::ChoisirModule(crate::etat::Module::Collections),
             Message::SelectionnerNoeudSaga(crate::collections::NoeudSaga::Saga(
                 "demo-saga-dune".into(),

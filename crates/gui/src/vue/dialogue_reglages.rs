@@ -6,8 +6,9 @@ use super::Sortie;
 use crate::etat::{ActionDialogue, Etat, EtatDialogueReglages, Message};
 use crate::i18n::Langue;
 use crate::modele::normaliser;
+use crate::polices;
 use crate::reglages::{Page, Reglages, Theme};
-use crate::selecteur::CibleDossier;
+use crate::selecteur::{CibleDossier, CibleFichier};
 use crate::source_donnees::ReglagesServices;
 use eframe::egui::{self, Align, Layout, Modal, RichText, ScrollArea, TextEdit, Vec2};
 
@@ -395,11 +396,122 @@ fn page(
                 CibleDossier::SourceSeries,
                 sortie,
             );
+            ui.add_space(10.0);
+            ui.label(RichText::new(i.t("gui.series.display")).strong());
+            ui.checkbox(
+                &mut s.afficher_episodes_manquants,
+                i.t("gui.series.showmissing"),
+            );
+            ui.add_enabled_ui(s.afficher_episodes_manquants, |ui| {
+                ui.checkbox(
+                    &mut s.afficher_speciaux_manquants,
+                    i.t("gui.series.showmissingspecials"),
+                );
+                ui.checkbox(&mut s.afficher_non_diffuses, i.t("gui.series.showunaired"));
+            });
+            ui.add_space(10.0);
+            ui.label(RichText::new(i.t("Settings.renamer")).strong());
+            egui::Grid::new("g_renamer_series")
+                .num_columns(2)
+                .spacing([14.0, 6.0])
+                .show(ui, |ui| {
+                    ui.label(i.t("Settings.renamer.folder"));
+                    ui.add(TextEdit::singleline(&mut s.gabarit_dossier_serie).desired_width(380.0));
+                    ui.end_row();
+                    ui.label(i.t("gui.renamer.seasonfolder"));
+                    ui.add(
+                        TextEdit::singleline(&mut s.gabarit_dossier_saison).desired_width(380.0),
+                    );
+                    ui.end_row();
+                    ui.label(i.t("Settings.renamer.file"));
+                    ui.add(
+                        TextEdit::singleline(&mut s.gabarit_fichier_episode).desired_width(380.0),
+                    );
+                    ui.end_row();
+                });
         }
+        Page::OutilsExternes => page_outils(ui, etat, d, s, sortie),
         _ => {
             ui.label(RichText::new(i.t("Settings.todo")).weak());
         }
     }
+}
+
+/// Page « Outils externes » : chemin de ffprobe / MediaInfo, sélecteur de fichier et test.
+fn page_outils(
+    ui: &mut egui::Ui,
+    etat: &Etat,
+    d: &EtatDialogueReglages,
+    s: &mut ReglagesServices,
+    sortie: &mut Sortie,
+) {
+    let i = &etat.i18n;
+    ui.label(RichText::new(i.t("gui.tools.path")).strong());
+    ui.horizontal(|ui| {
+        ui.add(
+            TextEdit::singleline(&mut s.chemin_outils)
+                .hint_text(i.t("gui.tools.auto"))
+                .desired_width(360.0),
+        );
+        if ui
+            .button(format!("{}…", i.t("gui.folder.browse")))
+            .on_hover_text(i.t("gui.tools.choose"))
+            .clicked()
+        {
+            sortie.push(Message::ChoisirFichier(CibleFichier::OutilsAnalyse));
+        }
+        if ui
+            .add_enabled(
+                !d.test_outils_en_cours,
+                egui::Button::new(i.t("gui.tools.test")),
+            )
+            .clicked()
+        {
+            sortie.push(Message::TesterOutils);
+        }
+    });
+    ui.add_space(4.0);
+    if d.test_outils_en_cours {
+        ui.horizontal(|ui| {
+            ui.spinner();
+            ui.label(i.t("gui.tools.testing"));
+        });
+    }
+    match &d.test_outils {
+        Some(Ok(diag)) if diag.disponible() => {
+            for (nom, outil) in [("ffprobe", &diag.ffprobe), ("MediaInfo", &diag.mediainfo)] {
+                let texte = match outil {
+                    Some(o) => {
+                        let version = o
+                            .version
+                            .clone()
+                            .unwrap_or_else(|| i.t("gui.tools.noversion"));
+                        format!("{} {nom} : {version}\n    {}", polices::COCHE, o.chemin)
+                    }
+                    None => format!("{nom} : {}", i.t("gui.tools.notfound")),
+                };
+                ui.label(texte);
+            }
+        }
+        Some(Ok(_)) => {
+            ui.label(
+                RichText::new(format!(
+                    "{} {}",
+                    polices::AVERTISSEMENT,
+                    i.t("gui.tools.none")
+                ))
+                .color(crate::theme::ROUGE),
+            );
+        }
+        Some(Err(e)) => {
+            ui.label(
+                RichText::new(format!("{} {e}", polices::AVERTISSEMENT)).color(crate::theme::ROUGE),
+            );
+        }
+        None => {}
+    }
+    ui.add_space(8.0);
+    ui.label(RichText::new(i.t("gui.tools.hint")).weak().small());
 }
 
 #[cfg(test)]

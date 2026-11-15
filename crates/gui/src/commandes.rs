@@ -58,6 +58,8 @@ pub const MENU_RECHERCHE: &[Entree] = &[
     Cmd(C::ScrapeMeilleur),
     Cmd(C::ScrapeMetadonnees),
     Cmd(C::ScrapeNonTraites),
+    Sep,
+    Cmd(C::InfosMedia),
 ];
 
 pub const MENU_EDITION: &[Entree] = &[
@@ -67,8 +69,6 @@ pub const MENU_EDITION: &[Entree] = &[
     Cmd(C::BasculerVu),
     Cmd(C::RecupererEvaluations),
     Cmd(C::ReecrireNfo),
-    Sep,
-    Cmd(C::InfosMedia),
     Sep,
     Cmd(C::Exporter),
 ];

@@ -39,8 +39,16 @@ pub fn afficher(
     let reponse = Modal::new(egui::Id::unique("dlg_recherche")).show(ctx, |ui| {
         ui.set_min_size(Vec2::new(900.0, 500.0));
         ui.horizontal(|ui| {
-            ui.heading(i.t("chooser.title"));
-            if let Some(f) = etat.film(r.film_id) {
+            ui.heading(i.t(if r.serie.is_some() {
+                "chooser.titletv"
+            } else {
+                "chooser.title"
+            }));
+            if let Some(id) = &r.serie {
+                if let Some(s) = etat.series.iter().find(|s| s.id == *id) {
+                    ui.label(RichText::new(format!("- {}", s.titre)).weak());
+                }
+            } else if let Some(f) = etat.film(r.film_id) {
                 ui.label(RichText::new(format!("- {}", f.dossier)).weak());
             }
             if r.total > 1 {
