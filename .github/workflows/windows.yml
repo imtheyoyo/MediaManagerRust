@@ -17,7 +17,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: Tests
-        run: cargo test --workspace --release
+        run: cargo test --workspace --release --no-fail-fast
       - name: Compilation
         run: cargo build --workspace --release
       - name: Archive

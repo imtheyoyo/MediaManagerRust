@@ -70,6 +70,9 @@ fn source_introuvable_vide_ou_fichier() {
         scanner_source(&t.path().join("absent"), &o),
         Err(ErreurScan::SourceIntrouvable(_))
     ));
+    // Hors Windows, une source vide est considérée comme indisponible (disque
+    // réseau non monté) ; sous Windows elle est simplement vide.
+    #[cfg(not(windows))]
     assert!(matches!(
         scanner_source(t.path(), &o),
         Err(ErreurScan::SourceVide(_))

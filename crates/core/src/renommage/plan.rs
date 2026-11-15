@@ -458,12 +458,36 @@ impl PlanRenommage {
 
 /// Clé de comparaison des chemins : insensible à la casse (prudence pour
 /// les systèmes de fichiers qui l'ignorent).
+/// Clé de comparaison d'un chemin : insensible à la casse et aux séparateurs
+/// (`/` et `\` sont équivalents, un séparateur final est ignoré).
 pub(crate) fn cle(p: &Path) -> String {
-    p.to_string_lossy().to_lowercase()
+    let mut s = p.to_string_lossy().replace('\\', "/").to_lowercase();
+    while s.len() > 1 && s.ends_with('/') {
+        s.pop();
+    }
+    s
 }
 
 pub(crate) fn meme_chemin(a: &Path, b: &Path) -> bool {
     a == b || cle(a) == cle(b)
+}
+
+#[cfg(test)]
+mod tests_cle {
+    use super::meme_chemin;
+    use std::path::Path;
+
+    #[test]
+    fn separateurs_et_casse_equivalents() {
+        assert!(meme_chemin(
+            Path::new("F:/Films/the matrix (1999)"),
+            Path::new("F:\\Films\\The Matrix (1999)\\")
+        ));
+        assert!(!meme_chemin(
+            Path::new("F:/Films/A"),
+            Path::new("F:/Films/B")
+        ));
+    }
 }
 
 // ---------------------------------------------------------------------------

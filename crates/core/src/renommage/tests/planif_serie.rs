@@ -22,7 +22,7 @@ fn nouveaux(plan: &PlanRenommage, ancien: &str) -> Vec<String> {
         .unwrap_or_else(|| panic!("ligne absente : {ancien}"))
         .nouveaux
         .iter()
-        .map(|n| n.to_string_lossy().into_owned())
+        .map(|n| n.to_string_lossy().replace('\\', "/"))
         .collect()
 }
 
