@@ -1,4 +1,5 @@
 //! Cœur de la médiathèque : modèle de données, scan, NFO et renommage.
+pub mod flux;
 pub mod modele;
 pub mod nfo;
 pub mod renommage;
