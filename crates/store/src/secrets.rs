@@ -131,6 +131,30 @@ impl CoffreSecrets for CoffreFichier {
     }
 }
 
+/// Nom de service du trousseau pour un dossier de données :
+/// `MediaManagerRust-<empreinte>`, l'empreinte (FNV-1a 64 bits, stable d'une
+/// version à l'autre) étant calculée sur le chemin absolu du dossier (en
+/// minuscules sous Windows). Chaque installation portable, et chaque dossier
+/// de test, a ainsi ses propres secrets : ils ne fuient pas d'une installation
+/// à l'autre.
+pub fn nom_service(dossier_donnees: &Path) -> String {
+    let absolu =
+        std::path::absolute(dossier_donnees).unwrap_or_else(|_| dossier_donnees.to_path_buf());
+    let mut texte = absolu.to_string_lossy().replace('\\', "/");
+    while texte.len() > 1 && texte.ends_with('/') {
+        texte.pop();
+    }
+    if cfg!(windows) {
+        texte = texte.to_lowercase();
+    }
+    let mut empreinte: u64 = 0xcbf2_9ce4_8422_2325;
+    for octet in texte.as_bytes() {
+        empreinte ^= u64::from(*octet);
+        empreinte = empreinte.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    format!("{}-{empreinte:016x}", crate::dossiers::NOM_APPLICATION)
+}
+
 // ---------------------------------------------------------------------------
 // Trousseau du système (Windows, macOS)
 // ---------------------------------------------------------------------------
@@ -139,18 +163,29 @@ impl CoffreSecrets for CoffreFichier {
 mod systeme {
     use super::*;
 
-    /// Trousseau natif du système.
-    #[derive(Debug, Default)]
-    pub struct CoffreSysteme;
+    /// Trousseau natif du système, cloisonné par dossier de données.
+    #[derive(Debug, Clone)]
+    pub struct CoffreSysteme {
+        service: String,
+    }
 
-    fn entree(nom: &str) -> Resultat<keyring::Entry> {
-        keyring::Entry::new(crate::dossiers::NOM_APPLICATION, nom)
-            .map_err(|e| ErreurStockage::Secrets(e.to_string()))
+    impl CoffreSysteme {
+        /// Coffre propre à un dossier de données (voir [`nom_service`]).
+        pub fn pour_dossier(dossier_donnees: &Path) -> Self {
+            Self {
+                service: nom_service(dossier_donnees),
+            }
+        }
+
+        fn entree(&self, nom: &str) -> Resultat<keyring::Entry> {
+            keyring::Entry::new(&self.service, nom)
+                .map_err(|e| ErreurStockage::Secrets(e.to_string()))
+        }
     }
 
     impl CoffreSecrets for CoffreSysteme {
         fn lire(&self, nom: &str) -> Resultat<Option<String>> {
-            match entree(nom)?.get_password() {
+            match self.entree(nom)?.get_password() {
                 Ok(v) => Ok(Some(v)),
                 Err(keyring::Error::NoEntry) => Ok(None),
                 Err(e) => Err(ErreurStockage::Secrets(e.to_string())),
@@ -160,12 +195,12 @@ mod systeme {
             if valeur.is_empty() {
                 return self.supprimer(nom);
             }
-            entree(nom)?
+            self.entree(nom)?
                 .set_password(valeur)
                 .map_err(|e| ErreurStockage::Secrets(e.to_string()))
         }
         fn supprimer(&self, nom: &str) -> Resultat<()> {
-            match entree(nom)?.delete_credential() {
+            match self.entree(nom)?.delete_credential() {
                 Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
                 Err(e) => Err(ErreurStockage::Secrets(e.to_string())),
             }
@@ -200,7 +235,8 @@ impl CoffreAuto {
     pub fn pour_dossier(dossier_donnees: &Path) -> Self {
         let fichier = CoffreFichier::new(dossier_donnees.join(NOM_FICHIER_SECRETS));
         #[cfg(any(windows, target_os = "macos"))]
-        let systeme: Option<Box<dyn CoffreSecrets>> = Some(Box::new(CoffreSysteme));
+        let systeme: Option<Box<dyn CoffreSecrets>> =
+            Some(Box::new(CoffreSysteme::pour_dossier(dossier_donnees)));
         #[cfg(not(any(windows, target_os = "macos")))]
         let systeme: Option<Box<dyn CoffreSecrets>> = None;
         Self { systeme, fichier }
@@ -240,5 +276,20 @@ impl CoffreSecrets for CoffreAuto {
             tracing::warn!("trousseau indisponible ({e})");
         }
         self.fichier.supprimer(nom)
+    }
+}
+
+#[cfg(test)]
+mod tests_service {
+    use super::nom_service;
+    use std::path::Path;
+
+    #[test]
+    fn service_distinct_par_dossier() {
+        let a = nom_service(Path::new("/x/a/data"));
+        let b = nom_service(Path::new("/x/b/data"));
+        assert_ne!(a, b);
+        assert_eq!(a, nom_service(Path::new("/x/a/data/")));
+        assert!(a.starts_with("MediaManagerRust-"));
     }
 }
