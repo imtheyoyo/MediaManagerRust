@@ -10,6 +10,24 @@ pub enum Theme {
     Sombre,
 }
 
+impl Theme {
+    /// Identifiant de persistance (`ui.json`).
+    pub fn id(self) -> &'static str {
+        match self {
+            Theme::Clair => "clair",
+            Theme::Sombre => "sombre",
+        }
+    }
+
+    pub fn depuis_id(id: &str) -> Option<Theme> {
+        match id {
+            "clair" => Some(Theme::Clair),
+            "sombre" => Some(Theme::Sombre),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct Reglages {
     pub langue: Langue,

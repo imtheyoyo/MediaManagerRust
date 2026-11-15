@@ -18,6 +18,8 @@ use crate::fournisseur::{
 use crate::http::ClientHttp;
 use crate::types::*;
 
+pub mod serie;
+
 const URL_API: &str = "https://api.themoviedb.org/3/";
 const URL_API_ALTERNATIVE: &str = "https://api.tmdb.org/3/";
 const URL_IMAGES_DEFAUT: &str = "https://image.tmdb.org/t/p/";
@@ -1214,47 +1216,51 @@ impl FournisseurBandesAnnonces for TmdbFilm {
                 .await?;
             videos.extend(r.results);
         }
-        let mut sortie: Vec<BandeAnnonce> = Vec::new();
-        for v in videos {
-            if v.type_video != "Trailer" || v.site.eq_ignore_ascii_case("Apple") || v.key.is_empty()
-            {
-                continue;
-            }
-            let (hebergeur, url) = match v.site.to_lowercase().as_str() {
-                "youtube" => (
-                    "youtube",
-                    format!(
-                        "https://www.youtube.com/watch?v={}{}",
-                        v.key,
-                        if v.size >= 720 { "&hd=1" } else { "" }
-                    ),
-                ),
-                "vimeo" => ("vimeo", format!("https://vimeo.com/{}", v.key)),
-                _ => continue,
-            };
-            let langue_v = match (v.iso_639_1.is_empty(), v.iso_3166_1.is_empty()) {
-                (false, false) => format!("{}-{}", v.iso_639_1, v.iso_3166_1),
-                (false, true) => v.iso_639_1.clone(),
-                _ => String::new(),
-            };
-            let bande = BandeAnnonce {
-                nom: v.name,
-                url,
-                hebergeur: hebergeur.into(),
-                qualite: if v.size > 0 {
-                    format!("{}p", v.size)
-                } else {
-                    String::new()
-                },
-                langue: langue_v,
-                date: v.published_at.get(..10).unwrap_or("").to_string(),
-            };
-            if !sortie.iter().any(|b| b.url == bande.url) {
-                sortie.push(bande);
-            }
-        }
-        Ok(sortie)
+        Ok(bandes_depuis_videos(videos))
     }
+}
+
+/// Bandes-annonces retenues (type `Trailer`, YouTube/Vimeo), dédoublonnées par URL.
+fn bandes_depuis_videos(videos: Vec<VideoTmdb>) -> Vec<BandeAnnonce> {
+    let mut sortie: Vec<BandeAnnonce> = Vec::new();
+    for v in videos {
+        if v.type_video != "Trailer" || v.site.eq_ignore_ascii_case("Apple") || v.key.is_empty() {
+            continue;
+        }
+        let (hebergeur, url) = match v.site.to_lowercase().as_str() {
+            "youtube" => (
+                "youtube",
+                format!(
+                    "https://www.youtube.com/watch?v={}{}",
+                    v.key,
+                    if v.size >= 720 { "&hd=1" } else { "" }
+                ),
+            ),
+            "vimeo" => ("vimeo", format!("https://vimeo.com/{}", v.key)),
+            _ => continue,
+        };
+        let langue_v = match (v.iso_639_1.is_empty(), v.iso_3166_1.is_empty()) {
+            (false, false) => format!("{}-{}", v.iso_639_1, v.iso_3166_1),
+            (false, true) => v.iso_639_1.clone(),
+            _ => String::new(),
+        };
+        let bande = BandeAnnonce {
+            nom: v.name,
+            url,
+            hebergeur: hebergeur.into(),
+            qualite: if v.size > 0 {
+                format!("{}p", v.size)
+            } else {
+                String::new()
+            },
+            langue: langue_v,
+            date: v.published_at.get(..10).unwrap_or("").to_string(),
+        };
+        if !sortie.iter().any(|b| b.url == bande.url) {
+            sortie.push(bande);
+        }
+    }
+    sortie
 }
 
 #[async_trait]

@@ -409,6 +409,14 @@ pub fn titre_et_annee_depuis_nom(nom: &str) -> (String, Option<i32>) {
     (titre, annee)
 }
 
+/// Date `AAAA-MM-JJ` extraite du début d'un texte (`None` si invalide).
+pub fn date_iso_valide(d: &str) -> Option<String> {
+    let d = d.trim().get(..10)?;
+    let b = d.as_bytes();
+    (b[4] == b'-' && b[7] == b'-' && d.chars().filter(char::is_ascii_digit).count() == 8)
+        .then(|| d.to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

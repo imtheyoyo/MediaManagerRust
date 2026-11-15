@@ -5,6 +5,7 @@ use crate::commandes::{
     Commande, Entree, MENU_EDITION, MENU_MISE_A_JOUR, MENU_RECHERCHE, MENU_RENOMMAGE,
 };
 use crate::etat::{Etat, Message, TypeDialogue};
+use crate::polices;
 use crate::theme::{BARRE_OUTILS, ORANGE, TEXTE_BARRE_OUTILS};
 use eframe::egui::{self, Align, Frame, Layout, Margin, Panel, RichText};
 
@@ -33,14 +34,14 @@ const GROUPES: [Groupe; 4] = [
         entrees: MENU_RECHERCHE,
     },
     Groupe {
-        glyphe: "✎",
+        glyphe: polices::EDITER,
         cle_bouton: "Toolbar.edit",
         cle_menu: "Toolbar.menu.edit",
         action: Commande::Editer,
         entrees: MENU_EDITION,
     },
     Groupe {
-        glyphe: "⇄",
+        glyphe: polices::RENOMMER,
         cle_bouton: "Toolbar.rename",
         cle_menu: "Toolbar.menu.rename",
         action: Commande::Renommer,
@@ -62,7 +63,7 @@ fn groupe(ui: &mut egui::Ui, etat: &Etat, sortie: &mut Sortie, g: &Groupe) {
             sortie.push(Message::Commande(action));
         }
         ui.menu_button(
-            RichText::new(format!("{} ▾", etat.i18n.t(cle_menu))).size(11.0),
+            RichText::new(format!("{} {}", etat.i18n.t(cle_menu), polices::DEROULANT)).size(11.0),
             |ui| {
                 menus::afficher_entrees(ui, etat, entrees, sortie);
             },

@@ -2,14 +2,24 @@
 //! entièrement testable). La vue lit un `&Etat` et émet des `Message`.
 
 use crate::commandes::Commande;
-use crate::donnees::films_factices;
-use crate::i18n::I18n;
+use crate::dialogues::{
+    ActionAssistant, ActionConfirmee, ActionEditeur, ActionRecherche, EtatAssistant,
+    EtatConfirmation, EtatEditeur, EtatRecherche, FilmEdite, OngletEditeur, appliquer_resultat,
+    valider,
+};
+use crate::filtres::{ActionFiltre, ContexteFiltre, FiltresAvances, OngletFiltre};
+use crate::i18n::{I18n, Langue};
 use crate::modele::{Colonne, ColonneEtat, Film, Ordre, colonnes_par_defaut, normaliser};
-use crate::reglages::{Page, Reglages};
+use crate::persistance::{ColonnePersistee, EtatInterface, GeometrieFenetre, TriPersiste};
+use crate::reglages::{Page, Reglages, Theme};
 use crate::renommage::{self, Profil};
+use crate::source_donnees::{
+    RequeteRecherche, ResultatRecherche, SourceDonnees, SourceFactice, titre_nettoye,
+};
 use crate::taches::{Repaint, Tache, lancer_simulation};
 use regex::Regex;
 use std::collections::BTreeSet;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::sync::mpsc::{Receiver, Sender, channel};
@@ -35,6 +45,19 @@ impl Module {
             Module::Collections => "app.moviesets",
             Module::Series => "app.tvshows",
         }
+    }
+
+    /// Identifiant de persistance (`ui.json`).
+    pub fn id(self) -> &'static str {
+        match self {
+            Module::Films => "movies",
+            Module::Collections => "moviesets",
+            Module::Series => "tvshows",
+        }
+    }
+
+    pub fn depuis_id(id: &str) -> Option<Module> {
+        Module::TOUS.into_iter().find(|m| m.id() == id)
     }
 }
 
@@ -67,7 +90,7 @@ impl OngletDetails {
     }
 }
 
-/// Filtre rapide (le dialogue de filtres avancés viendra plus tard).
+/// Filtre rapide du menu « Filtre » (les filtres avancés sont dans `filtres`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum FiltreRapide {
     #[default]
@@ -115,11 +138,16 @@ pub struct EtatDialogueReglages {
     pub filtre: String,
 }
 
+/// Dialogue modal affiché (un seul à la fois ; le dialogue de filtres, non modal, est à part).
 #[derive(Clone, Debug)]
 pub enum Dialogue {
     ApercuRenommage(EtatApercu),
     Reglages(EtatDialogueReglages),
     Messages,
+    Editeur(Box<EtatEditeur>),
+    Recherche(Box<EtatRecherche>),
+    Confirmation(EtatConfirmation),
+    Assistant(Box<EtatAssistant>),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -127,6 +155,7 @@ pub enum TypeDialogue {
     ApercuRenommage,
     Reglages,
     Messages,
+    Assistant,
 }
 
 #[derive(Clone, Debug)]
@@ -136,6 +165,10 @@ pub enum ActionDialogue {
     ApercuFilm(u64),
     ReglagesPage(Page),
     ReglagesFiltre(String),
+    Editeur(ActionEditeur),
+    Recherche(ActionRecherche),
+    Assistant(ActionAssistant),
+    ConfirmationNePlusDemander(bool),
 }
 
 /// Messages : seul `Etat::appliquer` modifie l'état.
@@ -146,28 +179,71 @@ pub enum Message {
     Recherche(String),
     FiltreRapide(FiltreRapide),
     EffacerFiltres,
-    Trier { colonne: Colonne, additif: bool },
-    Selectionner { id: u64, ctrl: bool, maj: bool },
+    Trier {
+        colonne: Colonne,
+        additif: bool,
+    },
+    Selectionner {
+        id: u64,
+        ctrl: bool,
+        maj: bool,
+    },
     SelectionnerTout,
-    Deplacer { delta: i32, etendre: bool },
-    Frappe { texte: String, instant: Instant },
+    Deplacer {
+        delta: i32,
+        etendre: bool,
+    },
+    Frappe {
+        texte: String,
+        instant: Instant,
+    },
     ColonneVisible(Colonne, bool),
+    /// Déplace une colonne d'un cran dans l'ordre d'affichage (-1 : à gauche).
+    DeplacerColonne(Colonne, i32),
+    /// Largeurs relevées après redimensionnement par l'utilisateur.
+    LargeursColonnes(Vec<(Colonne, f32)>),
+    /// Largeur du panneau de détails (position du séparateur).
+    LargeurDetails(f32),
+    Fenetre(GeometrieFenetre),
     Commande(Commande),
     OuvrirDialogue(TypeDialogue),
     FermerDialogue,
     Dialogue(ActionDialogue),
+    /// « Valider » de l'incrustation de confirmation.
+    Confirmer,
     ApercuAppliquer,
     AppliquerReglages(Box<Reglages>),
+    Filtre(ActionFiltre),
+    OuvrirFiltres(bool),
+    OngletFiltres(OngletFiltre),
+    ResultatsRecherche {
+        id_requete: u64,
+        resultat: Result<Vec<ResultatRecherche>, String>,
+    },
+    OuvrirVisionneuse(PathBuf),
+    FermerVisionneuse,
+    ViderCacheImages,
+    FocusRecherche,
+    /// Demande de fermeture de la fenêtre (confirmation si des tâches tournent).
+    DemandeQuitter,
     Notifier(Niveau, String),
     MessagesLus,
     ArreterTache(u64),
-    TacheProgression { id: u64, fait: u32, total: u32 },
-    TacheTerminee { id: u64, annulee: bool },
+    TacheProgression {
+        id: u64,
+        fait: u32,
+        total: u32,
+    },
+    TacheTerminee {
+        id: u64,
+        annulee: bool,
+    },
 }
 
 pub struct Etat {
     pub i18n: I18n,
     pub reglages: Reglages,
+    pub source: Arc<dyn SourceDonnees>,
     pub films: Vec<Film>,
     pub module: Module,
     pub onglet: OngletDetails,
@@ -175,6 +251,9 @@ pub struct Etat {
     pub recherche_invalide: bool,
     regex: Option<Regex>,
     pub filtre_rapide: FiltreRapide,
+    pub filtres: FiltresAvances,
+    pub filtres_ouverts: bool,
+    pub onglet_filtres: OngletFiltre,
     pub colonnes: Vec<ColonneEtat>,
     pub tri: Vec<(Colonne, Ordre)>,
     /// Indices (dans `films`) triés ET filtrés.
@@ -188,27 +267,49 @@ pub struct Etat {
     pub notifications: Vec<Notification>,
     pub non_lus: usize,
     pub dialogue: Option<Dialogue>,
+    /// Image affichée en plein écran (visionneuse).
+    pub visionneuse: Option<PathBuf>,
+    pub largeur_details: Option<f32>,
+    pub fenetre: GeometrieFenetre,
+    pub confirmations_masquees: BTreeSet<String>,
+    pub assistant_termine: bool,
+    /// Demandes ponctuelles consommées par l'application (effets hors état).
+    pub vider_cache_images: bool,
+    pub focus_recherche: bool,
+    pub quitter: bool,
     tampon_frappe: String,
     derniere_frappe: Option<Instant>,
     tx: Sender<Message>,
     rx: Receiver<Message>,
     repaint: Repaint,
     prochain_id_tache: u64,
+    prochain_id_requete: u64,
     /// Pas de la tâche simulée (réduit dans les tests).
     pas_simulation: Duration,
 }
 
 impl Etat {
     pub fn nouveau() -> Self {
-        Self::avec_films(films_factices())
+        Self::avec_source(Arc::new(SourceFactice::default()))
+    }
+
+    /// Point d'entrée de l'intégration : la bibliothèque vient de la source.
+    pub fn avec_source(source: Arc<dyn SourceDonnees>) -> Self {
+        let films = source.films();
+        Self::construire(source, films)
     }
 
     pub fn avec_films(films: Vec<Film>) -> Self {
+        Self::construire(Arc::new(SourceFactice::default()), films)
+    }
+
+    fn construire(source: Arc<dyn SourceDonnees>, films: Vec<Film>) -> Self {
         let (tx, rx) = channel();
         let reglages = Reglages::default();
         let mut etat = Self {
             i18n: I18n::new(reglages.langue),
             reglages,
+            source,
             films,
             module: Module::Films,
             onglet: OngletDetails::Details,
@@ -216,6 +317,9 @@ impl Etat {
             recherche_invalide: false,
             regex: None,
             filtre_rapide: FiltreRapide::Aucun,
+            filtres: FiltresAvances::default(),
+            filtres_ouverts: false,
+            onglet_filtres: OngletFiltre::Details,
             colonnes: colonnes_par_defaut(),
             tri: vec![(Colonne::Titre, Ordre::Croissant)],
             visibles: Vec::new(),
@@ -227,12 +331,21 @@ impl Etat {
             notifications: Vec::new(),
             non_lus: 0,
             dialogue: None,
+            visionneuse: None,
+            largeur_details: None,
+            fenetre: GeometrieFenetre::default(),
+            confirmations_masquees: BTreeSet::new(),
+            assistant_termine: false,
+            vider_cache_images: false,
+            focus_recherche: false,
+            quitter: false,
             tampon_frappe: String::new(),
             derniere_frappe: None,
             tx,
             rx,
             repaint: Arc::new(|| {}),
             prochain_id_tache: 1,
+            prochain_id_requete: 1,
             pas_simulation: Duration::from_millis(80),
         };
         etat.recalculer();
@@ -243,6 +356,106 @@ impl Etat {
         self.repaint = repaint;
     }
 
+    // ---------------------------------------------------------------- persistance de l'interface
+
+    /// Instantané de ce qui est mémorisé dans `ui.json` (jamais de secret).
+    pub fn instantane_interface(&self) -> EtatInterface {
+        EtatInterface {
+            fenetre: self.fenetre,
+            dernier_module: self.module.id().into(),
+            theme: self.reglages.theme.id().into(),
+            langue: self.reglages.langue.code().into(),
+            separateur: self.largeur_details,
+            colonnes: self
+                .colonnes
+                .iter()
+                .map(|c| ColonnePersistee {
+                    id: c.colonne.id().into(),
+                    visible: c.visible,
+                    largeur: c.largeur,
+                })
+                .collect(),
+            tri: self
+                .tri
+                .iter()
+                .map(|(c, o)| TriPersiste {
+                    colonne: c.id().into(),
+                    croissant: *o == Ordre::Croissant,
+                })
+                .collect(),
+            filtrage_actif: self.filtres.actif,
+            filtres: self.filtres.lignes_actives(),
+            prereglages_filtres: self.filtres.prereglages.clone(),
+            confirmations_masquees: self.confirmations_masquees.clone(),
+            assistant_termine: self.assistant_termine,
+            ..EtatInterface::default()
+        }
+    }
+
+    /// Restaure l'état mémorisé (identifiants inconnus ignorés, colonnes manquantes ajoutées).
+    pub fn restaurer_interface(&mut self, ui: &EtatInterface) {
+        self.fenetre = ui.fenetre;
+        if self.reglages.memoriser_module {
+            self.module = Module::depuis_id(&ui.dernier_module).unwrap_or(Module::Films);
+        }
+        if let Some(t) = Theme::depuis_id(&ui.theme) {
+            self.reglages.theme = t;
+        }
+        if let Some(l) = Langue::depuis_code(&ui.langue)
+            && l != self.reglages.langue
+        {
+            self.reglages.langue = l;
+            self.i18n = I18n::new(l);
+        }
+        self.largeur_details = ui.separateur.filter(|v| v.is_finite() && *v > 0.0);
+        if !ui.colonnes.is_empty() {
+            let mut colonnes: Vec<ColonneEtat> = Vec::new();
+            for p in &ui.colonnes {
+                if let Some(c) = Colonne::depuis_id(&p.id)
+                    && !colonnes.iter().any(|x| x.colonne == c)
+                {
+                    colonnes.push(ColonneEtat {
+                        colonne: c,
+                        visible: p.visible || c == Colonne::Titre,
+                        largeur: p.largeur.filter(|l| l.is_finite() && *l > 0.0),
+                    });
+                }
+            }
+            for d in colonnes_par_defaut() {
+                if !colonnes.iter().any(|x| x.colonne == d.colonne) {
+                    colonnes.push(d);
+                }
+            }
+            self.colonnes = colonnes;
+        }
+        let tri: Vec<(Colonne, Ordre)> = ui
+            .tri
+            .iter()
+            .filter_map(|t| {
+                Colonne::depuis_id(&t.colonne).map(|c| {
+                    let o = if t.croissant {
+                        Ordre::Croissant
+                    } else {
+                        Ordre::Decroissant
+                    };
+                    (c, o)
+                })
+            })
+            .collect();
+        if !tri.is_empty() {
+            self.tri = tri;
+        }
+        self.filtres.charger_lignes(&ui.filtres);
+        self.filtres.actif = ui.filtrage_actif;
+        self.filtres.prereglages = ui.prereglages_filtres.clone();
+        self.confirmations_masquees = ui.confirmations_masquees.clone();
+        self.assistant_termine = ui.assistant_termine;
+        if !self.assistant_termine {
+            self.ouvrir_dialogue(TypeDialogue::Assistant);
+        }
+        self.recalculer();
+    }
+
     // ---------------------------------------------------------------- lecture
 
     pub fn colonnes_visibles(&self) -> Vec<Colonne> {
@@ -251,6 +464,14 @@ impl Etat {
             .filter(|c| c.visible)
             .map(|c| c.colonne)
             .collect()
+    }
+
+    pub fn largeur_colonne(&self, colonne: Colonne) -> f32 {
+        self.colonnes
+            .iter()
+            .find(|c| c.colonne == colonne)
+            .and_then(|c| c.largeur)
+            .unwrap_or_else(|| colonne.largeur_initiale())
     }
 
     pub fn film(&self, id: u64) -> Option<&Film> {
@@ -269,6 +490,15 @@ impl Etat {
             .collect()
     }
 
+    /// Identifiants sélectionnés dans l'ordre d'affichage.
+    pub fn selection_ordonnee(&self) -> Vec<u64> {
+        self.visibles
+            .iter()
+            .map(|&i| self.films[i].id)
+            .filter(|id| self.selection.contains(id))
+            .collect()
+    }
+
     pub fn taille_selection(&self) -> u64 {
         self.films_selectionnes()
             .iter()
@@ -281,7 +511,9 @@ impl Etat {
     }
 
     pub fn filtre_actif(&self) -> bool {
-        !self.recherche.is_empty() || self.filtre_rapide != FiltreRapide::Aucun
+        !self.recherche.is_empty()
+            || self.filtre_rapide != FiltreRapide::Aucun
+            || self.filtres.est_actif()
     }
 
     /// Tâche affichée dans la barre d'état : une principale d'abord, sinon n'importe laquelle.
@@ -301,6 +533,11 @@ impl Etat {
             .iter()
             .position(|(c, _)| *c == colonne)
             .map(|p| (p, self.tri[p].1))
+    }
+
+    /// Fermeture autorisée sans confirmation ?
+    pub fn quitter_autorise(&self) -> bool {
+        self.quitter || self.taches.is_empty()
     }
 
     // ---------------------------------------------------------------- canal de tâches
@@ -365,6 +602,7 @@ impl Etat {
             Message::EffacerFiltres => {
                 self.filtre_rapide = FiltreRapide::Aucun;
                 self.recherche.clear();
+                self.filtres.appliquer(ActionFiltre::Reinitialiser);
                 self.compiler_recherche();
                 self.recalculer();
             }
@@ -383,16 +621,59 @@ impl Etat {
                     c.visible = visible;
                 }
             }
+            Message::DeplacerColonne(col, delta) => self.deplacer_colonne(col, delta),
+            Message::LargeursColonnes(largeurs) => {
+                for (col, l) in largeurs {
+                    if let Some(c) = self.colonnes.iter_mut().find(|c| c.colonne == col)
+                        && l.is_finite()
+                        && l > 0.0
+                    {
+                        c.largeur = Some(l);
+                    }
+                }
+            }
+            Message::LargeurDetails(l) => {
+                if l.is_finite() && l > 0.0 {
+                    self.largeur_details = Some(l);
+                }
+            }
+            Message::Fenetre(g) => self.fenetre = g,
             Message::Commande(c) => self.executer(c),
             Message::OuvrirDialogue(t) => self.ouvrir_dialogue(t),
             Message::FermerDialogue => self.dialogue = None,
             Message::Dialogue(a) => self.action_dialogue(a),
+            Message::Confirmer => self.confirmer(),
             Message::ApercuAppliquer => self.appliquer_renommage(),
             Message::AppliquerReglages(r) => {
                 if r.langue != self.reglages.langue {
                     self.i18n = I18n::new(r.langue);
                 }
                 self.reglages = *r;
+            }
+            Message::Filtre(a) => {
+                self.filtres.appliquer(a);
+                self.recalculer();
+            }
+            Message::OuvrirFiltres(o) => self.filtres_ouverts = o,
+            Message::OngletFiltres(o) => self.onglet_filtres = o,
+            Message::ResultatsRecherche {
+                id_requete,
+                resultat,
+            } => self.recevoir_resultats(id_requete, resultat),
+            Message::OuvrirVisionneuse(p) => self.visionneuse = Some(p),
+            Message::FermerVisionneuse => self.visionneuse = None,
+            Message::ViderCacheImages => {
+                self.vider_cache_images = true;
+                let texte = self.i18n.t("gui.images.cleared");
+                self.notifier(Niveau::Info, texte);
+            }
+            Message::FocusRecherche => self.focus_recherche = true,
+            Message::DemandeQuitter => {
+                if self.taches.is_empty() {
+                    self.quitter = true;
+                } else {
+                    self.demander_confirmation(ActionConfirmee::Quitter);
+                }
             }
             Message::Notifier(niveau, texte) => self.notifier(niveau, texte),
             Message::MessagesLus => self.non_lus = 0,
@@ -446,18 +727,24 @@ impl Etat {
         }
     }
 
-    fn accepte(&self, f: &Film) -> bool {
+    fn accepte(&self, f: &Film, ctx: &ContexteFiltre) -> bool {
         self.filtre_rapide.accepte(f)
             && self
                 .regex
                 .as_ref()
                 .is_none_or(|re| re.is_match(&f.texte_recherche()))
+            && self.filtres.accepte(f, ctx)
     }
 
     /// Recalcule la vue dérivée (filtre + tri), conserve la sélection valide, sélectionne la 1re ligne si vide.
     pub fn recalculer(&mut self) {
+        let ctx = if self.filtres.actif && self.filtres.utilise_doublons() {
+            ContexteFiltre::calculer(&self.films)
+        } else {
+            ContexteFiltre::default()
+        };
         let mut v: Vec<usize> = (0..self.films.len())
-            .filter(|&i| self.accepte(&self.films[i]))
+            .filter(|&i| self.accepte(&self.films[i], &ctx))
             .collect();
         let tri = self.tri.clone();
         v.sort_by(|&a, &b| {
@@ -513,6 +800,24 @@ impl Etat {
             self.tri = vec![(colonne, Ordre::Croissant)];
         }
         self.recalculer();
+    }
+
+    /// Déplace une colonne d'un cran parmi les colonnes visibles.
+    fn deplacer_colonne(&mut self, col: Colonne, delta: i32) {
+        let visibles: Vec<usize> = (0..self.colonnes.len())
+            .filter(|&i| self.colonnes[i].visible)
+            .collect();
+        let Some(rang) = visibles
+            .iter()
+            .position(|&i| self.colonnes[i].colonne == col)
+        else {
+            return;
+        };
+        let cible = rang as i64 + delta.signum() as i64;
+        if cible < 0 || cible as usize >= visibles.len() {
+            return;
+        }
+        self.colonnes.swap(visibles[rang], visibles[cible as usize]);
     }
 
     fn id_en_ligne(&self, ligne: usize) -> u64 {
@@ -591,6 +896,14 @@ impl Etat {
             Commande::ScrapeMeilleur | Commande::ScrapeNonTraites | Commande::ScrapeMetadonnees => {
                 self.lancer_tache("gui.task.scrape", 25, true)
             }
+            Commande::ScrapeInteractif => {
+                let ids = self.selection_ordonnee();
+                self.ouvrir_recherche(ids);
+            }
+            Commande::Editer => {
+                let ids = self.selection_ordonnee();
+                self.ouvrir_editeur(ids);
+            }
             Commande::BasculerVu => {
                 let ids = self.selection.clone();
                 for f in self.films.iter_mut().filter(|f| ids.contains(&f.id)) {
@@ -604,18 +917,9 @@ impl Etat {
                     f.verrouille = !f.verrouille;
                 }
             }
-            Commande::RetirerBase => {
-                let n = self.selection.len();
-                let ids = std::mem::take(&mut self.selection);
-                self.films.retain(|f| !ids.contains(&f.id));
-                self.principal = None;
-                self.ancre = None;
-                self.recalculer();
-                let compte = n.to_string();
-                let texte = self
-                    .i18n
-                    .t_args("gui.removed", &[("count", compte.as_str())]);
-                self.notifier(Niveau::Info, texte);
+            Commande::RetirerBase => self.demander_confirmation(ActionConfirmee::RetirerBase),
+            Commande::SupprimerFichiers => {
+                self.demander_confirmation(ActionConfirmee::SupprimerFichiers)
             }
             Commande::Renommer | Commande::ApercuRenommage => {
                 self.ouvrir_dialogue(TypeDialogue::ApercuRenommage)
@@ -626,6 +930,76 @@ impl Etat {
                     .i18n
                     .t_args("gui.notimplemented", &[("action", action.as_str())]);
                 self.notifier(Niveau::Info, texte);
+            }
+        }
+    }
+
+    /// Ouvre l'incrustation de confirmation, sauf si l'utilisateur l'a masquée.
+    fn demander_confirmation(&mut self, action: ActionConfirmee) {
+        if self.confirmations_masquees.contains(action.cle_masquage()) {
+            self.executer_confirme(action);
+            return;
+        }
+        let n = self.selection.len().to_string();
+        let (titre, texte) = match action {
+            ActionConfirmee::RetirerBase => (
+                self.i18n.t("movie.remove"),
+                self.i18n
+                    .t_args("confirm.remove.text", &[("count", n.as_str())]),
+            ),
+            ActionConfirmee::SupprimerFichiers => (
+                self.i18n.t("movie.delete"),
+                self.i18n
+                    .t_args("confirm.delete.text", &[("count", n.as_str())]),
+            ),
+            ActionConfirmee::Quitter => (
+                self.i18n.t("app.exit.confirmation"),
+                self.i18n.t("app.exit.runningtasks"),
+            ),
+        };
+        self.dialogue = Some(Dialogue::Confirmation(EtatConfirmation {
+            titre,
+            texte,
+            action,
+            masquable: action != ActionConfirmee::Quitter,
+            ne_plus_demander: false,
+        }));
+    }
+
+    fn confirmer(&mut self) {
+        let Some(Dialogue::Confirmation(c)) = self.dialogue.take() else {
+            return;
+        };
+        if c.masquable && c.ne_plus_demander {
+            self.confirmations_masquees
+                .insert(c.action.cle_masquage().to_string());
+        }
+        self.executer_confirme(c.action);
+    }
+
+    fn executer_confirme(&mut self, action: ActionConfirmee) {
+        match action {
+            ActionConfirmee::RetirerBase | ActionConfirmee::SupprimerFichiers => {
+                let n = self.selection.len();
+                let ids = std::mem::take(&mut self.selection);
+                self.films.retain(|f| !ids.contains(&f.id));
+                self.principal = None;
+                self.ancre = None;
+                self.recalculer();
+                let compte = n.to_string();
+                let cle = if action == ActionConfirmee::RetirerBase {
+                    "gui.removed"
+                } else {
+                    "gui.deleted"
+                };
+                let texte = self.i18n.t_args(cle, &[("count", compte.as_str())]);
+                self.notifier(Niveau::Info, texte);
+            }
+            ActionConfirmee::Quitter => {
+                for t in &self.taches {
+                    t.annuler();
+                }
+                self.quitter = true;
             }
         }
     }
@@ -664,6 +1038,13 @@ impl Etat {
                 self.dialogue = Some(Dialogue::Messages);
                 self.non_lus = 0;
             }
+            TypeDialogue::Assistant => {
+                self.dialogue = Some(Dialogue::Assistant(Box::new(EtatAssistant::new(
+                    self.reglages.langue,
+                    self.reglages.theme,
+                    self.reglages.sources.clone(),
+                ))));
+            }
         }
     }
 
@@ -678,7 +1059,284 @@ impl Etat {
             }
             (Some(Dialogue::Reglages(r)), ActionDialogue::ReglagesPage(p)) => r.page = p,
             (Some(Dialogue::Reglages(r)), ActionDialogue::ReglagesFiltre(f)) => r.filtre = f,
+            (Some(Dialogue::Confirmation(c)), ActionDialogue::ConfirmationNePlusDemander(v)) => {
+                c.ne_plus_demander = v
+            }
+            (Some(Dialogue::Editeur(_)), ActionDialogue::Editeur(a)) => self.action_editeur(a),
+            (Some(Dialogue::Recherche(_)), ActionDialogue::Recherche(a)) => {
+                self.action_recherche(a)
+            }
+            (Some(Dialogue::Assistant(_)), ActionDialogue::Assistant(a)) => {
+                self.action_assistant(a)
+            }
             _ => {}
+        }
+    }
+
+    // ---- éditeur de film
+
+    fn ouvrir_editeur(&mut self, ids: Vec<u64>) {
+        let mut file: Vec<u64> = ids.into_iter().rev().collect();
+        let total = file.len();
+        let Some(id) = file.pop() else { return };
+        let Some(film) = self.film(id) else { return };
+        self.dialogue = Some(Dialogue::Editeur(Box::new(EtatEditeur {
+            id,
+            onglet: OngletEditeur::Details,
+            brouillon: FilmEdite::depuis(film),
+            erreurs: Vec::new(),
+            file,
+            total,
+        })));
+    }
+
+    /// Passe au film suivant de la file (ou ferme l'éditeur).
+    fn editeur_suivant(&mut self, mut file: Vec<u64>, total: usize, onglet: OngletEditeur) {
+        while let Some(id) = file.pop() {
+            if let Some(film) = self.film(id) {
+                self.dialogue = Some(Dialogue::Editeur(Box::new(EtatEditeur {
+                    id,
+                    onglet,
+                    brouillon: FilmEdite::depuis(film),
+                    erreurs: Vec::new(),
+                    file,
+                    total,
+                })));
+                return;
+            }
+        }
+        self.dialogue = None;
+    }
+
+    fn action_editeur(&mut self, action: ActionEditeur) {
+        let Some(Dialogue::Editeur(e)) = &mut self.dialogue else {
+            return;
+        };
+        match action {
+            ActionEditeur::Onglet(o) => e.onglet = o,
+            ActionEditeur::Brouillon(b) => {
+                e.brouillon = *b;
+                // Les erreurs disparaissent au fil de la correction.
+                if !e.erreurs.is_empty() {
+                    e.erreurs = valider(&e.brouillon);
+                }
+            }
+            ActionEditeur::Abandonner => self.dialogue = None,
+            ActionEditeur::Ignorer => {
+                let (file, total, onglet) = (std::mem::take(&mut e.file), e.total, e.onglet);
+                self.editeur_suivant(file, total, onglet);
+            }
+            ActionEditeur::Valider => {
+                let erreurs = valider(&e.brouillon);
+                if !erreurs.is_empty() {
+                    e.erreurs = erreurs;
+                    return;
+                }
+                let (id, brouillon, file, total, onglet) = (
+                    e.id,
+                    e.brouillon.clone(),
+                    std::mem::take(&mut e.file),
+                    e.total,
+                    e.onglet,
+                );
+                if let Some(f) = self.films.iter_mut().find(|f| f.id == id) {
+                    brouillon.appliquer(f);
+                    let copie = f.clone();
+                    if let Err(err) = self.source.enregistrer_film(&copie) {
+                        self.notifier(Niveau::Erreur, err);
+                    }
+                }
+                self.recalculer();
+                self.editeur_suivant(file, total, onglet);
+            }
+        }
+    }
+
+    // ---- recherche d'extracteur
+
+    fn ouvrir_recherche(&mut self, ids: Vec<u64>) {
+        let mut file: Vec<u64> = ids.into_iter().rev().collect();
+        let total = file.len();
+        self.recherche_suivante(&mut file, total, false);
+    }
+
+    fn recherche_suivante(&mut self, file: &mut Vec<u64>, total: usize, ne_pas_remplacer: bool) {
+        while let Some(id) = file.pop() {
+            let Some(film) = self.film(id) else { continue };
+            let (texte, annee) = titre_nettoye(&film.dossier);
+            let texte = if texte.is_empty() {
+                film.titre.clone()
+            } else {
+                texte
+            };
+            let extracteur = self
+                .source
+                .extracteurs()
+                .into_iter()
+                .next()
+                .unwrap_or_default();
+            self.dialogue = Some(Dialogue::Recherche(Box::new(EtatRecherche {
+                film_id: id,
+                requete: RequeteRecherche {
+                    extracteur,
+                    langue: self.reglages.langue.code().into(),
+                    texte,
+                    annee: annee.or(Some(film.annee)).filter(|a| *a > 0),
+                },
+                resultats: Vec::new(),
+                selection: None,
+                en_cours: false,
+                id_requete: 0,
+                erreur: None,
+                ne_pas_remplacer,
+                file: std::mem::take(file),
+                total,
+            })));
+            self.lancer_recherche();
+            return;
+        }
+        self.dialogue = None;
+    }
+
+    /// Lance la recherche en tâche de fond ; une réponse périmée sera ignorée.
+    fn lancer_recherche(&mut self) {
+        let id_requete = self.prochain_id_requete;
+        let Some(Dialogue::Recherche(r)) = &mut self.dialogue else {
+            return;
+        };
+        self.prochain_id_requete += 1;
+        r.id_requete = id_requete;
+        r.en_cours = true;
+        r.erreur = None;
+        r.resultats.clear();
+        r.selection = None;
+        let requete = r.requete.clone();
+        let source = self.source.clone();
+        let tx = self.tx.clone();
+        let repaint = self.repaint.clone();
+        std::thread::spawn(move || {
+            let resultat = source.rechercher(&requete);
+            let _ = tx.send(Message::ResultatsRecherche {
+                id_requete,
+                resultat,
+            });
+            repaint();
+        });
+    }
+
+    fn recevoir_resultats(
+        &mut self,
+        id_requete: u64,
+        resultat: Result<Vec<ResultatRecherche>, String>,
+    ) {
+        let Some(Dialogue::Recherche(r)) = &mut self.dialogue else {
+            return;
+        };
+        if r.id_requete != id_requete {
+            return;
+        }
+        r.en_cours = false;
+        match resultat {
+            Ok(v) => {
+                r.selection = if v.is_empty() { None } else { Some(0) };
+                r.resultats = v;
+            }
+            Err(e) => r.erreur = Some(e),
+        }
+    }
+
+    fn action_recherche(&mut self, action: ActionRecherche) {
+        let Some(Dialogue::Recherche(r)) = &mut self.dialogue else {
+            return;
+        };
+        match action {
+            ActionRecherche::Texte(t) => r.requete.texte = t,
+            ActionRecherche::Annee(a) => r.requete.annee = a,
+            ActionRecherche::Extracteur(x) => r.requete.extracteur = x,
+            ActionRecherche::Langue(l) => r.requete.langue = l,
+            ActionRecherche::NePasRemplacer(v) => r.ne_pas_remplacer = v,
+            ActionRecherche::Choisir(n) => {
+                if n < r.resultats.len() {
+                    r.selection = Some(n);
+                }
+            }
+            ActionRecherche::Lancer => self.lancer_recherche(),
+            ActionRecherche::Abandonner => self.dialogue = None,
+            ActionRecherche::Ignorer => {
+                let (mut file, total, npr) =
+                    (std::mem::take(&mut r.file), r.total, r.ne_pas_remplacer);
+                self.recherche_suivante(&mut file, total, npr);
+            }
+            ActionRecherche::Valider => {
+                let Some(choix) = r.resultat_choisi().cloned() else {
+                    return;
+                };
+                let (id, npr, mut file, total) = (
+                    r.film_id,
+                    r.ne_pas_remplacer,
+                    std::mem::take(&mut r.file),
+                    r.total,
+                );
+                if let Some(f) = self.films.iter_mut().find(|f| f.id == id) {
+                    appliquer_resultat(f, &choix, npr);
+                    let copie = f.clone();
+                    if let Err(err) = self.source.enregistrer_film(&copie) {
+                        self.notifier(Niveau::Erreur, err);
+                    }
+                }
+                self.recalculer();
+                self.recherche_suivante(&mut file, total, npr);
+            }
+        }
+    }
+
+    // ---- assistant de premier lancement
+
+    fn action_assistant(&mut self, action: ActionAssistant) {
+        let Some(Dialogue::Assistant(a)) = &mut self.dialogue else {
+            return;
+        };
+        match action {
+            ActionAssistant::Suivante => a.page = a.page.suivante(),
+            ActionAssistant::Precedente => a.page = a.page.precedente(),
+            ActionAssistant::Langue(l) => {
+                // Aperçu immédiat : la langue s'applique dès la sélection.
+                a.langue = l;
+                if self.reglages.langue != l {
+                    self.reglages.langue = l;
+                    self.i18n = I18n::new(l);
+                }
+            }
+            ActionAssistant::Theme(t) => {
+                a.theme = t;
+                self.reglages.theme = t;
+            }
+            ActionAssistant::SaisieSource(s) => a.saisie_source = s,
+            ActionAssistant::AjouterSource => a.ajouter_source(),
+            ActionAssistant::RetirerSource(n) => {
+                if n < a.sources.len() {
+                    a.sources.remove(n);
+                }
+            }
+            ActionAssistant::CleTmdb(c) => a.cle_tmdb = c,
+            ActionAssistant::LangueExtracteur(l) => a.langue_extracteur = l,
+            ActionAssistant::Terminer => {
+                let Some(Dialogue::Assistant(a)) = self.dialogue.take() else {
+                    return;
+                };
+                self.reglages.sources = a.sources.clone();
+                if !a.cle_tmdb.trim().is_empty() {
+                    // Transmise au coffre à secrets : jamais conservée dans l'état ni dans ui.json.
+                    self.source
+                        .transmettre_secret("tmdb.cle_api", a.cle_tmdb.trim());
+                }
+                self.assistant_termine = true;
+                let texte = self.i18n.t("wizard.done");
+                self.notifier(Niveau::Info, texte);
+                if !self.reglages.sources.is_empty() {
+                    self.lancer_tache("gui.task.update", 40, true);
+                }
+            }
         }
     }
 
@@ -980,6 +1638,9 @@ mod tests {
         assert_ne!(e.film(id).unwrap().vu, avant);
         let total = e.films.len();
         e.appliquer(Message::Commande(Commande::RetirerBase));
+        assert!(matches!(e.dialogue, Some(Dialogue::Confirmation(_))));
+        assert_eq!(e.films.len(), total);
+        e.appliquer(Message::Confirmer);
         assert_eq!(e.films.len(), total - 1);
         assert!(e.film(id).is_none());
         assert_eq!(e.selection.len(), 1); // la 1re ligne est resélectionnée
@@ -1060,5 +1721,255 @@ mod tests {
         r.langue = crate::i18n::Langue::Anglais;
         e.appliquer(Message::AppliquerReglages(Box::new(r)));
         assert_eq!(e.i18n.t("app.movies"), "Movies");
+    }
+
+    fn source_rapide() -> Arc<SourceFactice> {
+        let mut s = SourceFactice::new(
+            std::env::temp_dir().join(format!("mmr-etat-{}", std::process::id())),
+        );
+        s.latence = Duration::ZERO;
+        Arc::new(s)
+    }
+
+    fn attendre_recherche(e: &mut Etat) {
+        let fin = Instant::now() + Duration::from_secs(10);
+        while matches!(&e.dialogue, Some(Dialogue::Recherche(r)) if r.en_cours)
+            && Instant::now() < fin
+        {
+            if let Ok(m) = e.rx.recv_timeout(Duration::from_millis(50)) {
+                e.appliquer(m);
+            }
+        }
+    }
+
+    #[test]
+    fn persistance_aller_retour_de_l_interface() {
+        let mut e = Etat::nouveau();
+        e.appliquer(Message::ColonneVisible(Colonne::Duree, true));
+        e.appliquer(Message::DeplacerColonne(Colonne::Annee, -1));
+        e.appliquer(Message::LargeursColonnes(vec![(Colonne::Titre, 333.0)]));
+        e.appliquer(Message::LargeurDetails(480.0));
+        e.appliquer(Message::ChoisirModule(Module::Series));
+        e.appliquer(Message::Trier {
+            colonne: Colonne::Note,
+            additif: false,
+        });
+        e.appliquer(Message::Filtre(ActionFiltre::EnregistrerPrereglage(
+            "vide".into(),
+        )));
+        e.confirmations_masquees.insert("confirm.remove".into());
+        e.assistant_termine = true;
+        let ui = e.instantane_interface();
+        assert_eq!(ui.colonnes[0].id, "year");
+        let mut f = Etat::nouveau();
+        f.restaurer_interface(&ui);
+        assert_eq!(f.colonnes_visibles()[..2], [Colonne::Annee, Colonne::Titre]);
+        assert!(f.colonnes_visibles().contains(&Colonne::Duree));
+        assert_eq!(f.largeur_colonne(Colonne::Titre), 333.0);
+        assert_eq!(f.largeur_details, Some(480.0));
+        assert_eq!(f.module, Module::Series);
+        assert_eq!(f.tri, [(Colonne::Note, Ordre::Croissant)]);
+        assert!(f.filtres.prereglages.contains_key("vide"));
+        assert!(f.dialogue.is_none()); // assistant déjà terminé
+        assert_eq!(f.instantane_interface(), ui);
+    }
+
+    #[test]
+    fn restauration_tolerante_et_assistant_au_premier_lancement() {
+        let mut ui = EtatInterface::default();
+        ui.colonnes.push(ColonnePersistee {
+            id: "inconnue".into(),
+            visible: true,
+            largeur: Some(f32::NAN),
+        });
+        ui.colonnes.push(ColonnePersistee {
+            id: "title".into(),
+            visible: false,
+            largeur: None,
+        });
+        let mut e = Etat::nouveau();
+        e.restaurer_interface(&ui);
+        assert_eq!(e.colonnes.len(), Colonne::TOUTES.len());
+        assert!(e.colonnes_visibles().contains(&Colonne::Titre));
+        assert!(matches!(e.dialogue, Some(Dialogue::Assistant(_))));
+    }
+
+    #[test]
+    fn confirmation_masquable() {
+        let mut e = Etat::nouveau();
+        let total = e.films.len();
+        e.appliquer(Message::Commande(Commande::SupprimerFichiers));
+        e.appliquer(Message::Dialogue(
+            ActionDialogue::ConfirmationNePlusDemander(true),
+        ));
+        e.appliquer(Message::Confirmer);
+        assert_eq!(e.films.len(), total - 1);
+        assert!(e.confirmations_masquees.contains("confirm.delete"));
+        e.appliquer(Message::Commande(Commande::SupprimerFichiers));
+        assert!(e.dialogue.is_none());
+        assert_eq!(e.films.len(), total - 2);
+        // annuler = fermer sans rien faire
+        e.appliquer(Message::Commande(Commande::RetirerBase));
+        e.appliquer(Message::FermerDialogue);
+        assert_eq!(e.films.len(), total - 2);
+    }
+
+    #[test]
+    fn quitter_avec_des_taches_demande_confirmation() {
+        let mut e = Etat::nouveau();
+        e.appliquer(Message::DemandeQuitter);
+        assert!(e.quitter);
+        let mut e = Etat::nouveau();
+        e.pas_simulation = Duration::from_millis(50);
+        e.appliquer(Message::Commande(Commande::MettreAJourToutesSources));
+        assert!(!e.quitter_autorise());
+        e.appliquer(Message::DemandeQuitter);
+        assert!(matches!(e.dialogue, Some(Dialogue::Confirmation(_))));
+        e.appliquer(Message::Confirmer);
+        assert!(e.quitter_autorise());
+    }
+
+    #[test]
+    fn filtres_avances_dans_la_vue() {
+        let mut e = Etat::nouveau();
+        let mut l = e.filtres.ligne(crate::filtres::IdFiltre::Vu).clone();
+        l.etat = crate::filtres::EtatFiltre::Exclure;
+        e.appliquer(Message::Filtre(ActionFiltre::Ligne(Box::new(l))));
+        assert!(e.filtre_actif());
+        assert!(e.visibles.iter().all(|&i| !e.films[i].vu));
+        e.appliquer(Message::EffacerFiltres);
+        assert!(!e.filtre_actif());
+        assert_eq!(e.visibles.len(), e.films.len());
+    }
+
+    #[test]
+    fn editeur_validation_et_file() {
+        let mut e = Etat::nouveau();
+        e.appliquer(Message::SelectionnerTout);
+        e.appliquer(Message::Commande(Commande::Editer));
+        let Some(Dialogue::Editeur(ed)) = &e.dialogue else {
+            panic!("éditeur attendu")
+        };
+        assert_eq!((ed.position(), ed.total), (1, e.films.len()));
+        let premier = ed.id;
+        let mut b = ed.brouillon.clone();
+        b.titre.clear();
+        e.appliquer(Message::Dialogue(ActionDialogue::Editeur(
+            ActionEditeur::Brouillon(Box::new(b.clone())),
+        )));
+        e.appliquer(Message::Dialogue(ActionDialogue::Editeur(
+            ActionEditeur::Valider,
+        )));
+        let Some(Dialogue::Editeur(ed)) = &e.dialogue else {
+            panic!()
+        };
+        assert_eq!(ed.id, premier);
+        assert!(ed.erreur(crate::dialogues::ChampEditeur::Titre).is_some());
+        b.titre = "Alien (modifié)".into();
+        e.appliquer(Message::Dialogue(ActionDialogue::Editeur(
+            ActionEditeur::Brouillon(Box::new(b)),
+        )));
+        let Some(Dialogue::Editeur(ed)) = &e.dialogue else {
+            panic!()
+        };
+        assert!(ed.erreurs.is_empty());
+        e.appliquer(Message::Dialogue(ActionDialogue::Editeur(
+            ActionEditeur::Valider,
+        )));
+        assert_eq!(e.film(premier).unwrap().titre, "Alien (modifié)");
+        let Some(Dialogue::Editeur(ed)) = &e.dialogue else {
+            panic!()
+        };
+        assert_ne!(ed.id, premier);
+        e.appliquer(Message::Dialogue(ActionDialogue::Editeur(
+            ActionEditeur::Abandonner,
+        )));
+        assert!(e.dialogue.is_none());
+    }
+
+    #[test]
+    fn recherche_asynchrone_et_choix_d_un_resultat() {
+        let mut e = Etat::avec_source(source_rapide());
+        let id = id_de(&e, "Blade Runner 2049", 2017);
+        let alien = id_de(&e, "Alien", 1979);
+        e.appliquer(Message::Selectionner {
+            id,
+            ctrl: false,
+            maj: false,
+        });
+        e.appliquer(Message::Selectionner {
+            id: alien,
+            ctrl: true,
+            maj: false,
+        });
+        e.appliquer(Message::Commande(Commande::ScrapeInteractif));
+        let Some(Dialogue::Recherche(r)) = &e.dialogue else {
+            panic!("recherche attendue")
+        };
+        assert_eq!(r.film_id, alien); // ordre d'affichage
+        assert!(r.en_cours);
+        // une réponse périmée est ignorée
+        e.appliquer(Message::ResultatsRecherche {
+            id_requete: 999,
+            resultat: Ok(vec![]),
+        });
+        attendre_recherche(&mut e);
+        let Some(Dialogue::Recherche(r)) = &e.dialogue else {
+            panic!()
+        };
+        assert_eq!(r.resultats[0].titre, "Alien");
+        assert_eq!(r.selection, Some(0));
+        e.appliquer(Message::Dialogue(ActionDialogue::Recherche(
+            ActionRecherche::Ignorer,
+        )));
+        attendre_recherche(&mut e);
+        let Some(Dialogue::Recherche(r)) = &e.dialogue else {
+            panic!()
+        };
+        assert_eq!(r.film_id, id);
+        assert_eq!(r.requete.texte, "Blade Runner 2049");
+        let n = r
+            .resultats
+            .iter()
+            .position(|x| x.titre == "Blade Runner")
+            .unwrap();
+        e.appliquer(Message::Dialogue(ActionDialogue::Recherche(
+            ActionRecherche::Choisir(n),
+        )));
+        e.appliquer(Message::Dialogue(ActionDialogue::Recherche(
+            ActionRecherche::Valider,
+        )));
+        assert!(e.dialogue.is_none());
+        assert_eq!(e.film(id).unwrap().annee, 1982);
+    }
+
+    #[test]
+    fn assistant_transmet_la_cle_sans_la_persister() {
+        let source = source_rapide();
+        let mut e = Etat::avec_source(source.clone());
+        e.restaurer_interface(&EtatInterface::default());
+        let assistant = |a| Message::Dialogue(ActionDialogue::Assistant(a));
+        e.appliquer(assistant(ActionAssistant::Suivante));
+        e.appliquer(assistant(ActionAssistant::Langue(Langue::Anglais)));
+        assert_eq!(e.i18n.t("app.movies"), "Movies");
+        e.appliquer(assistant(ActionAssistant::Theme(Theme::Clair)));
+        e.appliquer(assistant(ActionAssistant::SaisieSource(
+            "E:\\Vidéos".into(),
+        )));
+        e.appliquer(assistant(ActionAssistant::AjouterSource));
+        e.appliquer(assistant(ActionAssistant::CleTmdb("cle-secrete-42".into())));
+        e.appliquer(assistant(ActionAssistant::Terminer));
+        assert!(e.dialogue.is_none() && e.assistant_termine);
+        assert!(e.reglages.sources.contains(&"E:\\Vidéos".to_string()));
+        assert_eq!(
+            source.secret("tmdb.cle_api").as_deref(),
+            Some("cle-secrete-42")
+        );
+        let json = serde_json::to_string(&e.instantane_interface()).unwrap();
+        assert!(!json.contains("cle-secrete-42"));
+        assert!(json.contains("\"theme\":\"clair\""));
+        for t in &e.taches {
+            t.annuler();
+        }
     }
 }

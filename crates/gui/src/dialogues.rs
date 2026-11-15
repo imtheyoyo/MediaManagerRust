@@ -1,0 +1,611 @@
+//! États (sans egui) des dialogues : éditeur de film, recherche d'extracteur, confirmation,
+//! assistant de premier lancement. La validation et les transitions sont testables.
+
+use crate::i18n::Langue;
+use crate::modele::Film;
+use crate::reglages::Theme;
+use crate::source_donnees::{RequeteRecherche, ResultatRecherche};
+use std::fmt;
+
+// ------------------------------------------------------------------ éditeur de film
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OngletEditeur {
+    Details,
+    Classement,
+    Distribution,
+    Identifiants,
+    Illustration,
+}
+
+impl OngletEditeur {
+    pub const TOUS: [OngletEditeur; 5] = [
+        OngletEditeur::Details,
+        OngletEditeur::Classement,
+        OngletEditeur::Distribution,
+        OngletEditeur::Identifiants,
+        OngletEditeur::Illustration,
+    ];
+
+    pub fn cle(self) -> &'static str {
+        match self {
+            OngletEditeur::Details => "metatag.details",
+            OngletEditeur::Classement => "editor.tab.classification",
+            OngletEditeur::Distribution => "metatag.cast",
+            OngletEditeur::Identifiants => "editor.tab.ids",
+            OngletEditeur::Illustration => "metatag.artwork",
+        }
+    }
+}
+
+/// Copie éditable d'un film (champs numériques sous forme de texte pour la validation).
+#[derive(Clone, Debug, PartialEq, Default)]
+pub struct FilmEdite {
+    pub titre: String,
+    pub titre_original: String,
+    pub titre_triable: String,
+    pub annee: String,
+    pub date_sortie: String,
+    pub duree: String,
+    pub certification: String,
+    pub note: String,
+    pub vu: bool,
+    pub verrouille: bool,
+    pub slogan: String,
+    pub resume: String,
+    pub genres: Vec<String>,
+    pub nouveau_genre: String,
+    pub realisateurs: String,
+    pub pays: String,
+    pub production: String,
+    pub saga: String,
+    pub imdb: String,
+    pub tmdb: String,
+    pub acteurs: Vec<(String, String)>,
+}
+
+fn liste(s: &str) -> Vec<String> {
+    s.split(',')
+        .map(|x| x.trim().to_string())
+        .filter(|x| !x.is_empty())
+        .collect()
+}
+
+impl FilmEdite {
+    pub fn depuis(f: &Film) -> Self {
+        Self {
+            titre: f.titre.clone(),
+            titre_original: f.titre_original.clone(),
+            titre_triable: f.titre_triable.clone(),
+            annee: f.annee.to_string(),
+            date_sortie: f.date_sortie.clone(),
+            duree: f.duree_min.to_string(),
+            certification: f.certification.clone(),
+            note: format!("{:.1}", f.note),
+            vu: f.vu,
+            verrouille: f.verrouille,
+            slogan: f.slogan.clone(),
+            resume: f.resume.clone(),
+            genres: f.genres.clone(),
+            nouveau_genre: String::new(),
+            realisateurs: f.realisateurs.join(", "),
+            pays: f.pays.join(", "),
+            production: f.production.join(", "),
+            saga: f.saga.clone().unwrap_or_default(),
+            imdb: f.imdb.clone(),
+            tmdb: f.tmdb.clone(),
+            acteurs: f.acteurs.clone(),
+        }
+    }
+
+    /// Écrit le brouillon (supposé valide) dans le film.
+    pub fn appliquer(&self, f: &mut Film) {
+        f.titre = self.titre.trim().to_string();
+        f.titre_original = self.titre_original.trim().to_string();
+        f.titre_triable = if self.titre_triable.trim().is_empty() {
+            f.titre.clone()
+        } else {
+            self.titre_triable.trim().to_string()
+        };
+        f.annee = self.annee.trim().parse().unwrap_or(f.annee);
+        f.date_sortie = self.date_sortie.trim().to_string();
+        f.duree_min = self.duree.trim().parse().unwrap_or(f.duree_min);
+        f.certification = self.certification.trim().to_string();
+        f.note = nombre(&self.note).map(|n| n as f32).unwrap_or(f.note);
+        f.vu = self.vu;
+        f.verrouille = self.verrouille;
+        f.slogan = self.slogan.clone();
+        f.resume = self.resume.clone();
+        f.genres = self
+            .genres
+            .iter()
+            .map(|g| g.trim().to_string())
+            .filter(|g| !g.is_empty())
+            .collect();
+        f.realisateurs = liste(&self.realisateurs);
+        f.pays = liste(&self.pays);
+        f.production = liste(&self.production);
+        f.saga = Some(self.saga.trim().to_string()).filter(|s| !s.is_empty());
+        f.imdb = self.imdb.trim().to_string();
+        f.tmdb = self.tmdb.trim().to_string();
+        f.acteurs = self
+            .acteurs
+            .iter()
+            .filter(|(n, _)| !n.trim().is_empty())
+            .cloned()
+            .collect();
+    }
+
+    pub fn ajouter_genre(&mut self) {
+        let g = self.nouveau_genre.trim().to_string();
+        if !g.is_empty() && !self.genres.contains(&g) {
+            self.genres.push(g);
+        }
+        self.nouveau_genre.clear();
+    }
+
+    /// Déplace l'élément `n` d'un cran (`vers_le_haut`), sans sortir des bornes.
+    pub fn deplacer_genre(&mut self, n: usize, vers_le_haut: bool) {
+        if vers_le_haut && n > 0 && n < self.genres.len() {
+            self.genres.swap(n, n - 1);
+        } else if !vers_le_haut && n + 1 < self.genres.len() {
+            self.genres.swap(n, n + 1);
+        }
+    }
+}
+
+fn nombre(s: &str) -> Option<f64> {
+    s.trim().replace(',', ".").parse().ok()
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ChampEditeur {
+    Titre,
+    Annee,
+    DateSortie,
+    Duree,
+    Note,
+    Imdb,
+    Tmdb,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ErreurChamp {
+    pub champ: ChampEditeur,
+    pub cle: &'static str,
+}
+
+fn date_valide(s: &str) -> bool {
+    let p: Vec<&str> = s.split('-').collect();
+    if p.len() != 3 || p[0].len() != 4 || p[1].len() != 2 || p[2].len() != 2 {
+        return false;
+    }
+    let (Ok(_), Ok(m), Ok(j)) = (
+        p[0].parse::<u32>(),
+        p[1].parse::<u32>(),
+        p[2].parse::<u32>(),
+    ) else {
+        return false;
+    };
+    (1..=12).contains(&m) && (1..=31).contains(&j)
+}
+
+/// Validation du brouillon ; liste vide = valide.
+pub fn valider(b: &FilmEdite) -> Vec<ErreurChamp> {
+    let mut e = Vec::new();
+    let mut err = |champ, cle| e.push(ErreurChamp { champ, cle });
+    if b.titre.trim().is_empty() {
+        err(ChampEditeur::Titre, "editor.error.title");
+    }
+    match b.annee.trim().parse::<u32>() {
+        Ok(a) if (1870..=2100).contains(&a) => {}
+        _ => err(ChampEditeur::Annee, "editor.error.year"),
+    }
+    let d = b.date_sortie.trim();
+    if !d.is_empty() && !date_valide(d) {
+        err(ChampEditeur::DateSortie, "editor.error.date");
+    }
+    if b.duree.trim().parse::<u32>().is_err() {
+        err(ChampEditeur::Duree, "editor.error.runtime");
+    }
+    match nombre(&b.note) {
+        Some(n) if (0.0..=10.0).contains(&n) => {}
+        _ => err(ChampEditeur::Note, "editor.error.rating"),
+    }
+    let imdb = b.imdb.trim();
+    if !imdb.is_empty()
+        && !(imdb.starts_with("tt")
+            && imdb.len() >= 9
+            && imdb[2..].chars().all(|c| c.is_ascii_digit()))
+    {
+        err(ChampEditeur::Imdb, "editor.error.imdb");
+    }
+    let tmdb = b.tmdb.trim();
+    if !tmdb.is_empty() && !tmdb.chars().all(|c| c.is_ascii_digit()) {
+        err(ChampEditeur::Tmdb, "editor.error.tmdb");
+    }
+    e
+}
+
+#[derive(Clone, Debug)]
+pub struct EtatEditeur {
+    pub id: u64,
+    pub onglet: OngletEditeur,
+    pub brouillon: FilmEdite,
+    pub erreurs: Vec<ErreurChamp>,
+    /// Films restant à éditer après celui-ci (édition à la suite).
+    pub file: Vec<u64>,
+    pub total: usize,
+}
+
+impl EtatEditeur {
+    pub fn erreur(&self, champ: ChampEditeur) -> Option<&'static str> {
+        self.erreurs
+            .iter()
+            .find(|e| e.champ == champ)
+            .map(|e| e.cle)
+    }
+
+    pub fn position(&self) -> usize {
+        self.total - self.file.len()
+    }
+}
+
+#[derive(Clone, Debug)]
+pub enum ActionEditeur {
+    Onglet(OngletEditeur),
+    Brouillon(Box<FilmEdite>),
+    Valider,
+    /// « Annuler » : abandonne les modifications de ce film et passe au suivant de la file.
+    Ignorer,
+    Abandonner,
+}
+
+// ------------------------------------------------------------------ recherche d'extracteur
+
+#[derive(Clone, Debug)]
+pub struct EtatRecherche {
+    pub film_id: u64,
+    pub requete: RequeteRecherche,
+    pub resultats: Vec<ResultatRecherche>,
+    pub selection: Option<usize>,
+    pub en_cours: bool,
+    /// Identifiant de la requête attendue : les réponses périmées sont ignorées.
+    pub id_requete: u64,
+    pub erreur: Option<String>,
+    pub ne_pas_remplacer: bool,
+    pub file: Vec<u64>,
+    pub total: usize,
+}
+
+impl EtatRecherche {
+    pub fn resultat_choisi(&self) -> Option<&ResultatRecherche> {
+        self.selection.and_then(|n| self.resultats.get(n))
+    }
+
+    pub fn position(&self) -> usize {
+        self.total - self.file.len()
+    }
+}
+
+/// Applique un résultat de recherche au film (« ne pas remplacer » : seuls les champs vides).
+pub fn appliquer_resultat(f: &mut Film, r: &ResultatRecherche, ne_pas_remplacer: bool) {
+    let remplacer = |champ: &mut String, valeur: &str| {
+        if !ne_pas_remplacer || champ.trim().is_empty() {
+            *champ = valeur.to_string();
+        }
+    };
+    remplacer(&mut f.titre, &r.titre);
+    remplacer(&mut f.titre_original, &r.titre_original);
+    remplacer(&mut f.resume, &r.resume);
+    remplacer(&mut f.tmdb, &r.id);
+    if !ne_pas_remplacer || f.annee == 0 {
+        f.annee = r.annee;
+    }
+    if !ne_pas_remplacer || f.titre_triable.trim().is_empty() {
+        f.titre_triable = f.titre.clone();
+    }
+    f.metadonnees_ok = true;
+}
+
+#[derive(Clone, Debug)]
+pub enum ActionRecherche {
+    Texte(String),
+    Annee(Option<u32>),
+    Extracteur(String),
+    Langue(String),
+    Lancer,
+    Choisir(usize),
+    NePasRemplacer(bool),
+    Valider,
+    /// « Annuler » : ignore ce film et passe au suivant de la file.
+    Ignorer,
+    Abandonner,
+}
+
+// ------------------------------------------------------------------ confirmation
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ActionConfirmee {
+    RetirerBase,
+    SupprimerFichiers,
+    Quitter,
+}
+
+impl ActionConfirmee {
+    /// Clé de mémorisation « Ne pas afficher ce message à l'avenir ».
+    pub fn cle_masquage(self) -> &'static str {
+        match self {
+            ActionConfirmee::RetirerBase => "confirm.remove",
+            ActionConfirmee::SupprimerFichiers => "confirm.delete",
+            ActionConfirmee::Quitter => "confirm.exit",
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct EtatConfirmation {
+    pub titre: String,
+    pub texte: String,
+    pub action: ActionConfirmee,
+    /// La case « ne plus demander » est-elle proposée ?
+    pub masquable: bool,
+    pub ne_plus_demander: bool,
+}
+
+// ------------------------------------------------------------------ assistant
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PageAssistant {
+    Accueil,
+    Interface,
+    Sources,
+    Extracteur,
+    Fin,
+}
+
+impl PageAssistant {
+    pub const TOUTES: [PageAssistant; 5] = [
+        PageAssistant::Accueil,
+        PageAssistant::Interface,
+        PageAssistant::Sources,
+        PageAssistant::Extracteur,
+        PageAssistant::Fin,
+    ];
+
+    pub fn rang(self) -> usize {
+        Self::TOUTES.iter().position(|p| *p == self).unwrap_or(0)
+    }
+
+    pub fn suivante(self) -> Self {
+        Self::TOUTES[(self.rang() + 1).min(Self::TOUTES.len() - 1)]
+    }
+
+    pub fn precedente(self) -> Self {
+        Self::TOUTES[self.rang().saturating_sub(1)]
+    }
+
+    pub fn cle(self) -> &'static str {
+        match self {
+            PageAssistant::Accueil => "wizard.page.welcome",
+            PageAssistant::Interface => "wizard.page.ui",
+            PageAssistant::Sources => "wizard.page.sources",
+            PageAssistant::Extracteur => "wizard.page.scraper",
+            PageAssistant::Fin => "wizard.page.finish",
+        }
+    }
+}
+
+#[derive(Clone)]
+pub struct EtatAssistant {
+    pub page: PageAssistant,
+    pub langue: Langue,
+    pub theme: Theme,
+    pub sources: Vec<String>,
+    pub saisie_source: String,
+    /// Clé d'API saisie dans un champ masqué ; transmise au coffre à secrets à la fin.
+    pub cle_tmdb: String,
+    pub langue_extracteur: String,
+    pub avertissement: Option<&'static str>,
+}
+
+impl fmt::Debug for EtatAssistant {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("EtatAssistant")
+            .field("page", &self.page)
+            .field("langue", &self.langue)
+            .field("theme", &self.theme)
+            .field("sources", &self.sources)
+            .field(
+                "cle_tmdb",
+                &if self.cle_tmdb.is_empty() { "" } else { "***" },
+            )
+            .finish_non_exhaustive()
+    }
+}
+
+/// Dossier « dangereux » comme source : racine d'un disque ou du système.
+pub fn dossier_dangereux(chemin: &str) -> bool {
+    let c = chemin.trim().trim_end_matches(['\\', '/']);
+    if c.is_empty() {
+        return true;
+    }
+    let lettre = c.len() == 2
+        && c.ends_with(':')
+        && c.chars().next().is_some_and(|x| x.is_ascii_alphabetic());
+    lettre
+        || matches!(
+            c.to_lowercase().as_str(),
+            "/home" | "/usr" | "/etc" | "/var" | "/mnt" | "/media" | "c:\\windows" | "c:\\users"
+        )
+}
+
+impl EtatAssistant {
+    pub fn new(langue: Langue, theme: Theme, sources: Vec<String>) -> Self {
+        Self {
+            page: PageAssistant::Accueil,
+            langue,
+            theme,
+            sources,
+            saisie_source: String::new(),
+            cle_tmdb: String::new(),
+            langue_extracteur: langue.code().to_string(),
+            avertissement: None,
+        }
+    }
+
+    /// Ajoute la saisie courante ; refuse les doublons et les dossiers dangereux.
+    pub fn ajouter_source(&mut self) {
+        let s = self.saisie_source.trim().to_string();
+        self.avertissement = None;
+        if s.is_empty() {
+            return;
+        }
+        if dossier_dangereux(&s) {
+            self.avertissement = Some("wizard.source.dangerous");
+            return;
+        }
+        if self.sources.contains(&s) {
+            self.avertissement = Some("wizard.source.duplicate");
+            return;
+        }
+        self.sources.push(s);
+        self.saisie_source.clear();
+    }
+}
+
+#[derive(Clone, Debug)]
+pub enum ActionAssistant {
+    Suivante,
+    Precedente,
+    Langue(Langue),
+    Theme(Theme),
+    SaisieSource(String),
+    AjouterSource,
+    RetirerSource(usize),
+    CleTmdb(String),
+    LangueExtracteur(String),
+    Terminer,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::donnees::films_factices;
+
+    #[test]
+    fn brouillon_aller_retour() {
+        let f = films_factices().remove(0);
+        let b = FilmEdite::depuis(&f);
+        assert!(valider(&b).is_empty(), "{:?}", valider(&b));
+        let mut g = f.clone();
+        b.appliquer(&mut g);
+        assert_eq!(g, f);
+    }
+
+    #[test]
+    fn validation_des_champs() {
+        let mut b = FilmEdite::depuis(&films_factices()[0]);
+        b.titre = "  ".into();
+        b.annee = "19x9".into();
+        b.date_sortie = "2020-13-01".into();
+        b.duree = "-3".into();
+        b.note = "10,5".into();
+        b.imdb = "nm123".into();
+        b.tmdb = "12a".into();
+        let champs: Vec<ChampEditeur> = valider(&b).iter().map(|e| e.champ).collect();
+        assert_eq!(
+            champs,
+            [
+                ChampEditeur::Titre,
+                ChampEditeur::Annee,
+                ChampEditeur::DateSortie,
+                ChampEditeur::Duree,
+                ChampEditeur::Note,
+                ChampEditeur::Imdb,
+                ChampEditeur::Tmdb
+            ]
+        );
+        b.titre = "Alien".into();
+        b.annee = "1979".into();
+        b.date_sortie = String::new();
+        b.duree = "117".into();
+        b.note = "8,4".into();
+        b.imdb = String::new();
+        b.tmdb = "348".into();
+        assert!(valider(&b).is_empty());
+        let mut f = films_factices().remove(0);
+        b.appliquer(&mut f);
+        assert!((f.note - 8.4).abs() < 1e-5);
+        assert!(f.imdb.is_empty());
+    }
+
+    #[test]
+    fn genres_et_listes() {
+        let mut b = FilmEdite::depuis(&films_factices()[0]);
+        b.nouveau_genre = " Horreur ".into();
+        b.ajouter_genre();
+        b.nouveau_genre = "Horreur".into();
+        b.ajouter_genre();
+        assert_eq!(b.genres, ["Science-fiction", "Drame", "Horreur"]);
+        b.deplacer_genre(2, true);
+        b.deplacer_genre(0, true);
+        b.deplacer_genre(2, false);
+        assert_eq!(b.genres, ["Science-fiction", "Horreur", "Drame"]);
+        b.pays = "France, , Italie".into();
+        let mut f = films_factices().remove(0);
+        b.appliquer(&mut f);
+        assert_eq!(f.pays, ["France", "Italie"]);
+    }
+
+    #[test]
+    fn application_d_un_resultat() {
+        let mut f = films_factices().remove(0);
+        f.resume.clear();
+        let r = ResultatRecherche {
+            id: "42".into(),
+            titre: "Nouveau".into(),
+            titre_original: "New".into(),
+            annee: 1980,
+            score: 0.9,
+            resume: "Résumé".into(),
+            affiche: None,
+        };
+        let mut g = f.clone();
+        appliquer_resultat(&mut g, &r, true);
+        assert_eq!(
+            (g.titre.as_str(), g.annee, g.resume.as_str()),
+            ("Alien", 1979, "Résumé")
+        );
+        appliquer_resultat(&mut f, &r, false);
+        assert_eq!(
+            (f.titre.as_str(), f.annee, f.tmdb.as_str()),
+            ("Nouveau", 1980, "42")
+        );
+        assert!(f.metadonnees_ok);
+    }
+
+    #[test]
+    fn assistant_pages_et_sources() {
+        let mut a = EtatAssistant::new(Langue::Francais, Theme::Sombre, vec![]);
+        assert_eq!(a.page.precedente(), PageAssistant::Accueil);
+        assert_eq!(PageAssistant::Fin.suivante(), PageAssistant::Fin);
+        for dangereux in ["C:\\", "d:", "/", "/home/"] {
+            a.saisie_source = dangereux.into();
+            a.ajouter_source();
+            assert_eq!(
+                a.avertissement,
+                Some("wizard.source.dangerous"),
+                "{dangereux}"
+            );
+        }
+        a.saisie_source = "D:\\Films".into();
+        a.ajouter_source();
+        a.saisie_source = "D:\\Films".into();
+        a.ajouter_source();
+        assert_eq!(a.sources, ["D:\\Films"]);
+        assert_eq!(a.avertissement, Some("wizard.source.duplicate"));
+        a.cle_tmdb = "secret123".into();
+        assert!(!format!("{a:?}").contains("secret123"));
+    }
+}

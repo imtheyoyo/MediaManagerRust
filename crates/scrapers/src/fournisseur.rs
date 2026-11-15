@@ -1,11 +1,12 @@
-//! Traits génériques des fournisseurs de métadonnées de films.
+//! Traits génériques des fournisseurs de métadonnées (films et séries).
 
 use async_trait::async_trait;
 
 use crate::erreur::Resultat;
 use crate::types::{
-    Artwork, BandeAnnonce, CollectionFilm, MetadonneesFilm, OptionsRecherche, ResultatRecherche,
-    TypeArtwork,
+    Artwork, ArtworkEtendu, BandeAnnonce, CollectionFilm, MetadonneesEpisode, MetadonneesFilm,
+    MetadonneesSerie, OptionsEpisode, OptionsRecherche, ResultatRecherche, TypeArtwork,
+    TypeArtworkEtendu,
 };
 
 /// Recherche et détail d'un film.
@@ -46,4 +47,35 @@ pub trait FournisseurCollection: Send + Sync {
     ) -> Resultat<Vec<ResultatRecherche>>;
     /// Détail d'une collection (identifiant `tmdbSet` dans `options.ids`).
     async fn collection(&self, options: &OptionsRecherche) -> Resultat<CollectionFilm>;
+}
+
+/// Recherche et détail d'une série et de ses épisodes.
+#[async_trait]
+pub trait FournisseurSerie: Send + Sync {
+    /// Identifiant court du fournisseur (`tmdb`, `tvmaze`...).
+    fn identifiant(&self) -> &'static str;
+    /// Recherche ; résultats triés par score décroissant.
+    async fn rechercher(&self, options: &OptionsRecherche) -> Resultat<Vec<ResultatRecherche>>;
+    /// Métadonnées de la série (avec saisons et groupes d'épisodes).
+    async fn metadonnees_serie(&self, options: &OptionsRecherche) -> Resultat<MetadonneesSerie>;
+    /// Liste complète des épisodes, numérotés dans tous les groupes connus.
+    async fn liste_episodes(&self, options: &OptionsRecherche)
+    -> Resultat<Vec<MetadonneesEpisode>>;
+    /// Détail d'un épisode, apparié par identifiant, numéro, titre ou date.
+    async fn metadonnees_episode(&self, options: &OptionsEpisode) -> Resultat<MetadonneesEpisode>;
+}
+
+/// Fournisseur d'images de séries (série, saisons, épisodes).
+#[async_trait]
+pub trait FournisseurArtworkSerie: Send + Sync {
+    /// Images de la série et de ses saisons ; `type_filtre` = `None` pour tout.
+    async fn artwork_serie(
+        &self,
+        options: &OptionsRecherche,
+        type_filtre: Option<TypeArtworkEtendu>,
+    ) -> Resultat<Vec<ArtworkEtendu>>;
+    /// Images d'un épisode (aucune par défaut).
+    async fn artwork_episode(&self, _options: &OptionsEpisode) -> Resultat<Vec<ArtworkEtendu>> {
+        Ok(Vec::new())
+    }
 }

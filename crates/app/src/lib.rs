@@ -1,1 +1,57 @@
-//! Services de l'application, partagés par l'interface graphique et la ligne de commande.
+//! Services de l'application, partagés par l'interface graphique et la ligne
+//! de commande.
+//!
+//! Point d'entrée : [`Application::demarrer`]. Les traitements longs (mise à
+//! jour des sources, récupération des métadonnées, renommage) s'exécutent en
+//! tâches d'arrière-plan et renvoient une [`PoigneeTache`] : identifiant,
+//! récepteur d'événements, annulation et résultat typé. L'API est entièrement
+//! synchrone (utilisable telle quelle depuis une boucle egui ou une CLI).
+//!
+//! ```no_run
+//! use mediamanager_app::{Application, OptionsDemarrage};
+//!
+//! let app = Application::demarrer(OptionsDemarrage::default())?;
+//! let tache = app.mettre_a_jour_sources_films();
+//! for evt in tache.evenements.iter() {
+//!     println!("{evt:?}");
+//!     if matches!(evt, mediamanager_app::Evenement::TacheTerminee { .. }) {
+//!         break;
+//!     }
+//! }
+//! let rapport = tache.attendre()?;
+//! println!("{} film(s) ajouté(s)", rapport.ajoutes.len());
+//! app.arreter()?;
+//! # Ok::<(), mediamanager_app::ErreurApp>(())
+//! ```
+//!
+//! Modules :
+//! - [`application`] : démarrage, arrêt, accès aux données, lancement des tâches ;
+//! - [`taches`] / [`evenements`] : gestionnaire de tâches et flux d'événements ;
+//! - [`sources`] : mise à jour des sources (fusion avec la base) ;
+//! - [`conversion`] : types des scrapers ↔ modèle partagé ;
+//! - [`metadonnees`], [`artwork`], [`ecriture_nfo`] : scraping, images, NFO ;
+//! - [`renommage`] : aperçu et exécution du renommage ;
+//! - [`journal`] : journalisation dans `logs/`.
+
+pub mod application;
+pub mod artwork;
+pub mod conversion;
+pub mod ecriture_nfo;
+pub mod erreur;
+pub mod evenements;
+pub mod journal;
+pub mod metadonnees;
+pub mod renommage;
+pub mod sources;
+pub mod taches;
+
+pub use application::{Application, ConfigServices, OptionsDemarrage};
+pub use artwork::ConfigArtwork;
+pub use conversion::ConfigMetadonnees;
+pub use erreur::{ErreurApp, Resultat};
+pub use evenements::{Evenement, IdTache, IssueTache, NiveauMessage};
+pub use journal::OptionsJournal;
+pub use metadonnees::{RapportScrap, RequeteFilm};
+pub use renommage::RapportRenommage;
+pub use sources::{OptionsMiseAJour, RapportMiseAJour, TraitementDisparus};
+pub use taches::{GestionnaireTaches, InfoTache, PoigneeTache, TypeTache};

@@ -79,6 +79,19 @@ impl ClientHttp {
         params: &[(&str, Option<&str>)],
         secrets: &[(&str, &str)],
     ) -> Resultat<String> {
+        self.obtenir_texte_avec_entetes(url, params, secrets, &[])
+            .await
+    }
+
+    /// Comme [`Self::obtenir_texte`], avec des en-têtes secrets (clés d'API
+    /// transmises par en-tête) : jamais mis en cache ni journalisés.
+    pub async fn obtenir_texte_avec_entetes(
+        &self,
+        url: &str,
+        params: &[(&str, Option<&str>)],
+        secrets: &[(&str, &str)],
+        entetes: &[(&str, &str)],
+    ) -> Resultat<String> {
         let mut u = url::Url::parse(url)
             .map_err(|e| ErreurScraper::Reseau(format!("URL invalide : {e}")))?;
         {
@@ -100,7 +113,9 @@ impl ClientHttp {
             }
         }
         let url_publique = Self::url_sans_secrets(&u);
-        let texte = self.requete_avec_reprises(&u, &url_publique).await?;
+        let texte = self
+            .requete_avec_reprises(&u, &url_publique, entetes)
+            .await?;
         self.ecrire_cache(&cle, &texte).await;
         Ok(texte)
     }
@@ -116,13 +131,33 @@ impl ClientHttp {
         serde_json::from_str(&texte).map_err(|e| ErreurScraper::Analyse(e.to_string()))
     }
 
-    async fn requete_avec_reprises(&self, u: &url::Url, url_publique: &str) -> Resultat<String> {
+    /// GET d'un JSON désérialisé, avec des en-têtes secrets.
+    pub async fn obtenir_json_avec_entetes<T: serde::de::DeserializeOwned>(
+        &self,
+        url: &str,
+        params: &[(&str, Option<&str>)],
+        entetes: &[(&str, &str)],
+    ) -> Resultat<T> {
+        let texte = self
+            .obtenir_texte_avec_entetes(url, params, &[], entetes)
+            .await?;
+        serde_json::from_str(&texte).map_err(|e| ErreurScraper::Analyse(e.to_string()))
+    }
+
+    async fn requete_avec_reprises(
+        &self,
+        u: &url::Url,
+        url_publique: &str,
+        entetes: &[(&str, &str)],
+    ) -> Resultat<String> {
         let max = self.config.essais_429.max(1);
         let mut essai = 1;
         loop {
-            let rep = self
-                .client
-                .get(u.clone())
+            let mut requete = self.client.get(u.clone());
+            for (k, v) in entetes {
+                requete = requete.header(*k, *v);
+            }
+            let rep = requete
                 .send()
                 .await
                 .map_err(|e| ErreurScraper::Reseau(e.without_url().to_string()))?;

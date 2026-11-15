@@ -1,15 +1,21 @@
 //! Panneau de détails à onglets (Détails, Distribution, Fichiers médias, Illustration, Bande annonce).
 
-use super::Sortie;
+use super::{Sortie, image_ou_emplacement};
 use crate::etat::{Etat, Message, OngletDetails};
+use crate::images::GestionnaireImages;
 use crate::modele::{Film, gigaoctets};
+use crate::polices;
+use crate::source_donnees::GenreImage;
 use crate::theme::accent;
-use eframe::egui::{
-    self, CornerRadius, Frame, Margin, RichText, ScrollArea, Sense, Stroke, StrokeKind, Vec2,
-};
+use eframe::egui::{self, CornerRadius, Frame, Margin, RichText, ScrollArea, Stroke, Vec2};
 use egui_extras::{Column, TableBuilder};
 
-pub fn afficher(ui: &mut egui::Ui, etat: &Etat, sortie: &mut Sortie) {
+pub fn afficher(
+    ui: &mut egui::Ui,
+    etat: &Etat,
+    images: &mut GestionnaireImages,
+    sortie: &mut Sortie,
+) {
     ui.horizontal(|ui| {
         for onglet in OngletDetails::TOUS {
             let actif = etat.onglet == onglet;
@@ -31,10 +37,10 @@ pub fn afficher(ui: &mut egui::Ui, etat: &Etat, sortie: &mut Sortie) {
         return;
     };
     match etat.onglet {
-        OngletDetails::Details => onglet_details(ui, etat, film),
+        OngletDetails::Details => onglet_details(ui, etat, images, film, sortie),
         OngletDetails::Distribution => onglet_distribution(ui, etat, film),
         OngletDetails::FichiersMedias => onglet_fichiers(ui, etat, film),
-        OngletDetails::Illustration => onglet_illustration(ui, etat, film),
+        OngletDetails::Illustration => onglet_illustration(ui, etat, images, film, sortie),
         OngletDetails::BandeAnnonce => onglet_bande_annonce(ui, etat, film),
     }
 }
@@ -59,39 +65,59 @@ fn pastille(ui: &mut egui::Ui, texte: &str) {
         });
 }
 
-fn emplacement_image(ui: &mut egui::Ui, etat: &Etat, cle: &str, taille: Vec2) {
-    let (rect, _) = ui.allocate_exact_size(taille, Sense::click());
-    let peintre = ui.painter();
-    peintre.rect_filled(rect, CornerRadius::same(6), ui.visuals().extreme_bg_color);
-    peintre.rect_stroke(
-        rect,
-        CornerRadius::same(6),
-        Stroke::new(1.0, ui.visuals().widgets.noninteractive.bg_stroke.color),
-        StrokeKind::Inside,
+/// Emplacement d'illustration du film ; clic = visionneuse plein écran.
+fn illustration(
+    ui: &mut egui::Ui,
+    etat: &Etat,
+    images: &mut GestionnaireImages,
+    film: &Film,
+    genre: GenreImage,
+    taille: Vec2,
+    sortie: &mut Sortie,
+) {
+    let chemin = etat.source.chemin_image(film, genre);
+    let reponse = image_ou_emplacement(
+        ui,
+        images,
+        chemin.as_deref(),
+        taille,
+        &etat.i18n.t(genre.cle()),
     );
-    peintre.text(
-        rect.center(),
-        egui::Align2::CENTER_CENTER,
-        etat.i18n.t(cle),
-        egui::FontId::proportional(12.0),
-        ui.visuals().weak_text_color(),
-    );
+    if reponse.clicked()
+        && let Some(p) = chemin
+    {
+        sortie.push(Message::OuvrirVisionneuse(p));
+    }
 }
 
-fn onglet_details(ui: &mut egui::Ui, etat: &Etat, film: &Film) {
+fn onglet_details(
+    ui: &mut egui::Ui,
+    etat: &Etat,
+    images: &mut GestionnaireImages,
+    film: &Film,
+    sortie: &mut Sortie,
+) {
     let i = &etat.i18n;
     ui.horizontal_top(|ui| {
-        // Colonne gauche : pile d'illustrations (emplacements : les images viendront du service d'images).
+        // Colonne gauche : pile d'illustrations chargées en tâche de fond.
         ui.vertical(|ui| {
-            emplacement_image(ui, etat, "gui.artwork.poster", Vec2::new(120.0, 180.0));
-            emplacement_image(ui, etat, "gui.artwork.fanart", Vec2::new(120.0, 68.0));
-            emplacement_image(ui, etat, "gui.artwork.banner", Vec2::new(120.0, 24.0));
-            emplacement_image(ui, etat, "gui.artwork.thumb", Vec2::new(120.0, 68.0));
+            let tailles = [
+                (GenreImage::Affiche, Vec2::new(120.0, 180.0)),
+                (GenreImage::Fanart, Vec2::new(120.0, 68.0)),
+                (GenreImage::Banniere, Vec2::new(120.0, 24.0)),
+                (GenreImage::Miniature, Vec2::new(120.0, 68.0)),
+            ];
+            for (genre, taille) in tailles {
+                illustration(ui, etat, images, film, genre, taille, sortie);
+            }
         });
         ui.vertical(|ui| {
             ui.horizontal(|ui| {
                 ui.label(RichText::new(&film.titre).heading().strong());
-                if ui.button(format!("▶ {}", i.t("Button.play"))).clicked() {}
+                if ui
+                    .button(format!("{} {}", polices::LIRE, i.t("Button.play")))
+                    .clicked()
+                {}
             });
             ui.label(
                 RichText::new(format!("{} : {}", i.t("gui.original"), film.titre_original)).weak(),
@@ -249,13 +275,32 @@ fn onglet_fichiers(ui: &mut egui::Ui, etat: &Etat, film: &Film) {
         });
 }
 
-fn onglet_illustration(ui: &mut egui::Ui, etat: &Etat, _film: &Film) {
-    ui.horizontal_wrapped(|ui| {
-        emplacement_image(ui, etat, "gui.artwork.poster", Vec2::new(140.0, 210.0));
-        emplacement_image(ui, etat, "gui.artwork.fanart", Vec2::new(280.0, 158.0));
-        emplacement_image(ui, etat, "gui.artwork.banner", Vec2::new(280.0, 52.0));
-        emplacement_image(ui, etat, "gui.artwork.thumb", Vec2::new(200.0, 112.0));
-    });
+fn onglet_illustration(
+    ui: &mut egui::Ui,
+    etat: &Etat,
+    images: &mut GestionnaireImages,
+    film: &Film,
+    sortie: &mut Sortie,
+) {
+    ScrollArea::vertical()
+        .id_salt("illustrations")
+        .auto_shrink([false, false])
+        .show(ui, |ui| {
+            ui.horizontal_wrapped(|ui| {
+                let tailles = [
+                    (GenreImage::Affiche, Vec2::new(140.0, 210.0)),
+                    (GenreImage::Fanart, Vec2::new(280.0, 158.0)),
+                    (GenreImage::Banniere, Vec2::new(280.0, 52.0)),
+                    (GenreImage::Miniature, Vec2::new(200.0, 112.0)),
+                ];
+                for (genre, taille) in tailles {
+                    ui.vertical(|ui| {
+                        ui.label(RichText::new(etat.i18n.t(genre.cle())).small().weak());
+                        illustration(ui, etat, images, film, genre, taille, sortie);
+                    });
+                }
+            });
+        });
 }
 
 fn onglet_bande_annonce(ui: &mut egui::Ui, etat: &Etat, film: &Film) {
@@ -267,7 +312,7 @@ fn onglet_bande_annonce(ui: &mut egui::Ui, etat: &Etat, film: &Film) {
         ui.horizontal(|ui| {
             ui.label(b);
             if ui
-                .button(format!("▶ {}", etat.i18n.t("Button.play")))
+                .button(format!("{} {}", polices::LIRE, etat.i18n.t("Button.play")))
                 .clicked()
             {}
         });

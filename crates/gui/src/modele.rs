@@ -301,6 +301,10 @@ impl Colonne {
         )
     }
 
+    pub fn depuis_id(id: &str) -> Option<Colonne> {
+        Colonne::TOUTES.into_iter().find(|c| c.id() == id)
+    }
+
     pub fn largeur_initiale(self) -> f32 {
         match self {
             Colonne::Titre | Colonne::TitreOriginal => 240.0,
@@ -358,10 +362,12 @@ impl Ordre {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ColonneEtat {
     pub colonne: Colonne,
     pub visible: bool,
+    /// Largeur mémorisée (redimensionnement par l'utilisateur) ; `None` : largeur initiale.
+    pub largeur: Option<f32>,
 }
 
 /// État initial des colonnes : toutes présentes, visibilité par défaut de la spécification.
@@ -371,6 +377,7 @@ pub fn colonnes_par_defaut() -> Vec<ColonneEtat> {
         .map(|&c| ColonneEtat {
             colonne: c,
             visible: c.visible_par_defaut(),
+            largeur: None,
         })
         .collect()
 }

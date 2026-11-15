@@ -4,6 +4,7 @@ use super::{Sortie, menus};
 use crate::commandes::MENU_CONTEXTUEL;
 use crate::etat::{Etat, FiltreRapide, Message};
 use crate::modele::{Colonne, Film, Ordre, gigaoctets};
+use crate::polices;
 use crate::theme::{BLEU, ROUGE, VERT};
 use eframe::egui::{
     self, Align, Frame, Id, Label, Layout, Margin, Panel, RichText, Sense, TextEdit,
@@ -30,7 +31,11 @@ fn ligne_recherche(ui: &mut egui::Ui, etat: &Etat, sortie: &mut Sortie) {
         let reponse = ui.add(
             TextEdit::singleline(&mut texte)
                 .id(Id::unique(ID_CHAMP_RECHERCHE))
-                .hint_text(format!("🔍 {}", etat.i18n.t("gui.search.placeholder")))
+                .hint_text(format!(
+                    "{} {}",
+                    polices::RECHERCHE,
+                    etat.i18n.t("gui.search.placeholder")
+                ))
                 .desired_width(largeur),
         );
         if reponse.changed() {
@@ -40,9 +45,18 @@ fn ligne_recherche(ui: &mut egui::Ui, etat: &Etat, sortie: &mut Sortie) {
             reponse.on_hover_text(etat.i18n.t("gui.search.invalid"));
         }
         let libelle = if etat.filtre_actif() {
-            format!("▼ {} ▾", etat.i18n.t("movieextendedsearch.filter"))
+            format!(
+                "{} {} {}",
+                polices::FILTRE_ACTIF,
+                etat.i18n.t("movieextendedsearch.filter"),
+                polices::DEROULANT
+            )
         } else {
-            format!("{} ▾", etat.i18n.t("movieextendedsearch.filter"))
+            format!(
+                "{} {}",
+                etat.i18n.t("movieextendedsearch.filter"),
+                polices::DEROULANT
+            )
         };
         ui.menu_button(libelle, |ui| {
             let choix = [
@@ -60,6 +74,13 @@ fn ligne_recherche(ui: &mut egui::Ui, etat: &Etat, sortie: &mut Sortie) {
                 }
             }
             ui.separator();
+            if ui
+                .button(format!("{}…", etat.i18n.t("movieextendedsearch.options")))
+                .clicked()
+            {
+                sortie.push(Message::OuvrirFiltres(true));
+                ui.close();
+            }
             if ui.button(etat.i18n.t("filter.reset")).clicked() {
                 sortie.push(Message::EffacerFiltres);
                 ui.close();
@@ -94,8 +115,11 @@ fn totaux(ui: &mut egui::Ui, etat: &Etat) {
 fn table(ui: &mut egui::Ui, etat: &Etat, sortie: &mut Sortie) {
     let colonnes = etat.colonnes_visibles();
     let modifs = ui.input(|i| i.modifiers);
+    let relache = ui.input(|i| !i.pointer.any_down());
+    // L'état interne du tableau (largeurs) est lié à l'ensemble ordonné des colonnes visibles.
+    let ids: Vec<&str> = colonnes.iter().map(|c| c.id()).collect();
     let mut builder = TableBuilder::new(ui)
-        .id_salt("tableau_films")
+        .id_salt(("tableau_films", ids.join(",")))
         .striped(true)
         .resizable(true)
         .sense(Sense::click())
@@ -104,11 +128,11 @@ fn table(ui: &mut egui::Ui, etat: &Etat, sortie: &mut Sortie) {
         let c = if col.est_booleenne() {
             Column::exact(30.0)
         } else if *col == Colonne::Titre {
-            Column::initial(col.largeur_initiale())
+            Column::initial(etat.largeur_colonne(*col))
                 .at_least(120.0)
                 .clip(true)
         } else {
-            Column::initial(col.largeur_initiale())
+            Column::initial(etat.largeur_colonne(*col))
                 .at_least(40.0)
                 .clip(true)
         };
@@ -124,6 +148,20 @@ fn table(ui: &mut egui::Ui, etat: &Etat, sortie: &mut Sortie) {
             }
         })
         .body(|body| {
+            // Largeurs modifiées par l'utilisateur : mémorisées au relâchement de la souris.
+            if relache {
+                let changees: Vec<(Colonne, f32)> = colonnes
+                    .iter()
+                    .zip(body.widths())
+                    .filter(|(c, w)| {
+                        !c.est_booleenne() && (etat.largeur_colonne(**c) - **w).abs() > 0.5
+                    })
+                    .map(|(c, w)| (*c, *w))
+                    .collect();
+                if !changees.is_empty() {
+                    sortie.push(Message::LargeursColonnes(changees));
+                }
+            }
             body.rows(HAUTEUR_LIGNE, etat.visibles.len(), |mut ligne| {
                 let film = &etat.films[etat.visibles[ligne.index()]];
                 let selectionne = etat.selection.contains(&film.id);
@@ -162,10 +200,11 @@ fn entete(ui: &mut egui::Ui, etat: &Etat, col: Colonne, sortie: &mut Sortie) {
         .map(str::to_string)
         .unwrap_or_else(|| libelle.clone());
     if let Some((rang, ordre)) = etat.tri_de(col) {
+        texte.push(' ');
         texte.push_str(if ordre == Ordre::Croissant {
-            " ▲"
+            polices::TRI_CROISSANT
         } else {
-            " ▼"
+            polices::TRI_DECROISSANT
         });
         if etat.tri.len() > 1 {
             texte.push_str(&format!("{}", rang + 1));
@@ -182,6 +221,29 @@ fn entete(ui: &mut egui::Ui, etat: &Etat, col: Colonne, sortie: &mut Sortie) {
         });
     }
     reponse.context_menu(|ui| {
+        ui.horizontal(|ui| {
+            if ui
+                .button(format!(
+                    "{} {}",
+                    polices::GAUCHE,
+                    etat.i18n.t("column.moveleft")
+                ))
+                .clicked()
+            {
+                sortie.push(Message::DeplacerColonne(col, -1));
+            }
+            if ui
+                .button(format!(
+                    "{} {}",
+                    etat.i18n.t("column.moveright"),
+                    polices::DROITE
+                ))
+                .clicked()
+            {
+                sortie.push(Message::DeplacerColonne(col, 1));
+            }
+        });
+        ui.separator();
         ui.label(RichText::new(etat.i18n.t("Button.selectvisiblecolumns")).weak());
         ui.separator();
         for c in &etat.colonnes {
@@ -202,7 +264,7 @@ fn entete(ui: &mut egui::Ui, etat: &Etat, col: Colonne, sortie: &mut Sortie) {
 
 fn coche(ui: &mut egui::Ui, valeur: bool) {
     if valeur {
-        ui.label(RichText::new("✔").color(VERT));
+        ui.label(RichText::new(polices::COCHE).color(VERT));
     }
 }
 
@@ -211,10 +273,10 @@ fn cellule(ui: &mut egui::Ui, etat: &Etat, film: &Film, col: Colonne) {
     match col {
         Colonne::Titre => {
             if film.nouveau {
-                ui.label(RichText::new("●").color(VERT));
+                ui.label(RichText::new(polices::PASTILLE).color(VERT));
             }
             if film.verrouille {
-                ui.label(RichText::new("🔒").color(BLEU));
+                ui.label(RichText::new(polices::VERROU).color(BLEU));
             }
             ui.add(Label::new(&film.titre).truncate());
         }
@@ -273,7 +335,7 @@ fn cellule(ui: &mut egui::Ui, etat: &Etat, film: &Film, col: Colonne) {
         }
         Colonne::Nouveau => {
             if film.nouveau {
-                ui.label(RichText::new("●").color(VERT));
+                ui.label(RichText::new(polices::PASTILLE).color(VERT));
             }
         }
         Colonne::Metadonnees => coche(ui, film.metadonnees_ok),
