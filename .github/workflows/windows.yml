@@ -41,10 +41,10 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: v${{ steps.version.outputs.v }}
-          name: MediaManagerRust ${{ steps.version.outputs.v }} (préversion)
+          name: MediaManagerRust ${{ steps.version.outputs.v }} (préversion de développement)
           target_commitish: ${{ github.sha }}
           files: MediaManagerRust-windows-x64.zip
-          prerelease: true
+          prerelease: false
           make_latest: true
           body: |
             Préversion compilée automatiquement depuis main.
