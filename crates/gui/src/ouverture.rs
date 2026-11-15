@@ -191,7 +191,9 @@ mod tests {
         assert_eq!(x.programme, "xdg-open");
         assert_eq!(x.arguments, ["/srv/films/Alien"]);
         let m = commande(&cible, Systeme::MacOs);
-        assert_eq!(m.arguments, ["-R", "/srv/films/Alien/Alien.mkv"]);
+        // Le séparateur dépend du système qui exécute le test : on normalise.
+        let m_normalise: Vec<String> = m.arguments.iter().map(|a| a.replace('\\', "/")).collect();
+        assert_eq!(m_normalise, ["-R", "/srv/films/Alien/Alien.mkv"]);
         let f = CibleOuverture::Fichier("/srv/films/Alien/Alien.mkv".into());
         assert_eq!(
             commande(&f, Systeme::Unix).arguments,
