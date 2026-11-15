@@ -7,6 +7,7 @@ use crate::etat::{ActionDialogue, Etat, Message};
 use crate::i18n::Langue;
 use crate::polices;
 use crate::reglages::Theme;
+use crate::selecteur::CibleDossier;
 use crate::theme::{ORANGE, accent};
 use eframe::egui::{self, Align, Button, Key, Layout, Modal, RichText, TextEdit, Vec2};
 
@@ -95,6 +96,14 @@ pub fn afficher(ctx: &egui::Context, etat: &Etat, a: &EtatAssistant, sortie: &mu
                             envoyer(sortie, ActionAssistant::AjouterSource);
                         }
                     });
+                    // Sélecteur natif ; la saisie ci-dessus reste disponible en repli.
+                    if ui
+                        .button(format!("{}…", i.t("gui.folder.browse")))
+                        .on_hover_text(i.t("gui.folder.choose"))
+                        .clicked()
+                    {
+                        sortie.push(Message::ChoisirDossier(CibleDossier::Assistant));
+                    }
                     if let Some(cle) = a.avertissement {
                         ui.label(
                             RichText::new(format!("{} {}", polices::AVERTISSEMENT, i.t(cle)))

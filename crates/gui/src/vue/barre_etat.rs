@@ -6,10 +6,11 @@ use eframe::egui::{self, Align, Frame, Layout, Margin, Panel, ProgressBar};
 
 pub fn afficher(ui: &mut egui::Ui, etat: &Etat, sortie: &mut Sortie) {
     Panel::bottom("barre_etat")
-        .exact_size(24.0)
+        .exact_size(22.0)
+        .show_separator_line(false)
         .frame(
             Frame::new()
-                .fill(ui.visuals().panel_fill)
+                .fill(crate::theme::FOND_BARRES)
                 .inner_margin(Margin::symmetric(8, 2)),
         )
         .show(ui, |ui| {

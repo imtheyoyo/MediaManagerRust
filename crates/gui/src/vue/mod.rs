@@ -10,6 +10,7 @@ pub mod dialogue_confirmation;
 pub mod dialogue_editeur;
 pub mod dialogue_filtres;
 pub mod dialogue_messages;
+pub mod dialogue_mise_a_jour;
 pub mod dialogue_recherche;
 pub mod dialogue_reglages;
 pub mod dialogue_renommage;

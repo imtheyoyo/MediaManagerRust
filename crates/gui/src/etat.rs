@@ -8,10 +8,12 @@ use crate::dialogues::{
 };
 use crate::filtres::{ActionFiltre, ContexteFiltre, FiltresAvances, OngletFiltre};
 use crate::i18n::{I18n, Langue};
+use crate::mise_a_jour::{self, ConfigMiseAJour, EtapeInstallation, Publication, Verdict};
 use crate::modele::{Colonne, ColonneEtat, Film, Ordre, colonnes_par_defaut, normaliser};
 use crate::persistance::{ColonnePersistee, EtatInterface, GeometrieFenetre, TriPersiste};
 use crate::reglages::{Page, Reglages, Theme};
 use crate::renommage::ApercuFilm;
+use crate::selecteur::{self, CibleDossier, SelecteurDossier};
 use crate::source_donnees::{
     ReglagesServices, RequeteRecherche, ResultatRecherche, Retour, SECRET_CLE_TMDB, SerieAffichage,
     SourceDonnees, SourceFactice, Travail, titre_nettoye,
@@ -89,6 +91,23 @@ impl OngletDetails {
     }
 }
 
+/// Nœud sélectionné dans l'arbre des séries (identifiant de série, numéro de saison,
+/// rang de l'épisode dans la saison).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum NoeudSerie {
+    Serie(String),
+    Saison(String, i32),
+    Episode(String, i32, usize),
+}
+
+impl NoeudSerie {
+    pub fn id_serie(&self) -> &str {
+        match self {
+            NoeudSerie::Serie(id) | NoeudSerie::Saison(id, _) | NoeudSerie::Episode(id, _, _) => id,
+        }
+    }
+}
+
 /// Filtre rapide du menu « Filtre » (les filtres avancés sont dans `filtres`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum FiltreRapide {
@@ -153,6 +172,25 @@ pub enum Dialogue {
     Recherche(Box<EtatRecherche>),
     Confirmation(EtatConfirmation),
     Assistant(Box<EtatAssistant>),
+    MiseAJour(EtatDialogueMiseAJour),
+}
+
+/// Étape affichée par le dialogue de mise à jour du programme.
+#[derive(Clone, Debug, PartialEq)]
+pub enum PhaseMiseAJour {
+    Recherche,
+    AJour,
+    /// Compilation locale : aucune installation proposée.
+    Developpement,
+    Disponible,
+    Installation(EtapeInstallation),
+    Erreur(String),
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct EtatDialogueMiseAJour {
+    pub phase: PhaseMiseAJour,
+    pub publication: Option<Publication>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -244,6 +282,28 @@ pub enum Message {
     ArreterTache(u64),
     /// Mise à jour des sources de séries (module Séries).
     MettreAJourSeries,
+    /// Ouvre le sélecteur de dossiers natif (thread dédié).
+    ChoisirDossier(CibleDossier),
+    /// Résultat du sélecteur (`None` : annulé).
+    DossierChoisi(CibleDossier, Option<PathBuf>),
+    /// Recherche d'une nouvelle version du programme (`manuel` : demandée par l'utilisateur,
+    /// le dialogue s'ouvre aussitôt ; sinon vérification silencieuse au démarrage).
+    RechercherMiseAJour {
+        manuel: bool,
+    },
+    ResultatMiseAJour {
+        manuel: bool,
+        resultat: Result<(Verdict, Publication), String>,
+    },
+    /// « Installer » du dialogue de mise à jour.
+    InstallerMiseAJour,
+    ProgressionMiseAJour(EtapeInstallation),
+    /// Fin de l'installation : relance du programme ou erreur.
+    MiseAJourInstallee(Result<PathBuf, String>),
+    /// Déploie / replie une série (`None`) ou une saison dans l'arbre des séries.
+    BasculerNoeudSerie(String, Option<i32>),
+    /// Sélectionne un nœud de l'arbre des séries.
+    SelectionnerNoeudSerie(NoeudSerie),
     // ---- messages publiés par la source de données
     TacheDemarree {
         id: u64,
@@ -278,6 +338,10 @@ pub struct Etat {
     pub source: Arc<dyn SourceDonnees>,
     pub films: Vec<Film>,
     pub series: Vec<SerieAffichage>,
+    /// Nœuds déployés de l'arbre des séries : (série, saison) ; `None` = la série elle-même.
+    pub series_deployees: BTreeSet<(String, Option<i32>)>,
+    /// Nœud sélectionné dans l'arbre des séries.
+    pub noeud_serie: Option<NoeudSerie>,
     pub module: Module,
     pub onglet: OngletDetails,
     pub recherche: String,
@@ -306,6 +370,9 @@ pub struct Etat {
     pub fenetre: GeometrieFenetre,
     pub confirmations_masquees: BTreeSet<String>,
     pub assistant_termine: bool,
+    /// Adresse de l'API des publications et identité du programme (remplaçables en test).
+    pub config_mise_a_jour: ConfigMiseAJour,
+    selecteur: SelecteurDossier,
     /// Demandes ponctuelles consommées par l'application (effets hors état).
     pub vider_cache_images: bool,
     pub focus_recherche: bool,
@@ -363,6 +430,8 @@ impl Etat {
             source,
             films,
             series,
+            series_deployees: BTreeSet::new(),
+            noeud_serie: None,
             module: Module::Films,
             onglet: OngletDetails::Details,
             recherche: String::new(),
@@ -388,6 +457,8 @@ impl Etat {
             fenetre: GeometrieFenetre::default(),
             confirmations_masquees: BTreeSet::new(),
             assistant_termine: false,
+            config_mise_a_jour: ConfigMiseAJour::default(),
+            selecteur: selecteur::par_defaut(),
             vider_cache_images: false,
             focus_recherche: false,
             quitter: false,
@@ -442,6 +513,7 @@ impl Etat {
             prereglages_filtres: self.filtres.prereglages.clone(),
             confirmations_masquees: self.confirmations_masquees.clone(),
             assistant_termine: self.assistant_termine,
+            verifier_mises_a_jour: self.reglages.verifier_mises_a_jour,
             ..EtatInterface::default()
         }
     }
@@ -504,6 +576,7 @@ impl Etat {
         self.filtres.prereglages = ui.prereglages_filtres.clone();
         self.confirmations_masquees = ui.confirmations_masquees.clone();
         self.assistant_termine = ui.assistant_termine;
+        self.reglages.verifier_mises_a_jour = ui.verifier_mises_a_jour;
         if !self.assistant_termine {
             self.ouvrir_dialogue(TypeDialogue::Assistant);
         }
@@ -763,6 +836,30 @@ impl Etat {
             Message::MessagesLus => self.non_lus = 0,
             Message::ArreterTache(id) => self.source.annuler_tache(id),
             Message::MettreAJourSeries => self.lancer_travail(Travail::MettreAJourSeries),
+            Message::ChoisirDossier(cible) => self.choisir_dossier(cible),
+            Message::DossierChoisi(cible, chemin) => {
+                if let Some(c) = chemin {
+                    self.dossier_choisi(cible, c);
+                }
+            }
+            Message::RechercherMiseAJour { manuel } => self.rechercher_mise_a_jour(manuel),
+            Message::ResultatMiseAJour { manuel, resultat } => {
+                self.resultat_mise_a_jour(manuel, resultat)
+            }
+            Message::InstallerMiseAJour => self.installer_mise_a_jour(),
+            Message::ProgressionMiseAJour(etape) => {
+                if let Some(Dialogue::MiseAJour(d)) = &mut self.dialogue {
+                    d.phase = PhaseMiseAJour::Installation(etape);
+                }
+            }
+            Message::MiseAJourInstallee(r) => self.mise_a_jour_installee(r),
+            Message::BasculerNoeudSerie(id, saison) => {
+                let cle = (id, saison);
+                if !self.series_deployees.remove(&cle) {
+                    self.series_deployees.insert(cle);
+                }
+            }
+            Message::SelectionnerNoeudSerie(noeud) => self.noeud_serie = Some(noeud),
             Message::TacheDemarree {
                 id,
                 nom,
@@ -1025,7 +1122,9 @@ impl Etat {
                 self.lancer_travail(Travail::EcrireNfo { ids });
             }
             Commande::AjouterSource => {
-                self.appliquer_sans_recalcul(Message::OuvrirReglagesPage(Page::FilmsSource))
+                // Page des sources (saisie manuelle en repli) + sélecteur natif.
+                self.appliquer_sans_recalcul(Message::OuvrirReglagesPage(Page::FilmsSource));
+                self.choisir_dossier(CibleDossier::SourceFilms);
             }
             Commande::ScrapeInteractif => {
                 let ids = self.selection_ordonnee();
@@ -1442,6 +1541,203 @@ impl Etat {
                     ne_pas_remplacer: npr,
                 });
                 self.recherche_suivante(&mut file, total, npr);
+            }
+        }
+    }
+
+    // ---- sélecteur de dossiers natif
+
+    /// Remplace le sélecteur de dossiers (tests).
+    pub fn definir_selecteur(&mut self, selecteur: SelecteurDossier) {
+        self.selecteur = selecteur;
+    }
+
+    fn choisir_dossier(&mut self, cible: CibleDossier) {
+        let titre = self.i18n.t("gui.folder.choose");
+        let selecteur = self.selecteur.clone();
+        let retour = self.retour.clone();
+        let lance = std::thread::Builder::new()
+            .name("selecteur-dossier".into())
+            .spawn(move || {
+                let chemin = selecteur(&titre);
+                retour.envoyer(Message::DossierChoisi(cible, chemin));
+            });
+        if let Err(e) = lance {
+            self.notifier(Niveau::Erreur, e.to_string());
+        }
+    }
+
+    fn dossier_choisi(&mut self, cible: CibleDossier, chemin: PathBuf) {
+        let texte = chemin.display().to_string();
+        let liste = match cible {
+            CibleDossier::Assistant => {
+                if let Some(Dialogue::Assistant(a)) = &mut self.dialogue {
+                    a.saisie_source = texte;
+                    a.ajouter_source();
+                }
+                return;
+            }
+            CibleDossier::SourceFilms => &mut self.services.sources_films,
+            CibleDossier::SourceSeries => &mut self.services.sources_series,
+        };
+        if liste.contains(&texte) {
+            return;
+        }
+        liste.push(texte.clone());
+        self.services_modifies = true;
+        // Dialogue des réglages ouvert : enregistrement à sa fermeture ; sinon immédiat.
+        if !matches!(self.dialogue, Some(Dialogue::Reglages(_))) {
+            self.enregistrer_services();
+            let t = self
+                .i18n
+                .t_args("gui.folder.added", &[("folder", texte.as_str())]);
+            self.notifier(Niveau::Info, t);
+        }
+    }
+
+    // ---- mise à jour du programme
+
+    fn rechercher_mise_a_jour(&mut self, manuel: bool) {
+        let config = self.config_mise_a_jour.clone();
+        if manuel {
+            self.dialogue = Some(Dialogue::MiseAJour(EtatDialogueMiseAJour {
+                phase: PhaseMiseAJour::Recherche,
+                publication: None,
+            }));
+        } else if config.courant.build.is_none() {
+            // Compilation locale : pas de vérification automatique.
+            return;
+        }
+        let retour = self.retour.clone();
+        let lance = std::thread::Builder::new()
+            .name("mise-a-jour".into())
+            .spawn(move || {
+                let resultat = mise_a_jour::verifier(&config).map_err(|e| e.to_string());
+                retour.envoyer(Message::ResultatMiseAJour { manuel, resultat });
+            });
+        if let Err(e) = lance {
+            self.notifier(Niveau::Erreur, e.to_string());
+        }
+    }
+
+    fn resultat_mise_a_jour(
+        &mut self,
+        manuel: bool,
+        resultat: Result<(Verdict, Publication), String>,
+    ) {
+        let dialogue_ouvert = matches!(self.dialogue, Some(Dialogue::MiseAJour(_)));
+        if manuel && !dialogue_ouvert {
+            return; // dialogue fermé pendant la recherche
+        }
+        let (phase, publication) = match resultat {
+            Ok((Verdict::AJour, p)) => (PhaseMiseAJour::AJour, Some(p)),
+            Ok((Verdict::Developpement, p)) => (PhaseMiseAJour::Developpement, Some(p)),
+            Ok((Verdict::Disponible, p)) => (PhaseMiseAJour::Disponible, Some(p)),
+            Err(e) => {
+                if !manuel {
+                    tracing::warn!("vérification de mise à jour : {e}");
+                    return;
+                }
+                (PhaseMiseAJour::Erreur(e), None)
+            }
+        };
+        if !manuel {
+            if phase != PhaseMiseAJour::Disponible {
+                return;
+            }
+            if self.dialogue.is_some() {
+                // Un autre dialogue est ouvert : simple message.
+                let version = publication
+                    .as_ref()
+                    .map(|p| p.libelle())
+                    .unwrap_or_default();
+                let t = self.i18n.t_args(
+                    "gui.update.available.notice",
+                    &[("version", version.as_str())],
+                );
+                self.notifier(Niveau::Info, t);
+                return;
+            }
+        }
+        self.dialogue = Some(Dialogue::MiseAJour(EtatDialogueMiseAJour {
+            phase,
+            publication,
+        }));
+    }
+
+    fn installer_mise_a_jour(&mut self) {
+        let Some(Dialogue::MiseAJour(d)) = &mut self.dialogue else {
+            return;
+        };
+        if d.phase != PhaseMiseAJour::Disponible || self.config_mise_a_jour.courant.build.is_none()
+        {
+            return;
+        }
+        let Some(publication) = d.publication.clone() else {
+            return;
+        };
+        d.phase = PhaseMiseAJour::Installation(EtapeInstallation::Telechargement {
+            fait: 0,
+            total: publication.taille_archive,
+        });
+        let config = self.config_mise_a_jour.clone();
+        let retour = self.retour.clone();
+        let lance = std::thread::Builder::new()
+            .name("installation-mise-a-jour".into())
+            .spawn(move || {
+                let mut dernier = 0u64;
+                let r = mise_a_jour::installer_publication(&config, &publication, &mut |e| {
+                    // Progression bornée (un message tous les 256 Kio).
+                    if let EtapeInstallation::Telechargement { fait, total } = &e
+                        && *fait < dernier + 256 * 1024
+                        && Some(*fait) != *total
+                    {
+                        return;
+                    }
+                    if let EtapeInstallation::Telechargement { fait, .. } = &e {
+                        dernier = *fait;
+                    }
+                    retour.envoyer(Message::ProgressionMiseAJour(e));
+                });
+                retour.envoyer(Message::MiseAJourInstallee(r.map_err(|e| e.to_string())));
+            });
+        if let Err(e) = lance {
+            self.notifier(Niveau::Erreur, e.to_string());
+        }
+    }
+
+    fn mise_a_jour_installee(&mut self, r: Result<PathBuf, String>) {
+        match r {
+            Ok(_) => {
+                let relance = mise_a_jour::exe_courant()
+                    .ok_or_else(|| "exécutable introuvable".to_string())
+                    .and_then(|exe| mise_a_jour::relancer(&exe).map_err(|e| e.to_string()));
+                match relance {
+                    Ok(()) => {
+                        for t in &self.taches {
+                            self.source.annuler_tache(t.id);
+                        }
+                        self.quitter = true;
+                    }
+                    Err(e) => {
+                        let t = self
+                            .i18n
+                            .t_args("gui.update.restartfailed", &[("error", e.as_str())]);
+                        self.notifier(Niveau::Avertissement, t.clone());
+                        if let Some(Dialogue::MiseAJour(d)) = &mut self.dialogue {
+                            d.phase = PhaseMiseAJour::Erreur(t);
+                        }
+                    }
+                }
+            }
+            Err(e) => {
+                let t = self
+                    .i18n
+                    .t_args("gui.update.installfailed", &[("error", e.as_str())]);
+                self.notifier(Niveau::Erreur, t.clone());
+                if let Some(Dialogue::MiseAJour(d)) = &mut self.dialogue {
+                    d.phase = PhaseMiseAJour::Erreur(t);
+                }
             }
         }
     }
@@ -2184,5 +2480,155 @@ mod tests {
         let json = serde_json::to_string(&e.instantane_interface()).unwrap();
         assert!(!json.contains("cle-secrete-42"));
         assert!(json.contains("\"theme\":\"clair\""));
+    }
+
+    /// Draine les messages des threads jusqu'à `condition` (5 s au plus).
+    fn attendre_messages(e: &mut Etat, condition: impl Fn(&Etat) -> bool) {
+        let limite = Instant::now() + Duration::from_secs(5);
+        while !condition(e) {
+            assert!(Instant::now() < limite, "délai dépassé");
+            std::thread::sleep(Duration::from_millis(10));
+            e.drainer();
+        }
+    }
+
+    #[test]
+    fn selecteur_natif_ajoute_les_sources() {
+        let mut e = Etat::nouveau();
+        e.definir_selecteur(std::sync::Arc::new(|_: &str| {
+            Some(PathBuf::from("/media/Films choisis"))
+        }));
+        // Commande « Ajouter une source » : page des sources + sélecteur.
+        e.appliquer(Message::Commande(Commande::AjouterSource));
+        attendre_messages(&mut e, |e| {
+            e.services
+                .sources_films
+                .iter()
+                .any(|s| s == "/media/Films choisis")
+        });
+        assert!(matches!(e.dialogue, Some(Dialogue::Reglages(_))));
+        // Séries, depuis les réglages ; doublon ignoré.
+        e.appliquer(Message::ChoisirDossier(CibleDossier::SourceSeries));
+        attendre_messages(&mut e, |e| !e.services.sources_series.is_empty());
+        e.appliquer(Message::DossierChoisi(
+            CibleDossier::SourceFilms,
+            Some(PathBuf::from("/media/Films choisis")),
+        ));
+        let n = e
+            .services
+            .sources_films
+            .iter()
+            .filter(|s| *s == "/media/Films choisis")
+            .count();
+        assert_eq!(n, 1);
+        // Annulation : rien ne change.
+        let avant = e.services.clone();
+        e.appliquer(Message::DossierChoisi(CibleDossier::SourceFilms, None));
+        assert_eq!(e.services, avant);
+        // Assistant de premier lancement.
+        e.appliquer(Message::OuvrirDialogue(TypeDialogue::Assistant));
+        e.appliquer(Message::DossierChoisi(
+            CibleDossier::Assistant,
+            Some(PathBuf::from("/media/Autres")),
+        ));
+        let Some(Dialogue::Assistant(a)) = &e.dialogue else {
+            panic!("assistant attendu");
+        };
+        assert!(a.sources.iter().any(|s| s == "/media/Autres"));
+    }
+
+    fn publication_test() -> Publication {
+        Publication {
+            etiquette: "v9.9.9".into(),
+            notes: "Nouveautés\nbuild: abcdef1234567".into(),
+            build: Some("abcdef1234567".into()),
+            url_archive: Some("http://127.0.0.1:9/a.zip".into()),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn mise_a_jour_manuelle_erreur_reseau_affichee() {
+        let mut e = Etat::nouveau();
+        e.config_mise_a_jour.url_api = "http://127.0.0.1:9/releases/latest".into();
+        e.appliquer(Message::RechercherMiseAJour { manuel: true });
+        assert!(matches!(
+            &e.dialogue,
+            Some(Dialogue::MiseAJour(d)) if d.phase == PhaseMiseAJour::Recherche
+        ));
+        attendre_messages(
+            &mut e,
+            |e| matches!(&e.dialogue, Some(Dialogue::MiseAJour(d)) if d.phase != PhaseMiseAJour::Recherche),
+        );
+        let Some(Dialogue::MiseAJour(d)) = &e.dialogue else {
+            unreachable!()
+        };
+        assert!(
+            matches!(&d.phase, PhaseMiseAJour::Erreur(t) if t.contains("injoignable")),
+            "{:?}",
+            d.phase
+        );
+    }
+
+    #[test]
+    fn mise_a_jour_disponible_ouvre_le_dialogue() {
+        let mut e = Etat::nouveau();
+        e.config_mise_a_jour.courant.build = Some("0000000111111".into());
+        // Vérification automatique, aucun dialogue ouvert : « Nouvelle version disponible ».
+        e.appliquer(Message::ResultatMiseAJour {
+            manuel: false,
+            resultat: Ok((Verdict::Disponible, publication_test())),
+        });
+        assert!(matches!(
+            &e.dialogue,
+            Some(Dialogue::MiseAJour(d)) if d.phase == PhaseMiseAJour::Disponible
+        ));
+        // Automatique et déjà à jour / en erreur : silencieux.
+        e.appliquer(Message::FermerDialogue);
+        e.appliquer(Message::ResultatMiseAJour {
+            manuel: false,
+            resultat: Ok((Verdict::AJour, publication_test())),
+        });
+        e.appliquer(Message::ResultatMiseAJour {
+            manuel: false,
+            resultat: Err("panne".into()),
+        });
+        assert!(e.dialogue.is_none());
+        // Automatique avec un autre dialogue ouvert : simple message.
+        e.appliquer(Message::OuvrirDialogue(TypeDialogue::Messages));
+        let n = e.notifications.len();
+        e.appliquer(Message::ResultatMiseAJour {
+            manuel: false,
+            resultat: Ok((Verdict::Disponible, publication_test())),
+        });
+        assert!(matches!(e.dialogue, Some(Dialogue::Messages)));
+        assert_eq!(e.notifications.len(), n + 1);
+        assert!(e.notifications.last().unwrap().texte.contains("v9.9.9"));
+    }
+
+    #[test]
+    fn version_de_developpement_sans_installation() {
+        let mut e = Etat::nouveau();
+        e.config_mise_a_jour.courant.build = None;
+        // Pas de vérification automatique en compilation locale (aucun thread lancé).
+        e.appliquer(Message::RechercherMiseAJour { manuel: false });
+        assert!(e.dialogue.is_none());
+        e.appliquer(Message::OuvrirDialogue(TypeDialogue::Messages));
+        e.dialogue = Some(Dialogue::MiseAJour(EtatDialogueMiseAJour {
+            phase: PhaseMiseAJour::Developpement,
+            publication: Some(publication_test()),
+        }));
+        e.appliquer(Message::InstallerMiseAJour);
+        assert!(matches!(
+            &e.dialogue,
+            Some(Dialogue::MiseAJour(d)) if d.phase == PhaseMiseAJour::Developpement
+        ));
+        // Échec d'installation : erreur affichée proprement, pas de fermeture.
+        e.appliquer(Message::MiseAJourInstallee(Err("disque plein".into())));
+        assert!(!e.quitter);
+        assert!(matches!(
+            &e.dialogue,
+            Some(Dialogue::MiseAJour(d)) if matches!(&d.phase, PhaseMiseAJour::Erreur(t) if t.contains("disque plein"))
+        ));
     }
 }

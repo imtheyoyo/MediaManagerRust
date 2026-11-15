@@ -12,6 +12,26 @@ pub const BLEU: Color32 = Color32::from_rgb(0x42, 0x8B, 0xDB);
 pub const ROUGE: Color32 = Color32::from_rgb(0xD9, 0x53, 0x4F);
 pub const ORANGE: Color32 = Color32::from_rgb(0xE0, 0x9F, 0x2D);
 
+/// Fond des barres (outils, modules) et des bandeaux d'onglets.
+pub const FOND_BARRES: Color32 = Color32::from_rgb(0x2B, 0x2B, 0x2B);
+/// Orange du module actif et du logotype.
+pub const ORANGE_ACTIF: Color32 = Color32::from_rgb(0xF3, 0x9C, 0x12);
+/// Gris des icônes au repos.
+pub const ICONE_REPOS: Color32 = Color32::from_rgb(0xA8, 0xA8, 0xA8);
+/// Onglet sélectionné (bandeaux d'onglets).
+pub const ONGLET_ACTIF: Color32 = Color32::from_rgb(0x55, 0x55, 0x55);
+/// Filets du tableau (lignes et colonnes).
+pub const FILET_TABLEAU: Color32 = Color32::from_rgb(0x4A, 0x4D, 0x50);
+/// Poignée du séparateur liste / détails.
+pub const POIGNEE: Color32 = Color32::from_rgb(0x9A, 0x9A, 0x9A);
+/// Couleurs des cellules d'état.
+pub const VERT_ETAT: Color32 = Color32::from_rgb(0x5C, 0xC1, 0x4F);
+pub const ROUGE_ETAT: Color32 = Color32::from_rgb(0xE0, 0x45, 0x40);
+pub const ORANGE_ETAT: Color32 = Color32::from_rgb(0xF0, 0xA0, 0x30);
+pub const BLEU_ETAT: Color32 = Color32::from_rgb(0x3D, 0x9B, 0xF0);
+/// Liens (identifiants, chemins) du panneau de détails.
+pub const LIEN: Color32 = Color32::from_rgb(0x58, 0x9D, 0xF6);
+
 fn rgb(hex: u32) -> Color32 {
     Color32::from_rgb((hex >> 16) as u8, (hex >> 8) as u8, hex as u8)
 }
@@ -59,6 +79,10 @@ pub fn visuals(theme: Theme) -> egui::Visuals {
     v.widgets.noninteractive.bg_stroke = Stroke::new(1.0, rgb(alterne));
     v.widgets.inactive.bg_fill = rgb(composant);
     v.widgets.inactive.weak_bg_fill = rgb(composant);
+    if theme == Theme::Sombre {
+        v.hyperlink_color = LIEN;
+        v.widgets.noninteractive.bg_stroke = Stroke::new(1.0, FILET_TABLEAU);
+    }
     v
 }
 
@@ -81,5 +105,8 @@ mod tests {
         let clair = visuals(Theme::Clair);
         assert_eq!(clair.panel_fill, Color32::from_rgb(0xEB, 0xEB, 0xEB));
         assert!(sombre.dark_mode && !clair.dark_mode);
+        assert_eq!(sombre.hyperlink_color, LIEN);
+        // Fond des barres proche de #2B2B2B, comme la référence.
+        assert_eq!(FOND_BARRES, Color32::from_rgb(0x2B, 0x2B, 0x2B));
     }
 }

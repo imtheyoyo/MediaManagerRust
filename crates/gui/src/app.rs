@@ -12,10 +12,79 @@ use crate::theme;
 use crate::vue::{
     self, Sortie, barre_etat, barre_menus, barre_modules, barre_outils, details, series, tableau,
 };
-use eframe::egui::{self, CentralPanel, Event, Frame, Id, Key, Margin, Panel, ViewportCommand};
+use eframe::egui::{
+    self, CentralPanel, CursorIcon, Event, Frame, Id, Key, Margin, Rect, Sense, UiBuilder,
+    ViewportCommand, pos2, vec2,
+};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
+
+/// Largeur de la poignée du séparateur liste / détails.
+pub const LARGEUR_POIGNEE: f32 = 9.0;
+/// Largeur minimale du panneau de détails.
+pub const MIN_DETAILS: f32 = 320.0;
+/// Largeur minimale de la liste.
+pub const MIN_LISTE: f32 = 360.0;
+const ID_SEPARATEUR: &str = "separateur_liste_details";
+
+/// Largeur effective du panneau de détails : valeur mémorisée (moitié de la zone sinon),
+/// bornée pour laisser au moins `MIN_LISTE` à la liste.
+pub fn borner_largeur_details(largeur_zone: f32, voulue: Option<f32>) -> f32 {
+    let max = (largeur_zone - MIN_LISTE - LARGEUR_POIGNEE).max(MIN_DETAILS);
+    voulue
+        .filter(|v| v.is_finite() && *v > 0.0)
+        .unwrap_or(largeur_zone * 0.5)
+        .clamp(MIN_DETAILS, max)
+}
+
+/// Découpe `zone` en (liste, poignée, détails) pour une largeur de détails donnée.
+pub fn decouper(zone: Rect, largeur_details: f32) -> (Rect, Rect, Rect) {
+    let x_poignee = zone.max.x - largeur_details - LARGEUR_POIGNEE;
+    let liste = Rect::from_min_max(zone.min, pos2(x_poignee, zone.max.y));
+    let poignee = Rect::from_min_max(
+        pos2(x_poignee, zone.min.y),
+        pos2(x_poignee + LARGEUR_POIGNEE, zone.max.y),
+    );
+    let details = Rect::from_min_max(pos2(poignee.max.x, zone.min.y), zone.max);
+    (liste, poignee, details)
+}
+
+/// Poignée verticale déplaçable : renvoie la largeur des détails pour cette image (et émet
+/// `LargeurDetails` pendant le glissement, mémorisée dans `ui.json`).
+fn separateur(ui: &mut egui::Ui, etat: &Etat, zone: Rect, sortie: &mut Sortie) -> f32 {
+    let mut largeur = borner_largeur_details(zone.width(), etat.largeur_details);
+    let (_, poignee, _) = decouper(zone, largeur);
+    let reponse = ui
+        .interact(poignee, Id::unique(ID_SEPARATEUR), Sense::drag())
+        .on_hover_cursor(CursorIcon::ResizeHorizontal);
+    if reponse.dragged()
+        && let Some(p) = reponse.interact_pointer_pos()
+    {
+        largeur =
+            borner_largeur_details(zone.width(), Some(zone.max.x - p.x - LARGEUR_POIGNEE * 0.5));
+    }
+    if (reponse.dragged() || reponse.drag_stopped())
+        && etat
+            .largeur_details
+            .is_none_or(|x| (x - largeur).abs() > 0.5)
+    {
+        sortie.push(Message::LargeurDetails(largeur));
+    }
+    let (_, poignee, _) = decouper(zone, largeur);
+    let peintre = ui.painter();
+    peintre.rect_filled(poignee, 0.0, theme::FOND_BARRES);
+    let couleur = if reponse.hovered() || reponse.dragged() {
+        egui::Color32::WHITE
+    } else {
+        theme::POIGNEE
+    };
+    // Poignée « ⋮ » : trois points centrés.
+    for k in [-1.0, 0.0, 1.0] {
+        peintre.circle_filled(poignee.center() + vec2(0.0, 5.0 * k), 1.3, couleur);
+    }
+    largeur
+}
 
 pub struct Application {
     etat: Etat,
@@ -34,10 +103,14 @@ impl Application {
         erreur_ui: Option<String>,
     ) -> Self {
         let mut etat = Etat::avec_source(source);
+        egui_extras::install_image_loaders(&cc.egui_ctx);
         let ctx = cc.egui_ctx.clone();
         let repaint: Repaint = Arc::new(move || ctx.request_repaint());
         etat.definir_repaint(repaint.clone());
         etat.restaurer_interface(&etat_ui);
+        if etat.reglages.verifier_mises_a_jour {
+            etat.appliquer(Message::RechercherMiseAJour { manuel: false });
+        }
         if let Some(e) = erreur_ui {
             let texte = etat
                 .i18n
@@ -206,47 +279,55 @@ impl Application {
         barre_modules::afficher(ui, &self.etat, &mut sortie);
 
         let fond = theme::fond_alterne(self.etat.reglages.theme);
-        let relache = ctx.input(|i| !i.pointer.any_down());
         CentralPanel::default()
-            .frame(Frame::new().fill(fond).inner_margin(Margin::same(6)))
-            .show(ui, |ui| match self.etat.module {
-                Module::Films => {
-                    let largeur = ui.available_width();
-                    let defaut = self.etat.largeur_details.unwrap_or(largeur * 0.5);
-                    let reponse = Panel::right("panneau_details")
-                        .resizable(true)
-                        .default_size(defaut.clamp(300.0, (largeur * 0.8).max(300.0)))
-                        .size_range(300.0..=(largeur * 0.8).max(300.0))
-                        .frame(
-                            Frame::new()
-                                .fill(ui.visuals().panel_fill)
-                                .inner_margin(Margin::same(8)),
-                        )
-                        .show(ui, |ui| {
-                            details::afficher(ui, &self.etat, &mut self.images, &mut sortie)
-                        });
-                    let l = reponse.response.rect.width();
-                    if relache
-                        && self
-                            .etat
-                            .largeur_details
-                            .is_none_or(|x| (x - l).abs() > 1.0)
-                    {
-                        sortie.push(Message::LargeurDetails(l));
-                    }
-                    CentralPanel::default()
-                        .frame(Frame::new().inner_margin(Margin::symmetric(4, 0)))
-                        .show(ui, |ui| tableau::afficher(ui, &self.etat, &mut sortie));
-                }
-                Module::Series => series::afficher(ui, &self.etat, &mut sortie),
-                autre => {
-                    let nom = self.etat.i18n.t(autre.cle());
-                    ui.add_space(24.0);
-                    ui.label(
+            .frame(Frame::new().fill(theme::FOND_BARRES).inner_margin(Margin {
+                left: 18,
+                right: 8,
+                top: 0,
+                bottom: 6,
+            }))
+            .show(ui, |ui| {
+                let zone = ui.available_rect_before_wrap();
+                ui.allocate_rect(zone, Sense::hover());
+                if self.etat.module == Module::Collections {
+                    let nom = self.etat.i18n.t(Module::Collections.cle());
+                    let mut enfant = ui.new_child(UiBuilder::new().max_rect(zone.shrink(24.0)));
+                    enfant.label(
                         self.etat
                             .i18n
                             .t_args("gui.module.placeholder", &[("module", nom.as_str())]),
                     );
+                    return;
+                }
+                let largeur = separateur(ui, &self.etat, zone, &mut sortie);
+                let (liste, _, details) = decouper(zone, largeur);
+                for (rect, est_liste) in [(liste, true), (details, false)] {
+                    ui.painter().rect_filled(rect, 0.0, fond);
+                    let mut enfant =
+                        ui.new_child(UiBuilder::new().max_rect(rect).id_salt(if est_liste {
+                            "zone_liste"
+                        } else {
+                            "zone_details"
+                        }));
+                    enfant.set_clip_rect(rect.intersect(ui.clip_rect()));
+                    match (self.etat.module, est_liste) {
+                        (Module::Series, true) => {
+                            series::afficher(&mut enfant, &self.etat, &mut sortie)
+                        }
+                        (Module::Series, false) => series::afficher_details(
+                            &mut enfant,
+                            &self.etat,
+                            &mut self.images,
+                            &mut sortie,
+                        ),
+                        (_, true) => tableau::afficher(&mut enfant, &self.etat, &mut sortie),
+                        (_, false) => details::afficher(
+                            &mut enfant,
+                            &self.etat,
+                            &mut self.images,
+                            &mut sortie,
+                        ),
+                    }
                 }
             });
 
@@ -280,6 +361,9 @@ impl Application {
             Some(Dialogue::Assistant(d)) => {
                 vue::dialogue_assistant::afficher(&ctx, &self.etat, d, &mut sortie)
             }
+            Some(Dialogue::MiseAJour(d)) => {
+                vue::dialogue_mise_a_jour::afficher(&ctx, &self.etat, d, &mut sortie)
+            }
             None => {}
         }
 
@@ -307,7 +391,31 @@ mod tests {
 
     /// Rendu hors écran de chaque écran / dialogue : aucune panique, messages appliqués.
     fn rendre_tous_les_ecrans(etat: Etat, dossier: &std::path::Path) {
+        for largeur in [1050.0, 1920.0] {
+            rendre_tous_les_ecrans_en(etat_copie(&etat), dossier, largeur);
+        }
+        rendre_tous_les_ecrans_en(etat, dossier, 1280.0);
+    }
+
+    /// Nouvel état sur la même source (pour rejouer les écrans à une autre largeur).
+    fn etat_copie(etat: &Etat) -> Etat {
+        let mut e = Etat::avec_source(etat.source.clone());
+        e.films = etat.films.clone();
+        e.series = etat.series.clone();
+        e.appliquer(Message::Recherche(String::new()));
+        e
+    }
+
+    fn entree(largeur: f32) -> egui::RawInput {
+        egui::RawInput {
+            screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), vec2(largeur, 760.0))),
+            ..Default::default()
+        }
+    }
+
+    fn rendre_tous_les_ecrans_en(etat: Etat, dossier: &std::path::Path, largeur: f32) {
         let ctx = egui::Context::default();
+        egui_extras::install_image_loaders(&ctx);
         let repaint: Repaint = Arc::new(|| {});
         let mut app = Application {
             etat,
@@ -317,7 +425,7 @@ mod tests {
             fermeture_envoyee: false,
         };
         let image = |app: &mut Application| {
-            let mut sortie = ctx.run_ui(Default::default(), |ui| app.dessiner(ui));
+            let mut sortie = ctx.run_ui(entree(largeur), |ui| app.dessiner(ui));
             sortie.textures_delta.clear();
         };
         let mut etapes: Vec<Message> = vec![
@@ -350,6 +458,9 @@ mod tests {
             Message::OuvrirDialogue(TypeDialogue::Messages),
             Message::FermerDialogue,
             Message::ChoisirModule(crate::etat::Module::Series),
+            Message::BasculerNoeudSerie("inexistante".into(), None),
+            Message::SelectionnerNoeudSerie(crate::etat::NoeudSerie::Serie("inexistante".into())),
+            Message::ChoisirOnglet(crate::etat::OngletDetails::FichiersMedias),
             Message::ChoisirModule(crate::etat::Module::Collections),
             Message::ChoisirModule(crate::etat::Module::Films),
             Message::ChoisirOnglet(crate::etat::OngletDetails::Illustration),
@@ -364,6 +475,86 @@ mod tests {
         app.enregistrer_interface();
         let relu = persistance::charger(&dossier.join("ui.json")).unwrap();
         assert_eq!(relu, app.etat.instantane_interface());
+    }
+
+    #[test]
+    fn largeur_des_details_bornee() {
+        assert_eq!(borner_largeur_details(1000.0, None), 500.0);
+        assert_eq!(borner_largeur_details(1000.0, Some(100.0)), MIN_DETAILS);
+        assert_eq!(
+            borner_largeur_details(1000.0, Some(900.0)),
+            1000.0 - MIN_LISTE - LARGEUR_POIGNEE
+        );
+        assert_eq!(borner_largeur_details(1000.0, Some(f32::NAN)), 500.0);
+        // Zone trop étroite : les détails gardent leur minimum.
+        assert_eq!(borner_largeur_details(500.0, Some(450.0)), MIN_DETAILS);
+        let zone = Rect::from_min_size(pos2(10.0, 0.0), vec2(1000.0, 500.0));
+        let (liste, poignee, details) = decouper(zone, 400.0);
+        assert_eq!(details.width(), 400.0);
+        assert_eq!(poignee.width(), LARGEUR_POIGNEE);
+        assert_eq!(liste.min.x, 10.0);
+        assert_eq!(liste.max.x, poignee.min.x);
+        assert_eq!(poignee.max.x, details.min.x);
+    }
+
+    /// Glisser la poignée à la souris change la largeur des détails, mémorisée dans ui.json.
+    #[test]
+    fn separateur_deplacable_et_largeur_persistee() {
+        let dossier = tempfile::tempdir().unwrap();
+        let ctx = egui::Context::default();
+        egui_extras::install_image_loaders(&ctx);
+        let mut app = Application {
+            etat: Etat::nouveau(),
+            theme_applique: None,
+            images: GestionnaireImages::new(Arc::new(|| {})),
+            chemin_ui: dossier.path().join("ui.json"),
+            fermeture_envoyee: false,
+        };
+        let largeur = 1400.0;
+        let image = |app: &mut Application, evenements: Vec<Event>| {
+            let mut e = entree(largeur);
+            e.events = evenements;
+            let mut s = ctx.run_ui(e, |ui| app.dessiner(ui));
+            s.textures_delta.clear();
+        };
+        image(&mut app, vec![]);
+        image(&mut app, vec![]);
+        assert_eq!(app.etat.largeur_details, None);
+        // Position de la poignée : relevée sur la zone d'interaction enregistrée.
+        let rect = ctx
+            .read_response(Id::unique(ID_SEPARATEUR))
+            .expect("poignée enregistrée")
+            .rect;
+        let depart = rect.center();
+        let arrivee = depart - vec2(150.0, 0.0);
+        let bouton = |pos, pressed| Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: Default::default(),
+        };
+        image(&mut app, vec![Event::PointerMoved(depart)]);
+        image(&mut app, vec![bouton(depart, true)]);
+        for k in 1..=5 {
+            let p = depart - vec2(30.0 * k as f32, 0.0);
+            image(&mut app, vec![Event::PointerMoved(p)]);
+        }
+        image(&mut app, vec![bouton(arrivee, false)]);
+        image(&mut app, vec![]);
+        let l = app.etat.largeur_details.expect("largeur mémorisée");
+        let avant = largeur - rect.max.x - 8.0;
+        assert!(
+            (l - (avant + 150.0)).abs() < 12.0,
+            "largeur {l}, attendu environ {}",
+            avant + 150.0
+        );
+        app.enregistrer_interface();
+        let relu = persistance::charger(&dossier.path().join("ui.json")).unwrap();
+        assert_eq!(relu.separateur, Some(l));
+        // Restauration : la poignée revient à la même place.
+        let mut restaure = Etat::nouveau();
+        restaure.restaurer_interface(&relu);
+        assert_eq!(restaure.largeur_details, Some(l));
     }
 
     #[test]

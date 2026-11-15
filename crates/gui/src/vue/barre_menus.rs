@@ -160,6 +160,14 @@ pub fn afficher(ui: &mut egui::Ui, etat: &Etat, sortie: &mut Sortie) {
                 ui.menu_button(i.t("Toolbar.help"), |ui| {
                     entree(
                         ui,
+                        format!("{}…", i.t("gui.update.check")),
+                        None,
+                        Message::RechercherMiseAJour { manuel: true },
+                        sortie,
+                    );
+                    ui.separator();
+                    entree(
+                        ui,
                         i.t("gui.help.about"),
                         None,
                         Message::Notifier(Niveau::Info, i.t("gui.about.title")),

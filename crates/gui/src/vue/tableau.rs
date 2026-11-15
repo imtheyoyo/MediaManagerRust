@@ -1,42 +1,68 @@
-//! Panneau maître : recherche + filtre, tableau virtualisé (egui_extras), ligne de totaux.
+//! Panneau maître du module Films : onglet-titre, barre Recherche + loupe + Filtre ⏷, tableau
+//! virtualisé (egui_extras) à filets, en-têtes d'état en icônes, ligne de totaux.
+//! Les éléments génériques (onglet-titre, barre de recherche, filets, en-têtes) servent aussi
+//! au module Séries.
 
+use super::details::bandeau_onglets;
 use super::{Sortie, menus};
 use crate::commandes::MENU_CONTEXTUEL;
 use crate::etat::{Etat, FiltreRapide, Message};
+use crate::icones::{self, Icone, cellule_etat, etat_film, icone_entete};
 use crate::modele::{Colonne, Film, Ordre, gigaoctets};
 use crate::polices;
-use crate::theme::{BLEU, ROUGE, VERT};
+use crate::theme::{BLEU, FILET_TABLEAU, ICONE_REPOS, ROUGE};
 use eframe::egui::{
-    self, Align, Frame, Id, Label, Layout, Margin, Panel, RichText, Sense, TextEdit,
+    self, Align, Button, Frame, Id, Label, Layout, Margin, Panel, RichText, Sense, Stroke,
+    TextEdit, Vec2, vec2,
 };
 use egui_extras::{Column, TableBuilder};
 
 pub const ID_CHAMP_RECHERCHE: &str = "champ_recherche";
-const HAUTEUR_LIGNE: f32 = 20.0;
+/// Hauteur d'une ligne du tableau (densité de la référence).
+pub const HAUTEUR_LIGNE: f32 = 22.0;
+/// Hauteur de l'en-tête du tableau.
+pub const HAUTEUR_ENTETE: f32 = 24.0;
+/// Largeur des colonnes d'état.
+pub const LARGEUR_ETAT: f32 = 27.0;
+/// Marge intérieure des cellules.
+const MARGE_CELLULE: f32 = 5.0;
 
 pub fn afficher(ui: &mut egui::Ui, etat: &Etat, sortie: &mut Sortie) {
-    ligne_recherche(ui, etat, sortie);
-    ui.add_space(4.0);
-    Panel::bottom("totaux_films")
-        .exact_size(22.0)
-        .frame(Frame::new().inner_margin(Margin::symmetric(4, 2)))
-        .show(ui, |ui| totaux(ui, etat));
-    table(ui, etat, sortie);
+    onglet_module(ui, etat);
+    Frame::new()
+        .inner_margin(Margin::symmetric(6, 4))
+        .show(ui, |ui| {
+            ligne_recherche(ui, etat, sortie);
+            ui.add_space(6.0);
+            Panel::bottom("totaux_films")
+                .exact_size(24.0)
+                .show_separator_line(false)
+                .frame(Frame::new().inner_margin(Margin::symmetric(2, 2)))
+                .show(ui, |ui| totaux(ui, etat));
+            table(ui, etat, sortie);
+        });
 }
 
-fn ligne_recherche(ui: &mut egui::Ui, etat: &Etat, sortie: &mut Sortie) {
+/// Onglet unique portant le titre du module (« Films », « Séries »…).
+pub fn onglet_module(ui: &mut egui::Ui, etat: &Etat) {
+    let titre = etat.i18n.t(etat.module.cle());
+    bandeau_onglets(ui, "onglet_module", &[titre], 0);
+}
+
+/// Barre de recherche : champ, bouton loupe accolé, bouton « Filtre ⏷ ».
+pub fn ligne_recherche(ui: &mut egui::Ui, etat: &Etat, sortie: &mut Sortie) {
     ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 0.0;
+        let hauteur = 22.0;
+        let largeur_filtre = 100.0;
+        let largeur = (ui.available_width() - largeur_filtre - 28.0 - 10.0).max(80.0);
         let mut texte = etat.recherche.clone();
-        let largeur = (ui.available_width() - 110.0).max(80.0);
-        let reponse = ui.add(
+        let reponse = ui.add_sized(
+            vec2(largeur, hauteur),
             TextEdit::singleline(&mut texte)
                 .id(Id::unique(ID_CHAMP_RECHERCHE))
-                .hint_text(format!(
-                    "{} {}",
-                    polices::RECHERCHE,
-                    etat.i18n.t("gui.search.placeholder")
-                ))
-                .desired_width(largeur),
+                .hint_text(etat.i18n.t("gui.search.placeholder"))
+                .margin(Margin::symmetric(6, 3)),
         );
         if reponse.changed() {
             sortie.push(Message::Recherche(texte));
@@ -44,49 +70,55 @@ fn ligne_recherche(ui: &mut egui::Ui, etat: &Etat, sortie: &mut Sortie) {
         if etat.recherche_invalide {
             reponse.on_hover_text(etat.i18n.t("gui.search.invalid"));
         }
-        let libelle = if etat.filtre_actif() {
-            format!(
-                "{} {} {}",
-                polices::FILTRE_ACTIF,
-                etat.i18n.t("movieextendedsearch.filter"),
-                polices::DEROULANT
+        if ui
+            .add(
+                Button::image(icones::image_teintee(Icone::Loupe, 15.0, ICONE_REPOS))
+                    .min_size(vec2(28.0, hauteur)),
             )
-        } else {
-            format!(
-                "{} {}",
-                etat.i18n.t("movieextendedsearch.filter"),
-                polices::DEROULANT
-            )
-        };
-        ui.menu_button(libelle, |ui| {
-            let choix = [
-                (FiltreRapide::Vus, "gui.filter.watched"),
-                (FiltreRapide::NonVus, "gui.filter.unwatched"),
-                (FiltreRapide::Nouveaux, "gui.filter.new"),
-            ];
-            for (filtre, cle) in choix {
-                if ui
-                    .selectable_label(etat.filtre_rapide == filtre, etat.i18n.t(cle))
-                    .clicked()
-                {
-                    sortie.push(Message::FiltreRapide(filtre));
-                    ui.close();
-                }
-            }
-            ui.separator();
-            if ui
-                .button(format!("{}…", etat.i18n.t("movieextendedsearch.options")))
-                .clicked()
-            {
-                sortie.push(Message::OuvrirFiltres(true));
-                ui.close();
-            }
-            if ui.button(etat.i18n.t("filter.reset")).clicked() {
-                sortie.push(Message::EffacerFiltres);
-                ui.close();
-            }
-        });
+            .clicked()
+        {
+            sortie.push(Message::FocusRecherche);
+        }
+        ui.add_space(10.0);
+        let mut libelle = etat.i18n.t("movieextendedsearch.filter");
+        if etat.filtre_actif() {
+            libelle = format!("{} {libelle}", polices::FILTRE_ACTIF);
+        }
+        let bouton = Button::new(libelle)
+            .right_text(RichText::new(polices::DEROULANT).size(11.0))
+            .min_size(vec2(largeur_filtre, hauteur));
+        egui::containers::menu::MenuButton::from_button(bouton)
+            .ui(ui, |ui| menu_filtre(ui, etat, sortie));
     });
+}
+
+fn menu_filtre(ui: &mut egui::Ui, etat: &Etat, sortie: &mut Sortie) {
+    let choix = [
+        (FiltreRapide::Vus, "gui.filter.watched"),
+        (FiltreRapide::NonVus, "gui.filter.unwatched"),
+        (FiltreRapide::Nouveaux, "gui.filter.new"),
+    ];
+    for (filtre, cle) in choix {
+        if ui
+            .selectable_label(etat.filtre_rapide == filtre, etat.i18n.t(cle))
+            .clicked()
+        {
+            sortie.push(Message::FiltreRapide(filtre));
+            ui.close();
+        }
+    }
+    ui.separator();
+    if ui
+        .button(format!("{}…", etat.i18n.t("movieextendedsearch.options")))
+        .clicked()
+    {
+        sortie.push(Message::OuvrirFiltres(true));
+        ui.close();
+    }
+    if ui.button(etat.i18n.t("filter.reset")).clicked() {
+        sortie.push(Message::EffacerFiltres);
+        ui.close();
+    }
 }
 
 fn totaux(ui: &mut egui::Ui, etat: &Etat) {
@@ -112,21 +144,67 @@ fn totaux(ui: &mut egui::Ui, etat: &Etat) {
     });
 }
 
+/// Filets d'une cellule (bas et droite), dans le rectangle de la cellule.
+pub fn filets(ui: &egui::Ui) {
+    let r = ui.max_rect();
+    let trait_ = Stroke::new(1.0, FILET_TABLEAU);
+    let p = ui.painter();
+    p.hline(r.x_range(), r.bottom() - 0.5, trait_);
+    p.vline(r.right() - 0.5, r.y_range(), trait_);
+}
+
+/// Prépare une cellule : filets puis marge gauche.
+pub fn debut_cellule(ui: &mut egui::Ui) {
+    filets(ui);
+    ui.add_space(MARGE_CELLULE);
+}
+
+/// Texte aligné à droite dans une cellule.
+pub fn droite(ui: &mut egui::Ui, texte: impl Into<egui::WidgetText>) {
+    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+        ui.add_space(MARGE_CELLULE);
+        ui.add(Label::new(texte).truncate());
+    });
+}
+
+/// En-tête d'icône centrée (colonnes d'état).
+pub fn entete_icone(ui: &mut egui::Ui, icone: Icone) -> egui::Response {
+    filets(ui);
+    let taille = vec2(ui.available_width(), ui.available_height());
+    let (rect, reponse) = ui.allocate_exact_size(taille, Sense::click());
+    icones::image_teintee(icone, 15.0, ICONE_REPOS).paint_at(
+        ui,
+        egui::Rect::from_center_size(rect.center(), Vec2::splat(15.0)),
+    );
+    reponse
+}
+
+/// En-tête texte centré.
+pub fn entete_texte(ui: &mut egui::Ui, texte: String) -> egui::Response {
+    filets(ui);
+    ui.with_layout(
+        Layout::centered_and_justified(egui::Direction::LeftToRight),
+        |ui| ui.add(Label::new(texte).truncate().sense(Sense::click())),
+    )
+    .inner
+}
+
 fn table(ui: &mut egui::Ui, etat: &Etat, sortie: &mut Sortie) {
     let colonnes = etat.colonnes_visibles();
     let modifs = ui.input(|i| i.modifiers);
     let relache = ui.input(|i| !i.pointer.any_down());
+    ui.spacing_mut().item_spacing = Vec2::ZERO;
     // L'état interne du tableau (largeurs) est lié à l'ensemble ordonné des colonnes visibles.
     let ids: Vec<&str> = colonnes.iter().map(|c| c.id()).collect();
     let mut builder = TableBuilder::new(ui)
         .id_salt(("tableau_films", ids.join(",")))
-        .striped(true)
+        .striped(false)
         .resizable(true)
         .sense(Sense::click())
         .cell_layout(Layout::left_to_right(Align::Center));
     for col in &colonnes {
         let c = if col.est_booleenne() {
-            Column::exact(30.0)
+            Column::exact(LARGEUR_ETAT)
         } else if *col == Colonne::Titre {
             Column::initial(etat.largeur_colonne(*col))
                 .at_least(120.0)
@@ -142,7 +220,7 @@ fn table(ui: &mut egui::Ui, etat: &Etat, sortie: &mut Sortie) {
         builder = builder.scroll_to_row(ligne, None);
     }
     builder
-        .header(22.0, |mut en_tete| {
+        .header(HAUTEUR_ENTETE, |mut en_tete| {
             for col in &colonnes {
                 en_tete.col(|ui| entete(ui, etat, *col, sortie));
             }
@@ -193,12 +271,9 @@ fn table(ui: &mut egui::Ui, etat: &Etat, sortie: &mut Sortie) {
         });
 }
 
-fn entete(ui: &mut egui::Ui, etat: &Etat, col: Colonne, sortie: &mut Sortie) {
-    let libelle = etat.i18n.t(col.cle_i18n());
-    let mut texte = col
-        .entete_court()
-        .map(str::to_string)
-        .unwrap_or_else(|| libelle.clone());
+/// Texte d'en-tête d'une colonne texte (libellé + flèche de tri).
+pub fn texte_entete(etat: &Etat, col: Colonne) -> String {
+    let mut texte = etat.i18n.t(col.cle_i18n());
     if let Some((rang, ordre)) = etat.tri_de(col) {
         texte.push(' ');
         texte.push_str(if ordre == Ordre::Croissant {
@@ -210,9 +285,16 @@ fn entete(ui: &mut egui::Ui, etat: &Etat, col: Colonne, sortie: &mut Sortie) {
             texte.push_str(&format!("{}", rang + 1));
         }
     }
-    let reponse = ui
-        .add(Label::new(RichText::new(texte).strong()).sense(Sense::click()))
-        .on_hover_text(libelle);
+    texte
+}
+
+fn entete(ui: &mut egui::Ui, etat: &Etat, col: Colonne, sortie: &mut Sortie) {
+    let libelle = etat.i18n.t(col.cle_i18n());
+    let reponse = match icone_entete(col).filter(|_| etat.tri_de(col).is_none()) {
+        Some(icone) => entete_icone(ui, icone),
+        None => entete_texte(ui, texte_entete(etat, col)),
+    }
+    .on_hover_text(libelle);
     if reponse.clicked() {
         let additif = ui.input(|i| i.modifiers.command);
         sortie.push(Message::Trier {
@@ -262,19 +344,42 @@ fn entete(ui: &mut egui::Ui, etat: &Etat, col: Colonne, sortie: &mut Sortie) {
     });
 }
 
-fn coche(ui: &mut egui::Ui, valeur: bool) {
-    if valeur {
-        ui.label(RichText::new(polices::COCHE).color(VERT));
-    }
-}
-
 fn cellule(ui: &mut egui::Ui, etat: &Etat, film: &Film, col: Colonne) {
+    if let Some(e) = etat_film(film, col) {
+        filets(ui);
+        cellule_etat(ui, e);
+        return;
+    }
     let i = &etat.i18n;
+    if col.aligne_a_droite() {
+        filets(ui);
+        let texte = match col {
+            Colonne::Annee if film.annee > 0 => RichText::new(film.annee.to_string()),
+            Colonne::Annee => RichText::new(""),
+            Colonne::Note => {
+                let t = RichText::new(i.decimal(film.note as f64, 1));
+                if film.note > 0.0 && film.note < 6.0 {
+                    t.color(ROUGE)
+                } else {
+                    t
+                }
+            }
+            Colonne::Votes => RichText::new(film.votes.to_string()),
+            Colonne::Duree => {
+                RichText::new(i.t_args("column.minutes", &[("count", &film.duree_min.to_string())]))
+            }
+            _ => RichText::new(format!(
+                "{} {}",
+                i.decimal(gigaoctets(film.taille_octets), 2),
+                i.t("gui.unit.gigabyte")
+            )),
+        };
+        droite(ui, texte);
+        return;
+    }
+    debut_cellule(ui);
     match col {
         Colonne::Titre => {
-            if film.nouveau {
-                ui.label(RichText::new(polices::PASTILLE).color(VERT));
-            }
             if film.verrouille {
                 ui.label(RichText::new(polices::VERROU).color(BLEU));
             }
@@ -283,33 +388,18 @@ fn cellule(ui: &mut egui::Ui, etat: &Etat, film: &Film, col: Colonne) {
         Colonne::TitreOriginal => {
             ui.add(Label::new(&film.titre_original).truncate());
         }
-        Colonne::Annee => droite(ui, film.annee.to_string()),
         Colonne::DateSortie => {
             ui.label(&film.date_sortie);
         }
         Colonne::Saga => {
-            ui.label(film.saga.as_deref().unwrap_or(""));
+            ui.add(Label::new(film.saga.as_deref().unwrap_or("")).truncate());
         }
-        Colonne::Note => {
-            let texte = RichText::new(i.decimal(film.note as f64, 1));
-            let texte = if film.note < 6.0 {
-                texte.color(ROUGE)
-            } else {
-                texte
-            };
-            ui.with_layout(Layout::right_to_left(Align::Center), |ui| ui.label(texte));
-        }
-        Colonne::Votes => droite(ui, film.votes.to_string()),
         Colonne::Certification => {
             ui.label(&film.certification);
         }
         Colonne::DateAjout => {
             ui.label(&film.date_ajout);
         }
-        Colonne::Duree => droite(
-            ui,
-            i.t_args("column.minutes", &[("count", &film.duree_min.to_string())]),
-        ),
         Colonne::FormatVideo => {
             ui.label(film.format_video());
         }
@@ -319,33 +409,12 @@ fn cellule(ui: &mut egui::Ui, etat: &Etat, film: &Film, col: Colonne) {
         Colonne::Audio => {
             ui.add(Label::new(&film.audio).truncate());
         }
-        Colonne::TailleFichier => droite(
-            ui,
-            format!(
-                "{} {}",
-                i.decimal(gigaoctets(film.taille_octets), 2),
-                i.t("gui.unit.gigabyte")
-            ),
-        ),
         Colonne::Chemin => {
             ui.add(Label::new(film.chemin()).truncate());
         }
         Colonne::NomFichier => {
             ui.add(Label::new(&film.nom_fichier).truncate());
         }
-        Colonne::Nouveau => {
-            if film.nouveau {
-                ui.label(RichText::new(polices::PASTILLE).color(VERT));
-            }
-        }
-        Colonne::Metadonnees => coche(ui, film.metadonnees_ok),
-        Colonne::Images => coche(ui, film.images_ok),
-        Colonne::BandeAnnonce => coche(ui, film.bande_annonce),
-        Colonne::SousTitres => coche(ui, film.sous_titres),
-        Colonne::Vu => coche(ui, film.vu),
+        _ => {}
     }
-}
-
-fn droite(ui: &mut egui::Ui, texte: String) {
-    ui.with_layout(Layout::right_to_left(Align::Center), |ui| ui.label(texte));
 }

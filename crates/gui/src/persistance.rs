@@ -83,6 +83,8 @@ pub struct EtatInterface {
     pub prereglages_filtres: BTreeMap<String, Vec<LigneFiltre>>,
     pub confirmations_masquees: BTreeSet<String>,
     pub assistant_termine: bool,
+    /// Recherche d'une nouvelle version au démarrage (réglage Général).
+    pub verifier_mises_a_jour: bool,
 }
 
 impl Default for EtatInterface {
@@ -101,6 +103,7 @@ impl Default for EtatInterface {
             prereglages_filtres: BTreeMap::new(),
             confirmations_masquees: BTreeSet::new(),
             assistant_termine: false,
+            verifier_mises_a_jour: true,
         }
     }
 }

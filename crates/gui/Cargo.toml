@@ -24,12 +24,21 @@ eframe = "0.37"
 # Polices d'emojis monochromes embarquées (NotoEmoji, licence OFL ; emoji-icon-font, MIT) :
 # sans elles, les pictogrammes (⚙ 🔔 ✔ ⚠ ▲...) dépendent des polices du système.
 egui = { version = "0.37", features = ["monochrome_emoji_fonts"] }
-egui_extras = "0.37"
+# Fonction `svg` : rendu des icônes vectorielles embarquées (dossier `icones/`).
+egui_extras = { version = "0.37", features = ["svg"] }
 regex.workspace = true
 tracing.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+# Sélecteur de dossiers natif (dialogue « Sélectionner un dossier » de Windows ; portail XDG ailleurs).
+rfd = { version = "0.18", default-features = false, features = ["xdg-portal"] }
+# Mise à jour du programme : interrogation de l'API des publications, téléchargement, archive.
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "blocking", "json"] }
+zip = { version = "6", default-features = false, features = ["deflate"] }
+semver = "1"
 
 [dev-dependencies]
 tempfile = "3"
+wiremock = "0.6"
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }

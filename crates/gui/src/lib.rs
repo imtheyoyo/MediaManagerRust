@@ -9,12 +9,15 @@ pub mod donnees;
 pub mod etat;
 pub mod filtres;
 pub mod i18n;
+pub mod icones;
 pub mod images;
+pub mod mise_a_jour;
 pub mod modele;
 pub mod persistance;
 pub mod polices;
 pub mod reglages;
 pub mod renommage;
+pub mod selecteur;
 pub mod source_application;
 pub mod source_donnees;
 pub mod taches;
@@ -68,7 +71,28 @@ pub fn lancer_avec(
 /// rangé dans le dossier de données du stockage. Arrêt propre des services à la fermeture.
 /// Un démarrage impossible (autre instance lancée…) est signalé par une boîte de message.
 pub fn lancer_services(options: OptionsDemarrage) -> eframe::Result {
-    match Services::demarrer(options) {
+    lancer_services_demarres(Services::demarrer(options))
+}
+
+/// Démarrage après une mise à jour : l'instance précédente se ferme encore ; on attend que
+/// son verrou soit libéré (15 s au plus) avant de démarrer les services.
+pub fn lancer_services_apres_mise_a_jour() -> eframe::Result {
+    let limite = std::time::Instant::now() + std::time::Duration::from_secs(15);
+    loop {
+        let r = Services::demarrer(OptionsDemarrage::default());
+        match r {
+            Err(ErreurApp::Stockage(ErreurStockage::InstanceDejaLancee(_)))
+                if std::time::Instant::now() < limite =>
+            {
+                std::thread::sleep(std::time::Duration::from_millis(300));
+            }
+            autre => return lancer_services_demarres(autre),
+        }
+    }
+}
+
+fn lancer_services_demarres(demarrage: Result<Services, ErreurApp>) -> eframe::Result {
+    match demarrage {
         Ok(app) => {
             let source = Arc::new(source_application::SourceApplication::nouvelle(app));
             let chemin_ui = source

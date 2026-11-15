@@ -1,0 +1,4 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24">
+<polygon points="12.00,5.00 13.85,2.68 15.64,3.22 15.89,6.18 16.95,7.05 19.90,6.72 20.78,8.36 18.87,10.63 19.00,12.00 21.32,13.85 20.78,15.64 17.82,15.89 16.95,16.95 17.28,19.90 15.64,20.78 13.37,18.87 12.00,19.00 10.15,21.32 8.36,20.78 8.11,17.82 7.05,16.95 4.10,17.28 3.22,15.64 5.13,13.37 5.00,12.00 2.68,10.15 3.22,8.36 6.18,8.11 7.05,7.05 6.72,4.10 8.36,3.22 10.63,5.13" fill="none" stroke="#FFFFFF" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
+<circle cx="12" cy="12" r="3" fill="none" stroke="#FFFFFF" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

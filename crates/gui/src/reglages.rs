@@ -35,6 +35,8 @@ pub struct Reglages {
     pub theme: Theme,
     pub memoriser_module: bool,
     pub afficher_memoire: bool,
+    /// Recherche d'une nouvelle version du programme au démarrage.
+    pub verifier_mises_a_jour: bool,
 }
 
 impl Default for Reglages {
@@ -44,6 +46,7 @@ impl Default for Reglages {
             theme: Theme::Sombre,
             memoriser_module: true,
             afficher_memoire: false,
+            verifier_mises_a_jour: true,
         }
     }
 }
