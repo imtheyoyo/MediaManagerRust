@@ -58,7 +58,7 @@ pub fn afficher(ctx: &egui::Context, etat: &Etat, m: &EtatManquants, sortie: &mu
                         }
                     });
             });
-            ui.separator();
+            super::separateur_vertical(ui, 260.0);
             ui.vertical(|ui| {
                 ui.set_min_width(280.0);
                 if let Some(x) = m.element_choisi() {

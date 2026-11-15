@@ -169,6 +169,9 @@ impl Application {
         let theme_voulu = self.etat.reglages.theme;
         if self.theme_applique != Some(theme_voulu) {
             ctx.set_visuals(theme::visuals(theme_voulu));
+            // Pas de curseur « I » au survol des libellés (listes, barres, menus) ; le texte
+            // des panneaux de détails reste sélectionnable pour être copié.
+            ctx.all_styles_mut(|s| s.interaction.selectable_labels = false);
             self.theme_applique = Some(theme_voulu);
         }
     }

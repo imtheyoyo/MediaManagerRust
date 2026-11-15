@@ -153,6 +153,7 @@ pub fn afficher_details(
     images: &mut GestionnaireImages,
     sortie: &mut Sortie,
 ) {
+    ui.style_mut().interaction.selectable_labels = true;
     match &etat.noeud_saga {
         Some(NoeudSaga::Film(..)) => {
             afficher_film(ui, etat, images, etat.film_collection(), sortie)

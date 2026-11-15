@@ -99,6 +99,20 @@ pub fn image_ou_emplacement(
     }
 }
 
+/// Filet vertical de hauteur fixe. Un `ui.separator()` placé dans une ligne horizontale prend
+/// toute la hauteur disponible, ce qui fait grandir indéfiniment les fenêtres modales.
+pub fn separateur_vertical(ui: &mut eframe::egui::Ui, hauteur: f32) {
+    let (rect, _) = ui.allocate_exact_size(Vec2::new(8.0, hauteur), eframe::egui::Sense::hover());
+    let x = rect.center().x;
+    ui.painter().line_segment(
+        [
+            eframe::egui::pos2(x, rect.top()),
+            eframe::egui::pos2(x, rect.bottom()),
+        ],
+        ui.visuals().widgets.noninteractive.bg_stroke,
+    );
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

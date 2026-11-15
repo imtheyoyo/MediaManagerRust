@@ -364,6 +364,7 @@ pub fn afficher_details(
     images: &mut GestionnaireImages,
     sortie: &mut Sortie,
 ) {
+    ui.style_mut().interaction.selectable_labels = true;
     let i = &etat.i18n;
     let onglets = [OngletDetails::Details, OngletDetails::FichiersMedias];
     let libelles: Vec<String> = onglets.iter().map(|o| i.t(o.cle())).collect();

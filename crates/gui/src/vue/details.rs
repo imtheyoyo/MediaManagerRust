@@ -107,6 +107,7 @@ pub fn afficher_film(
     film: Option<&Film>,
     sortie: &mut Sortie,
 ) {
+    ui.style_mut().interaction.selectable_labels = true;
     let libelles: Vec<String> = OngletDetails::TOUS
         .iter()
         .map(|o| etat.i18n.t(o.cle()))

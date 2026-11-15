@@ -176,7 +176,7 @@ pub fn afficher(
                     ui.label(RichText::new(i.t("chooser.noresult")).weak());
                 }
             });
-            ui.separator();
+            super::separateur_vertical(ui, 330.0);
             // Fiche du résultat choisi (droite)
             ui.vertical(|ui| {
                 ui.set_min_width(440.0);

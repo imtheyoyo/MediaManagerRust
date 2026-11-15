@@ -81,7 +81,7 @@ pub fn afficher(ctx: &egui::Context, etat: &Etat, d: &EtatApercu, sortie: &mut S
                         });
                     });
             });
-            ui.separator();
+            super::separateur_vertical(ui, 340.0);
             // Détail du film (droite)
             ui.vertical(|ui| {
                 ui.set_min_width(560.0);
@@ -184,5 +184,97 @@ pub fn afficher(ctx: &egui::Context, etat: &Etat, d: &EtatApercu, sortie: &mut S
     });
     if reponse.should_close() {
         sortie.push(Message::FermerDialogue);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::commandes::Commande;
+    use crate::etat::{Dialogue, TypeDialogue};
+    use eframe::egui::{Pos2, RawInput, Rect, epaint::Shape};
+
+    /// Rend `images` images du dialogue ouvert dans `etat` ; renvoie le nombre de textes dessinés
+    /// et le rectangle de la fenêtre à la dernière image.
+    fn rendre(etat: &Etat, id: &'static str, ecran: Vec2, images: usize) -> (usize, Rect) {
+        let ctx = egui::Context::default();
+        ctx.set_visuals(crate::theme::visuals(etat.reglages.theme));
+        let mut nb = 0;
+        let mut sortie = Vec::new();
+        for _ in 0..images {
+            let entree = RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, ecran)),
+                ..Default::default()
+            };
+            let mut out = ctx.run_ui(entree, |ui| match &etat.dialogue {
+                Some(Dialogue::ApercuRenommage(d)) => afficher(ui.ctx(), etat, d, &mut sortie),
+                Some(Dialogue::Recherche(d)) => {
+                    let mut images =
+                        crate::images::GestionnaireImages::new(std::sync::Arc::new(|| {}));
+                    crate::vue::dialogue_recherche::afficher(
+                        ui.ctx(),
+                        etat,
+                        &mut images,
+                        d,
+                        &mut sortie,
+                    )
+                }
+                _ => panic!("dialogue inattendu"),
+            });
+            out.textures_delta.clear();
+            nb = out
+                .shapes
+                .iter()
+                .filter(|c| matches!(&c.shape, Shape::Text(_)))
+                .count();
+        }
+        let rect = ctx
+            .memory(|m| m.area_rect(egui::Id::unique(id)))
+            .expect("fenêtre affichée");
+        (nb, rect)
+    }
+
+    fn verifier_stable(etat: &Etat, id: &'static str) {
+        for ecran in [
+            Vec2::new(1914.0, 1026.0),
+            Vec2::new(1280.0, 800.0),
+            Vec2::new(1050.0, 700.0),
+        ] {
+            let (nb, r4) = rendre(etat, id, ecran, 4);
+            let (_, r20) = rendre(etat, id, ecran, 20);
+            assert!(nb > 10, "{id} : fenêtre vide ({nb} textes) à {ecran:?}");
+            assert_eq!(r4.size(), r20.size(), "{id} grandit à {ecran:?}");
+            let e = Rect::from_min_size(Pos2::ZERO, ecran);
+            assert!(
+                r20.width() <= ecran.x && r20.height() <= ecran.y,
+                "{id} : {r20:?} plus grande que {e:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn apercu_du_renommage_taille_stable() {
+        let mut etat = Etat::nouveau();
+        let id = etat.films[0].id;
+        etat.appliquer(Message::Selectionner {
+            id,
+            ctrl: false,
+            maj: false,
+        });
+        etat.appliquer(Message::OuvrirDialogue(TypeDialogue::ApercuRenommage));
+        verifier_stable(&etat, "dlg_renommage");
+    }
+
+    #[test]
+    fn recherche_manuelle_taille_stable() {
+        let mut etat = Etat::nouveau();
+        let id = etat.films[0].id;
+        etat.appliquer(Message::Selectionner {
+            id,
+            ctrl: false,
+            maj: false,
+        });
+        etat.appliquer(Message::Commande(Commande::ScrapeInteractif));
+        verifier_stable(&etat, "dlg_recherche");
     }
 }
