@@ -36,6 +36,11 @@
 //! - [`gestion_films`] : sélection, films manquants d'une saga, retrait,
 //!   annulation du renommage ;
 //! - [`analyse`] : analyse des flux des fichiers médias (ffprobe, MediaInfo) ;
+//! - [`export`] : export de la bibliothèque par modèles (HTML, CSV, texte) ;
+//! - [`nettoyage`] : fichiers inutiles des dossiers de films (corbeille) ;
+//! - [`evaluations`] : rafraîchissement des notes ;
+//! - [`edition_lot`] : édition globale de films et de séries ;
+//! - [`gestion_series`] : état « vu » et retrait des séries ;
 //! - [`journal`] : journalisation dans `logs/`.
 
 pub mod analyse;
@@ -44,11 +49,16 @@ pub mod artwork;
 pub mod conversion;
 pub mod conversion_serie;
 pub mod ecriture_nfo;
+pub mod edition_lot;
 pub mod erreur;
+pub mod evaluations;
 pub mod evenements;
+pub mod export;
 pub mod gestion_films;
+pub mod gestion_series;
 pub mod journal;
 pub mod metadonnees;
+pub mod nettoyage;
 pub mod renommage;
 pub mod renommage_serie;
 pub mod series;
@@ -60,11 +70,18 @@ pub use application::{Application, ConfigServices, OptionsDemarrage};
 pub use artwork::ConfigArtwork;
 pub use conversion::ConfigMetadonnees;
 pub use conversion_serie::ConfigSerie;
+pub use edition_lot::RapportLot;
 pub use erreur::{ErreurApp, Resultat};
+pub use evaluations::RapportEvaluations;
 pub use evenements::{Evenement, IdTache, IssueTache, NiveauMessage};
+pub use export::{ModeleExport, OptionsExport, RapportExport, TypeExport};
 pub use gestion_films::{DOSSIER_CORBEILLE_SOURCE, RapportRetrait};
+pub use gestion_series::{CibleVu, RapportVu};
 pub use journal::OptionsJournal;
+pub use mediamanager_core::edition_lot::{ModificationsLot, ModificationsLotSeries};
+pub use mediamanager_core::nettoyage::RaisonInutile;
 pub use metadonnees::{RapportScrap, RequeteFilm};
+pub use nettoyage::{FichierInutile, RapportNettoyage};
 pub use renommage::{ApercuRenommage, RapportRenommage};
 pub use series::RequeteSerie;
 pub use sources::{OptionsMiseAJour, RapportMiseAJour, TraitementDisparus};

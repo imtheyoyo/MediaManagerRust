@@ -13,6 +13,9 @@ use crate::etat::{Message, Niveau};
 use crate::modele::{Film, normaliser};
 use crate::renommage::{self, ApercuFilm, LigneFichier};
 use crate::taches::{IssueTache, Repaint};
+use mediamanager_store::reglages::{
+    QualiteCacheImages, ReglagesFilms, ReglagesGeneraux, ReglagesSeries, TailleCacheImages,
+};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -227,6 +230,41 @@ pub struct ReglagesServices {
     pub afficher_episodes_manquants: bool,
     pub afficher_speciaux_manquants: bool,
     pub afficher_non_diffuses: bool,
+    /// Réglages complets des films du stockage. Les champs déjà portés par les champs
+    /// ci-dessus (sources, dossiers ignorés, langue, renommage automatique) y sont ignorés à
+    /// l'enregistrement : les champs plats font foi.
+    pub films: ReglagesFilms,
+    /// Réglages complets des séries (mêmes règles : sources et affichage des épisodes
+    /// manquants sont portés par les champs plats).
+    pub series: ReglagesSeries,
+    pub generales: OptionsGenerales,
+}
+
+/// Réglages généraux modifiables depuis l'interface, hors réseau et outils d'analyse
+/// (déjà portés par [`ReglagesServices`]). Aucun secret : la clé d'API n'y figure que sous
+/// forme d'un indicateur de présence.
+#[derive(Clone, Debug, PartialEq)]
+pub struct OptionsGenerales {
+    pub extensions_video: Vec<String>,
+    pub extensions_audio: Vec<String>,
+    pub extensions_sous_titres: Vec<String>,
+    /// Expressions régulières des fichiers indésirables.
+    pub motifs_nettoyage: Vec<String>,
+    /// Articles déplacés en fin de titre pour le tri.
+    pub prefixes_titre: Vec<String>,
+    pub chemin_yt_dlp: String,
+    pub lecteur_media: String,
+    pub vider_corbeille_a_la_sortie: bool,
+    pub taille_cache_images: TailleCacheImages,
+    pub qualite_cache_images: QualiteCacheImages,
+    /// Une clé d'API TMDB est enregistrée dans le coffre (information seule, non enregistrée).
+    pub cle_tmdb_definie: bool,
+}
+
+impl Default for OptionsGenerales {
+    fn default() -> Self {
+        crate::conversion::generales(&ReglagesGeneraux::default())
+    }
 }
 
 /// Épisode affiché dans l'arbre des séries.

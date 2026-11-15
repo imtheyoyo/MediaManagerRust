@@ -2,13 +2,10 @@
 //! Pas de bouton « Appliquer » : chaque contrôle modifie immédiatement le réglage ; les
 //! réglages des services sont enregistrés à la fermeture du dialogue.
 
-use super::Sortie;
+use super::{Sortie, reglages_pages};
 use crate::etat::{ActionDialogue, Etat, EtatDialogueReglages, Message};
-use crate::i18n::Langue;
 use crate::modele::normaliser;
-use crate::polices;
-use crate::reglages::{Page, Reglages, Theme};
-use crate::selecteur::{CibleDossier, CibleFichier};
+use crate::reglages::{Page, Reglages};
 use crate::source_donnees::ReglagesServices;
 use eframe::egui::{self, Align, Layout, Modal, RichText, ScrollArea, TextEdit, Vec2};
 
@@ -117,13 +114,13 @@ fn contenu(
             let reste = ui.available_size();
             ui.allocate_ui_with_layout(reste, Layout::top_down(Align::Min), |ui| {
                 ui.set_min_size(reste);
-                ui.label(RichText::new(i.t(d.page.cle())).heading());
+                ui.label(RichText::new(d.page.titre(i)).heading());
                 ui.add_space(6.0);
                 ScrollArea::vertical()
                     .id_salt("page_reglages")
                     .auto_shrink([false, false])
                     .show(ui, |ui| {
-                        page(ui, etat, d, r, s, sortie);
+                        reglages_pages::page(ui, etat, d, r, s, sortie);
                     });
             });
         },
@@ -134,384 +131,6 @@ fn contenu(
             sortie.push(Message::FermerDialogue);
         }
     });
-}
-
-/// Liste de dossiers éditable : retrait par ✖, ajout par le sélecteur natif (« Parcourir… »)
-/// ou, en repli, par saisie manuelle.
-fn liste_dossiers(
-    ui: &mut egui::Ui,
-    etat: &Etat,
-    dossiers: &mut Vec<String>,
-    saisie: &str,
-    message: fn(String) -> ActionDialogue,
-    cible: CibleDossier,
-    sortie: &mut Sortie,
-) {
-    let i = &etat.i18n;
-    let mut a_retirer = None;
-    if dossiers.is_empty() {
-        ui.label(RichText::new(i.t("gui.folder.none")).weak());
-    }
-    for (n, dossier) in dossiers.iter().enumerate() {
-        ui.horizontal(|ui| {
-            ui.label(dossier);
-            if ui
-                .small_button("✖")
-                .on_hover_text(i.t("Button.remove"))
-                .clicked()
-            {
-                a_retirer = Some(n);
-            }
-        });
-    }
-    if let Some(n) = a_retirer {
-        dossiers.remove(n);
-    }
-    ui.add_space(4.0);
-    if ui
-        .button(format!("{}…", i.t("gui.folder.browse")))
-        .on_hover_text(i.t("gui.folder.choose"))
-        .clicked()
-    {
-        sortie.push(Message::ChoisirDossier(cible));
-    }
-    ui.horizontal(|ui| {
-        let mut texte = saisie.to_string();
-        let champ = ui.add(
-            TextEdit::singleline(&mut texte)
-                .hint_text(i.t("wizard.sources.hint"))
-                .desired_width(320.0),
-        );
-        if champ.changed() {
-            sortie.push(Message::Dialogue(message(texte.clone())));
-        }
-        let valide = champ.lost_focus() && ui.input(|e| e.key_pressed(egui::Key::Enter));
-        let nouveau = texte.trim().to_string();
-        if (ui.button(format!("+ {}", i.t("Button.add"))).clicked() || valide)
-            && !nouveau.is_empty()
-            && !dossiers.contains(&nouveau)
-        {
-            dossiers.push(nouveau);
-            sortie.push(Message::Dialogue(message(String::new())));
-        }
-    });
-}
-
-fn page(
-    ui: &mut egui::Ui,
-    etat: &Etat,
-    d: &EtatDialogueReglages,
-    r: &mut Reglages,
-    s: &mut ReglagesServices,
-    sortie: &mut Sortie,
-) {
-    let i = &etat.i18n;
-    match d.page {
-        Page::General => {
-            egui::Grid::new("g_general")
-                .num_columns(2)
-                .spacing([14.0, 8.0])
-                .show(ui, |ui| {
-                    ui.label(i.t("Settings.language"));
-                    egui::ComboBox::from_id_salt("langue")
-                        .selected_text(r.langue.nom_natif())
-                        .show_ui(ui, |ui| {
-                            for l in Langue::TOUTES {
-                                ui.selectable_value(&mut r.langue, l, l.nom_natif());
-                            }
-                        });
-                    ui.end_row();
-                    ui.label(i.t("Settings.uitheme"));
-                    ui.horizontal(|ui| {
-                        ui.selectable_value(
-                            &mut r.theme,
-                            Theme::Clair,
-                            i.t("Settings.theme.light"),
-                        );
-                        ui.selectable_value(
-                            &mut r.theme,
-                            Theme::Sombre,
-                            i.t("Settings.theme.dark"),
-                        );
-                    });
-                    ui.end_row();
-                });
-            ui.add_space(8.0);
-            ui.checkbox(&mut r.memoriser_module, i.t("Settings.rememberlastmodule"));
-            ui.checkbox(&mut r.afficher_memoire, i.t("Settings.showmemory"));
-            ui.add_space(8.0);
-            ui.label(RichText::new(i.t("gui.update.section")).strong());
-            ui.checkbox(&mut r.verifier_mises_a_jour, i.t("gui.update.atstartup"));
-            ui.horizontal(|ui| {
-                if ui.button(format!("{}…", i.t("gui.update.check"))).clicked() {
-                    sortie.push(Message::RechercherMiseAJour { manuel: true });
-                }
-                ui.label(
-                    RichText::new(etat.config_mise_a_jour.courant.libelle())
-                        .weak()
-                        .small(),
-                );
-            });
-            ui.add_space(8.0);
-            ui.label(
-                RichText::new(i.t("Settings.restartrequired"))
-                    .weak()
-                    .small(),
-            );
-        }
-        Page::Systeme => {
-            ui.label(RichText::new(i.t("Settings.proxy")).strong());
-            egui::Grid::new("g_proxy")
-                .num_columns(2)
-                .spacing([14.0, 6.0])
-                .show(ui, |ui| {
-                    ui.label(i.t("Settings.proxy.host"));
-                    ui.text_edit_singleline(&mut s.proxy_hote);
-                    ui.end_row();
-                    ui.label(i.t("Settings.proxy.port"));
-                    ui.text_edit_singleline(&mut s.proxy_port);
-                    ui.end_row();
-                    ui.label(i.t("Settings.proxy.user"));
-                    ui.text_edit_singleline(&mut s.proxy_utilisateur);
-                    ui.end_row();
-                    ui.label(i.t("Settings.proxy.password"));
-                    ui.add(TextEdit::singleline(&mut s.proxy_mot_de_passe).password(true));
-                    ui.end_row();
-                });
-            ui.add_space(8.0);
-            ui.checkbox(&mut s.ignorer_erreurs_ssl, i.t("Settings.ignoresslerrors"));
-            ui.horizontal(|ui| {
-                ui.label(i.t("Settings.parallel"));
-                ui.add(egui::DragValue::new(&mut s.threads_telechargement).range(1..=16));
-            });
-        }
-        Page::ServicesExternes => {
-            ui.label(RichText::new(i.t("wizard.scraper.apikey")).strong());
-            ui.horizontal(|ui| {
-                let mut cle = d.saisie_cle.clone();
-                if ui
-                    .add(
-                        TextEdit::singleline(&mut cle)
-                            .password(true)
-                            .desired_width(320.0),
-                    )
-                    .changed()
-                {
-                    sortie.push(Message::Dialogue(ActionDialogue::ReglagesSaisieCle(cle)));
-                }
-                if ui
-                    .add_enabled(
-                        !d.saisie_cle.trim().is_empty(),
-                        egui::Button::new(i.t("Button.save")),
-                    )
-                    .clicked()
-                {
-                    sortie.push(Message::Dialogue(ActionDialogue::ReglagesEnregistrerCle));
-                }
-            });
-            ui.label(
-                RichText::new(i.t("wizard.scraper.apikey.note"))
-                    .weak()
-                    .small(),
-            );
-        }
-        Page::Divers => {
-            ui.checkbox(&mut s.cache_images, i.t("Settings.imagecache"));
-            ui.checkbox(&mut s.corbeille, i.t("Settings.trash"));
-        }
-        Page::FilmsSource => {
-            ui.label(RichText::new(i.t("Settings.folders")).strong());
-            liste_dossiers(
-                ui,
-                etat,
-                &mut s.sources_films,
-                &d.saisie_source,
-                ActionDialogue::ReglagesSaisieSource,
-                CibleDossier::SourceFilms,
-                sortie,
-            );
-            ui.add_space(10.0);
-            ui.label(RichText::new(i.t("Settings.exclusions")).strong());
-            let mut texte = s.dossiers_ignores.join(", ");
-            if ui
-                .add(TextEdit::singleline(&mut texte).desired_width(420.0))
-                .changed()
-            {
-                s.dossiers_ignores = texte
-                    .split(',')
-                    .map(|x| x.trim().to_string())
-                    .filter(|x| !x.is_empty())
-                    .collect();
-            }
-        }
-        Page::FilmsExtracteur => {
-            ui.horizontal(|ui| {
-                ui.label(i.t("wizard.scraper.language"));
-                ui.add(TextEdit::singleline(&mut s.langue_scraping).desired_width(60.0));
-            });
-            ui.checkbox(
-                &mut s.renommer_apres_scraping,
-                i.t("Settings.renamer.afterscrape"),
-            );
-        }
-        Page::FilmsRenommeur => {
-            egui::Grid::new("g_renamer")
-                .num_columns(2)
-                .spacing([14.0, 6.0])
-                .show(ui, |ui| {
-                    ui.label(i.t("Settings.renamer.folder"));
-                    ui.add(TextEdit::singleline(&mut s.gabarit_dossier_film).desired_width(380.0));
-                    ui.end_row();
-                    ui.label(i.t("Settings.renamer.file"));
-                    ui.add(TextEdit::singleline(&mut s.gabarit_fichier_film).desired_width(380.0));
-                    ui.end_row();
-                    ui.label(i.t("Settings.renamer.replacement"));
-                    ui.add(TextEdit::singleline(&mut s.caractere_remplacement).desired_width(40.0));
-                    ui.end_row();
-                });
-            ui.add_space(8.0);
-            ui.horizontal(|ui| {
-                ui.checkbox(&mut s.remplacer_espaces, i.t("Settings.renamer.spaces"));
-                ui.add_enabled(
-                    s.remplacer_espaces,
-                    TextEdit::singleline(&mut s.caractere_espace).desired_width(30.0),
-                );
-            });
-            ui.checkbox(&mut s.ascii_seulement, i.t("Settings.renamer.ascii"));
-            ui.checkbox(
-                &mut s.supprimer_dossiers_vides,
-                i.t("Settings.renamer.cleanup"),
-            );
-            ui.add_space(8.0);
-            ui.label(RichText::new(i.t("Settings.renamer.hint")).weak().small());
-        }
-        Page::Series => {
-            ui.label(RichText::new(i.t("Settings.folders")).strong());
-            liste_dossiers(
-                ui,
-                etat,
-                &mut s.sources_series,
-                &d.saisie_source_serie,
-                ActionDialogue::ReglagesSaisieSourceSerie,
-                CibleDossier::SourceSeries,
-                sortie,
-            );
-            ui.add_space(10.0);
-            ui.label(RichText::new(i.t("gui.series.display")).strong());
-            ui.checkbox(
-                &mut s.afficher_episodes_manquants,
-                i.t("gui.series.showmissing"),
-            );
-            ui.add_enabled_ui(s.afficher_episodes_manquants, |ui| {
-                ui.checkbox(
-                    &mut s.afficher_speciaux_manquants,
-                    i.t("gui.series.showmissingspecials"),
-                );
-                ui.checkbox(&mut s.afficher_non_diffuses, i.t("gui.series.showunaired"));
-            });
-            ui.add_space(10.0);
-            ui.label(RichText::new(i.t("Settings.renamer")).strong());
-            egui::Grid::new("g_renamer_series")
-                .num_columns(2)
-                .spacing([14.0, 6.0])
-                .show(ui, |ui| {
-                    ui.label(i.t("Settings.renamer.folder"));
-                    ui.add(TextEdit::singleline(&mut s.gabarit_dossier_serie).desired_width(380.0));
-                    ui.end_row();
-                    ui.label(i.t("gui.renamer.seasonfolder"));
-                    ui.add(
-                        TextEdit::singleline(&mut s.gabarit_dossier_saison).desired_width(380.0),
-                    );
-                    ui.end_row();
-                    ui.label(i.t("Settings.renamer.file"));
-                    ui.add(
-                        TextEdit::singleline(&mut s.gabarit_fichier_episode).desired_width(380.0),
-                    );
-                    ui.end_row();
-                });
-        }
-        Page::OutilsExternes => page_outils(ui, etat, d, s, sortie),
-        _ => {
-            ui.label(RichText::new(i.t("Settings.todo")).weak());
-        }
-    }
-}
-
-/// Page « Outils externes » : chemin de ffprobe / MediaInfo, sélecteur de fichier et test.
-fn page_outils(
-    ui: &mut egui::Ui,
-    etat: &Etat,
-    d: &EtatDialogueReglages,
-    s: &mut ReglagesServices,
-    sortie: &mut Sortie,
-) {
-    let i = &etat.i18n;
-    ui.label(RichText::new(i.t("gui.tools.path")).strong());
-    ui.horizontal(|ui| {
-        ui.add(
-            TextEdit::singleline(&mut s.chemin_outils)
-                .hint_text(i.t("gui.tools.auto"))
-                .desired_width(360.0),
-        );
-        if ui
-            .button(format!("{}…", i.t("gui.folder.browse")))
-            .on_hover_text(i.t("gui.tools.choose"))
-            .clicked()
-        {
-            sortie.push(Message::ChoisirFichier(CibleFichier::OutilsAnalyse));
-        }
-        if ui
-            .add_enabled(
-                !d.test_outils_en_cours,
-                egui::Button::new(i.t("gui.tools.test")),
-            )
-            .clicked()
-        {
-            sortie.push(Message::TesterOutils);
-        }
-    });
-    ui.add_space(4.0);
-    if d.test_outils_en_cours {
-        ui.horizontal(|ui| {
-            ui.spinner();
-            ui.label(i.t("gui.tools.testing"));
-        });
-    }
-    match &d.test_outils {
-        Some(Ok(diag)) if diag.disponible() => {
-            for (nom, outil) in [("ffprobe", &diag.ffprobe), ("MediaInfo", &diag.mediainfo)] {
-                let texte = match outil {
-                    Some(o) => {
-                        let version = o
-                            .version
-                            .clone()
-                            .unwrap_or_else(|| i.t("gui.tools.noversion"));
-                        format!("{} {nom} : {version}\n    {}", polices::COCHE, o.chemin)
-                    }
-                    None => format!("{nom} : {}", i.t("gui.tools.notfound")),
-                };
-                ui.label(texte);
-            }
-        }
-        Some(Ok(_)) => {
-            ui.label(
-                RichText::new(format!(
-                    "{} {}",
-                    polices::AVERTISSEMENT,
-                    i.t("gui.tools.none")
-                ))
-                .color(crate::theme::ROUGE),
-            );
-        }
-        Some(Err(e)) => {
-            ui.label(
-                RichText::new(format!("{} {e}", polices::AVERTISSEMENT)).color(crate::theme::ROUGE),
-            );
-        }
-        None => {}
-    }
-    ui.add_space(8.0);
-    ui.label(RichText::new(i.t("gui.tools.hint")).weak().small());
 }
 
 #[cfg(test)]
@@ -611,8 +230,132 @@ mod tests {
         let (textes, _, _) = rendre(&etat, Vec2::new(1280.0, 800.0), 3);
         let parcourir = format!("{}…", etat.i18n.t("gui.folder.browse"));
         assert!(textes.iter().any(|(t, _)| *t == parcourir));
-        etat.appliquer(Message::OuvrirReglagesPage(Page::Series));
+        etat.appliquer(Message::OuvrirReglagesPage(Page::SeriesSource));
         let (textes, _, _) = rendre(&etat, Vec2::new(1280.0, 800.0), 3);
         assert!(textes.iter().any(|(t, _)| *t == parcourir));
+    }
+
+    /// Premiers libellés (clés de traduction) visibles en haut de chaque page.
+    fn libelles_attendus(page: Page) -> &'static [&'static str] {
+        use Page::*;
+        match page {
+            General => &["Settings.language", "Settings.uitheme"],
+            TypesFichiers => &["gui.settings.ext.video"],
+            TriTitre => &["gui.settings.sort.prefixes"],
+            OutilsExternes => &["gui.tools.path"],
+            MaterielsExternes => &["gui.settings.soon", "gui.settings.soon.devices"],
+            ServicesExternes => &["gui.settings.keys.tmdb"],
+            Systeme => &["Settings.proxy", "Settings.proxy.host"],
+            Ard => &["gui.settings.soon", "gui.settings.soon.ard"],
+            Divers => &["Settings.imagecache"],
+            Films => &["gui.settings.section.tasks", "Settings.renamer.afterscrape"],
+            Series => &["gui.settings.section.tasks"],
+            FilmsInterface | SeriesInterface => &["gui.settings.soon", "gui.settings.soon.columns"],
+            FilmsSource | SeriesSource => &["Settings.folders"],
+            FilmsNfo | SeriesNfo => &["gui.settings.nfo.format"],
+            FilmsExtracteur | SeriesExtracteur => &["gui.settings.scraper.language"],
+            FilmsIllustrations | SeriesIllustrations => &["gui.settings.art.best"],
+            FilmsBandesAnnonces | SeriesBandesAnnonces => &["gui.settings.trailer.auto"],
+            FilmsSousTitres | SeriesSousTitres => &["gui.settings.subtitle.language"],
+            FilmsRenommeur => &["Settings.renamer.folder", "Settings.renamer.file"],
+            SeriesRenommeur => &["Settings.renamer.folder"],
+            FilmsPostTraitement | SeriesPostTraitement => {
+                &["gui.settings.soon", "gui.settings.soon.scripts"]
+            }
+            Collections => &["gui.settings.sets.datafolder"],
+        }
+    }
+
+    /// Toutes les pages de l'arbre, à deux tailles d'écran : titre et libellés présents, aucun
+    /// texte de traduction manquant, fenêtre dans l'écran et de taille identique entre
+    /// l'image 4 et l'image 20.
+    #[test]
+    fn toutes_les_pages_dessinees_et_taille_stable() {
+        let mut etat = Etat::nouveau();
+        for ecran in [Vec2::new(1914.0, 1026.0), Vec2::new(1050.0, 700.0)] {
+            let ecran_rect = Rect::from_min_size(Pos2::ZERO, ecran);
+            for (page, _, cle) in Page::ARBRE {
+                etat.appliquer(Message::OuvrirReglagesPage(*page));
+                let i = &etat.i18n;
+                let (textes, rect, sortie) = rendre(&etat, ecran, 4);
+                let present = |t: &str| textes.iter().any(|(x, _)| x == t);
+                let contexte = format!("page {page:?} ({cle}) à {ecran:?}");
+                assert!(present(&page.titre(i)), "titre absent : {contexte}");
+                for libelle in libelles_attendus(*page) {
+                    assert!(present(&i.t(libelle)), "{libelle} absent : {contexte}");
+                }
+                assert!(
+                    textes.iter().all(|(t, _)| !t.contains("???")),
+                    "traduction manquante : {contexte}"
+                );
+                assert!(
+                    ecran_rect.contains_rect(rect),
+                    "{rect:?} hors écran : {contexte}"
+                );
+                let (_, plus_tard, _) = rendre(&etat, ecran, 20);
+                assert_eq!(
+                    rect.size(),
+                    plus_tard.size(),
+                    "taille instable : {contexte}"
+                );
+                assert!(
+                    sortie.is_empty(),
+                    "message émis sans interaction : {sortie:?} ({contexte})"
+                );
+            }
+        }
+    }
+
+    /// Les réglages ne sont jamais modifiés par le seul affichage d'une page (aucune
+    /// normalisation silencieuse qui déclencherait un enregistrement).
+    #[test]
+    fn afficher_une_page_ne_modifie_rien() {
+        let mut etat = Etat::nouveau();
+        for (page, _, _) in Page::ARBRE {
+            etat.appliquer(Message::OuvrirReglagesPage(*page));
+            let (_, _, sortie) = rendre(&etat, Vec2::new(1280.0, 800.0), 6);
+            assert!(
+                !sortie.iter().any(|m| matches!(
+                    m,
+                    Message::AppliquerReglages(_) | Message::AppliquerServices(_)
+                )),
+                "{page:?}"
+            );
+        }
+    }
+
+    /// Chaque clé de traduction citée par les pages existe en français et en anglais, et chaque
+    /// case ou libellé de champ a son infobulle (`clé.tip`).
+    #[test]
+    fn cles_des_pages_traduites_avec_infobulles() {
+        use crate::i18n::analyser;
+        let fr = analyser(include_str!("../../i18n/fr.properties"));
+        let en = analyser(include_str!("../../i18n/en.properties"));
+        let source = include_str!("reglages_pages.rs");
+        let cles =
+            regex::Regex::new(r#""((?:gui|Settings|wizard|Button)\.[A-Za-z0-9_.]+)""#).unwrap();
+        for c in cles.captures_iter(source) {
+            let cle = &c[1];
+            assert!(fr.contains_key(cle), "absente du français : {cle}");
+            assert!(en.contains_key(cle), "absente de l'anglais : {cle}");
+        }
+        let champs = regex::Regex::new(
+            r#"(?s)\b(?:case|etiquette)\(\s*ui,\s*i,\s*(?:[^,"()]+,\s*)?"([^"]+)""#,
+        )
+        .unwrap();
+        let mut n = 0;
+        for c in champs.captures_iter(source) {
+            let tip = format!("{}.tip", &c[1]);
+            assert!(
+                fr.contains_key(&tip),
+                "infobulle absente du français : {tip}"
+            );
+            assert!(
+                en.contains_key(&tip),
+                "infobulle absente de l'anglais : {tip}"
+            );
+            n += 1;
+        }
+        assert!(n > 40, "motif de contrôle inopérant ({n} champs trouvés)");
     }
 }

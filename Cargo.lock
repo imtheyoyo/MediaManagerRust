@@ -2609,6 +2609,7 @@ dependencies = [
 name = "mediamanager-app"
 version = "0.1.0"
 dependencies = [
+ "image",
  "mediamanager-core",
  "mediamanager-gabarit",
  "mediamanager-scrapers",
@@ -2621,6 +2622,7 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
+ "walkdir",
  "wiremock",
 ]
 

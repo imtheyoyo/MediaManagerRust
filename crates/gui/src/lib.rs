@@ -9,6 +9,7 @@ pub mod dialogues;
 pub mod donnees;
 pub mod etat;
 pub mod filtres;
+pub mod gabarits;
 pub mod i18n;
 pub mod icones;
 pub mod images;
@@ -24,6 +25,7 @@ pub mod source_application;
 pub mod source_donnees;
 pub mod taches;
 pub mod theme;
+pub mod validation;
 pub mod vue;
 
 use mediamanager_app::{Application as Services, ErreurApp, OptionsDemarrage};

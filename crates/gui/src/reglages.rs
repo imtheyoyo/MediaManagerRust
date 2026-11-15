@@ -76,6 +76,15 @@ pub enum Page {
     FilmsPostTraitement,
     Collections,
     Series,
+    SeriesInterface,
+    SeriesSource,
+    SeriesNfo,
+    SeriesExtracteur,
+    SeriesIllustrations,
+    SeriesBandesAnnonces,
+    SeriesSousTitres,
+    SeriesRenommeur,
+    SeriesPostTraitement,
 }
 
 impl Page {
@@ -102,6 +111,15 @@ impl Page {
         (Page::FilmsPostTraitement, 1, "Settings.postprocessing"),
         (Page::Collections, 0, "Settings.moviesets"),
         (Page::Series, 0, "Settings.tvshows"),
+        (Page::SeriesInterface, 1, "Settings.movie.ui"),
+        (Page::SeriesSource, 1, "Settings.source"),
+        (Page::SeriesNfo, 1, "Settings.nfo"),
+        (Page::SeriesExtracteur, 1, "Settings.scraper"),
+        (Page::SeriesIllustrations, 1, "Settings.artwork"),
+        (Page::SeriesBandesAnnonces, 1, "Settings.trailer"),
+        (Page::SeriesSousTitres, 1, "Settings.subtitle"),
+        (Page::SeriesRenommeur, 1, "Settings.renamer"),
+        (Page::SeriesPostTraitement, 1, "Settings.postprocessing"),
     ];
 
     pub fn cle(self) -> &'static str {
@@ -113,15 +131,63 @@ impl Page {
     }
 }
 
+impl Page {
+    /// Page de niveau 0 qui contient cette page (elle-même pour une page de niveau 0).
+    pub fn racine(self) -> Page {
+        let mut courante = Page::General;
+        for (p, niveau, _) in Page::ARBRE {
+            if *niveau == 0 {
+                courante = *p;
+            }
+            if *p == self {
+                return courante;
+            }
+        }
+        self
+    }
+
+    /// Titre affiché au-dessus de la page : « Films › Source de données » pour une sous-page
+    /// des films ou des séries (leurs sous-pages portent le même libellé), le libellé seul
+    /// sinon.
+    pub fn titre(self, i18n: &crate::i18n::I18n) -> String {
+        let racine = self.racine();
+        if matches!(racine, Page::Films | Page::Series) && racine != self {
+            format!("{} › {}", i18n.t(racine.cle()), i18n.t(self.cle()))
+        } else {
+            i18n.t(self.cle())
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::i18n::I18n;
 
     #[test]
+    fn titres_des_sous_pages() {
+        let i = I18n::default();
+        assert_eq!(Page::FilmsSource.racine(), Page::Films);
+        assert_eq!(Page::SeriesSource.racine(), Page::Series);
+        assert_eq!(Page::Systeme.racine(), Page::General);
+        assert_eq!(Page::Collections.racine(), Page::Collections);
+        assert_eq!(Page::Series.titre(&i), i.t("Settings.tvshows"));
+        assert_eq!(
+            Page::SeriesSource.titre(&i),
+            format!("{} › {}", i.t("Settings.tvshows"), i.t("Settings.source"))
+        );
+        assert_ne!(Page::FilmsSource.titre(&i), Page::SeriesSource.titre(&i));
+        assert_eq!(Page::Divers.titre(&i), i.t("Settings.misc"));
+    }
+
+    #[test]
     fn arbre_complet_et_traduit() {
         let i = I18n::default();
-        assert_eq!(Page::ARBRE.len(), 21);
+        assert_eq!(Page::ARBRE.len(), 30);
+        let mut vues = std::collections::HashSet::new();
+        for (p, _, _) in Page::ARBRE {
+            assert!(vues.insert(*p), "page en double : {p:?}");
+        }
         for (p, _, cle) in Page::ARBRE {
             assert!(i.brut(cle).is_some());
             assert_eq!(p.cle(), *cle);

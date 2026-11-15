@@ -1,10 +1,11 @@
 //! Point d'entrée des interfaces : [`Application`].
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc::Receiver;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
+use mediamanager_core::edition_lot::{ModificationsLot, ModificationsLotSeries};
 use mediamanager_core::flux::ConfigOutils;
 use mediamanager_core::modele::{Episode, Film, Saga, Serie};
 use mediamanager_core::nfo::{NommageNfoFilm, NommageNfoSaison};
@@ -19,11 +20,16 @@ use crate::analyse::{self, DiagnosticOutils, RapportAnalyse};
 use crate::artwork::ConfigArtwork;
 use crate::conversion::ConfigMetadonnees;
 use crate::conversion_serie::ConfigSerie;
+use crate::edition_lot::{self, RapportLot};
 use crate::erreur::{ErreurApp, Resultat};
+use crate::evaluations::{self, RapportEvaluations};
 use crate::evenements::{Diffuseur, Evenement};
+use crate::export::{self, ModeleExport, OptionsExport, RapportExport, TypeExport};
 use crate::gestion_films::{self, RapportRetrait};
+use crate::gestion_series::{self, CibleVu, RapportVu};
 use crate::journal::{self, OptionsJournal};
 use crate::metadonnees::{self, RapportScrap, RequeteFilm};
+use crate::nettoyage::{self, FichierInutile, RapportNettoyage};
 use crate::renommage::ApercuRenommage;
 use crate::renommage::{self, RapportRenommage};
 use crate::series::{self, RequeteSerie};
@@ -606,6 +612,142 @@ impl Application {
             "Analyse des fichiers médias",
             TypeTache::Principale,
             move |n, ctx| analyse::analyser_medias(n, ctx, &films, &series),
+        )
+    }
+}
+
+// -- Export, nettoyage, évaluations, édition globale, gestion des séries ------
+
+impl Application {
+    /// Dossier des modèles d'export de l'utilisateur
+    /// (`<données>/modeles_export`).
+    pub fn dossier_modeles_export(&self) -> PathBuf {
+        self.noyau
+            .verrou()
+            .dossiers
+            .donnees
+            .join(export::DOSSIER_MODELES_EXPORT)
+    }
+
+    /// Modèles d'export disponibles pour un type : intégrés, puis ceux du
+    /// dossier de l'utilisateur.
+    pub fn modeles_export(&self, type_export: TypeExport) -> Vec<ModeleExport> {
+        export::modeles_disponibles(&self.dossier_modeles_export(), type_export)
+    }
+
+    /// Exporte des films (`None` = tous) avec un modèle, dans
+    /// `dossier_sortie` (tâche principale).
+    pub fn exporter_films(
+        &self,
+        ids: Option<Vec<String>>,
+        modele: &ModeleExport,
+        dossier_sortie: &Path,
+        options: OptionsExport,
+    ) -> PoigneeTache<RapportExport> {
+        let (modele, sortie) = (modele.clone(), dossier_sortie.to_path_buf());
+        self.lancer("Export des films", TypeTache::Principale, move |n, ctx| {
+            export::exporter_films(n, ctx, ids.as_deref(), &modele, &sortie, &options)
+        })
+    }
+
+    /// Exporte des séries (`None` = toutes) avec un modèle (tâche principale).
+    pub fn exporter_series(
+        &self,
+        ids: Option<Vec<String>>,
+        modele: &ModeleExport,
+        dossier_sortie: &Path,
+        options: OptionsExport,
+    ) -> PoigneeTache<RapportExport> {
+        let (modele, sortie) = (modele.clone(), dossier_sortie.to_path_buf());
+        self.lancer(
+            "Export des séries",
+            TypeTache::Principale,
+            move |n, ctx| {
+                export::exporter_series(n, ctx, ids.as_deref(), &modele, &sortie, &options)
+            },
+        )
+    }
+
+    /// Analyse les fichiers inutiles des films choisis (lecture seule ; motifs
+    /// des réglages). Voir [`crate::nettoyage`].
+    pub fn analyser_nettoyage(&self, ids: &[String]) -> Resultat<Vec<FichierInutile>> {
+        nettoyage::analyser(&self.noyau, ids)
+    }
+
+    /// Déplace les fichiers de la liste dans la corbeille de leur source
+    /// (tâche principale). Chaque élément est revérifié : jamais hors du
+    /// dossier du film, jamais de suppression définitive.
+    pub fn executer_nettoyage(&self, liste: Vec<FichierInutile>) -> PoigneeTache<RapportNettoyage> {
+        self.lancer("Nettoyage", TypeTache::Principale, move |n, ctx| {
+            nettoyage::executer(n, ctx, &liste)
+        })
+    }
+
+    /// Rafraîchit les notes d'une sélection de films (TMDB) sans toucher au
+    /// reste des métadonnées (tâche principale).
+    pub fn recuperer_evaluations(&self, ids: Vec<String>) -> PoigneeTache<RapportEvaluations> {
+        self.lancer(
+            "Récupération des évaluations",
+            TypeTache::Principale,
+            move |n, ctx| evaluations::recuperer(n, ctx, &ids),
+        )
+    }
+
+    /// Édition globale de films (tâche principale) : enregistrement, NFO
+    /// existants réécrits, événements `FilmModifie`.
+    pub fn modifier_en_lot_films(
+        &self,
+        ids: Vec<String>,
+        modifications: ModificationsLot,
+    ) -> PoigneeTache<RapportLot> {
+        self.lancer(
+            "Édition globale des films",
+            TypeTache::Principale,
+            move |n, ctx| edition_lot::modifier_films(n, ctx, &ids, &modifications),
+        )
+    }
+
+    /// Édition globale de séries (tâche principale).
+    pub fn modifier_en_lot_series(
+        &self,
+        ids: Vec<String>,
+        modifications: ModificationsLotSeries,
+    ) -> PoigneeTache<RapportLot> {
+        self.lancer(
+            "Édition globale des séries",
+            TypeTache::Principale,
+            move |n, ctx| edition_lot::modifier_series(n, ctx, &ids, &modifications),
+        )
+    }
+
+    /// Marque vu / non vu des séries, saisons ou épisodes. `etat = None` :
+    /// bascule (tout devient vu, sauf si tout l'était déjà). Publie
+    /// `SerieModifiee`.
+    pub fn basculer_vu_series(
+        &self,
+        cibles: &[CibleVu],
+        etat: Option<bool>,
+    ) -> Resultat<RapportVu> {
+        let (rapport, evenements) = gestion_series::basculer_vu(&self.noyau, cibles, etat)?;
+        for e in &evenements {
+            self.diffuseur.publier(e);
+        }
+        Ok(rapport)
+    }
+
+    /// Retire des séries de la base (tâche principale). Avec
+    /// `supprimer_fichiers`, leurs fichiers vont dans `<source>/.corbeille`
+    /// (jamais de suppression définitive) ; les séries verrouillées sont
+    /// refusées.
+    pub fn retirer_series(
+        &self,
+        ids: Vec<String>,
+        supprimer_fichiers: bool,
+    ) -> PoigneeTache<RapportRetrait> {
+        self.lancer(
+            "Retrait de séries",
+            TypeTache::Principale,
+            move |n, ctx| gestion_series::retirer_series(n, ctx, &ids, supprimer_fichiers),
         )
     }
 }

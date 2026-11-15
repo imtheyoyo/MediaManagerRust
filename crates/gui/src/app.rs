@@ -452,17 +452,7 @@ mod tests {
             Message::Commande(Commande::TrouverManquants),
             Message::FermerDialogue,
         ];
-        for page in [
-            Page::General,
-            Page::Systeme,
-            Page::ServicesExternes,
-            Page::Divers,
-            Page::FilmsSource,
-            Page::FilmsExtracteur,
-            Page::FilmsRenommeur,
-            Page::Series,
-            Page::OutilsExternes,
-        ] {
+        for (page, _, _) in Page::ARBRE.iter().copied() {
             etapes.push(Message::OuvrirReglagesPage(page));
         }
         etapes.extend([

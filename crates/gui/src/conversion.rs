@@ -4,9 +4,10 @@
 use crate::modele::{BandeAnnonceFilm, FichierFilm, Film, TypeFichier};
 use crate::renommage::{ApercuFilm, LigneFichier};
 use crate::source_donnees::{
-    ElementManquant, EpisodeAffichage, GenreImage, ReglagesServices, SagaAffichage,
-    SaisonAffichage, SerieAffichage, StatutSerie,
+    ElementManquant, EpisodeAffichage, GenreImage, OptionsGenerales, ReglagesServices,
+    SagaAffichage, SaisonAffichage, SerieAffichage, StatutSerie,
 };
+use crate::validation::{self, ErreurChamp};
 use mediamanager_core::flux::normalisation::format_video;
 use mediamanager_core::modele::commun::cles_id;
 use mediamanager_core::modele::{
@@ -15,6 +16,7 @@ use mediamanager_core::modele::{
 };
 use mediamanager_core::renommage::{ElementPlan, NatureElement, PlanRenommage, titre_triable};
 use mediamanager_store::Reglages;
+use mediamanager_store::reglages::{ReglagesFilms, ReglagesGeneraux, ReglagesSeries};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
@@ -647,7 +649,162 @@ pub fn services(r: &Reglages) -> ReglagesServices {
         afficher_episodes_manquants: r.series.afficher_episodes_manquants,
         afficher_speciaux_manquants: r.series.afficher_speciaux_manquants,
         afficher_non_diffuses: r.series.afficher_non_diffuses,
+        films: f.clone(),
+        series: r.series.clone(),
+        generales: generales(g),
     }
+}
+
+/// Réglages généraux du stockage → options affichées (sans aucun secret).
+pub fn generales(g: &ReglagesGeneraux) -> OptionsGenerales {
+    OptionsGenerales {
+        extensions_video: g.extensions_video.clone(),
+        extensions_audio: g.extensions_audio.clone(),
+        extensions_sous_titres: g.extensions_sous_titres.clone(),
+        motifs_nettoyage: g.motifs_nettoyage.clone(),
+        prefixes_titre: g.prefixes_titre.clone(),
+        chemin_yt_dlp: g.chemin_yt_dlp.clone(),
+        lecteur_media: g.lecteur_media.clone(),
+        vider_corbeille_a_la_sortie: g.vider_corbeille_a_la_sortie,
+        taille_cache_images: g.taille_cache_images,
+        qualite_cache_images: g.qualite_cache_images,
+        cle_tmdb_definie: !g.cle_api_tmdb.trim().is_empty(),
+    }
+}
+
+/// Reporte les options générales dans les réglages du stockage ; les éléments invalides ou
+/// en double des listes sont écartés.
+fn appliquer_generales(o: &OptionsGenerales, g: &mut ReglagesGeneraux) {
+    let liste =
+        |src: &[String], cible: &mut Vec<String>, f: fn(&str) -> Result<String, ErreurChamp>| {
+            let mut v: Vec<String> = Vec::new();
+            for x in src {
+                if let Ok(x) = f(x)
+                    && !v.contains(&x)
+                {
+                    v.push(x);
+                }
+            }
+            *cible = v;
+        };
+    liste(
+        &o.extensions_video,
+        &mut g.extensions_video,
+        validation::extension,
+    );
+    liste(
+        &o.extensions_audio,
+        &mut g.extensions_audio,
+        validation::extension,
+    );
+    liste(
+        &o.extensions_sous_titres,
+        &mut g.extensions_sous_titres,
+        validation::extension,
+    );
+    liste(
+        &o.motifs_nettoyage,
+        &mut g.motifs_nettoyage,
+        validation::motif,
+    );
+    liste(&o.prefixes_titre, &mut g.prefixes_titre, validation::mot);
+    g.chemin_yt_dlp = o.chemin_yt_dlp.trim().to_string();
+    g.lecteur_media = o.lecteur_media.trim().to_string();
+    g.vider_corbeille_a_la_sortie = o.vider_corbeille_a_la_sortie;
+    g.taille_cache_images = o.taille_cache_images;
+    g.qualite_cache_images = o.qualite_cache_images;
+}
+
+/// Reporte les réglages des films (hors champs plats de [`ReglagesServices`]) en validant
+/// chaque valeur ; une valeur invalide conserve l'ancienne.
+fn appliquer_films(o: &ReglagesFilms, f: &mut ReglagesFilms) {
+    f.ignorer_dossiers_nomedia = o.ignorer_dossiers_nomedia;
+    f.mots_exclus = o
+        .mots_exclus
+        .iter()
+        .filter_map(|m| validation::mot(m).ok())
+        .collect();
+    f.mise_a_jour_au_demarrage = o.mise_a_jour_au_demarrage;
+    f.cache_images_a_l_import = o.cache_images_a_l_import;
+    if !o.scraper.trim().is_empty() {
+        f.scraper = o.scraper.trim().to_string();
+    }
+    if let Ok(p) = validation::pays(&o.pays_certification) {
+        f.pays_certification = p;
+    }
+    f.seuil_scraper = validation::seuil(o.seuil_scraper);
+    f.repli_scraper = o.repli_scraper;
+    f.ne_pas_ecraser = o.ne_pas_ecraser;
+    f.recuperer_toutes_notes = o.recuperer_toutes_notes;
+    f.meilleure_image_auto = o.meilleure_image_auto;
+    f.taille_affiche = o.taille_affiche;
+    f.taille_fanart = o.taille_fanart;
+    f.langues_images = o
+        .langues_images
+        .iter()
+        .filter_map(|l| validation::langue(l).ok())
+        .collect();
+    f.fanarts_extra = o.fanarts_extra;
+    f.nombre_fanarts_extra = o.nombre_fanarts_extra.min(50);
+    f.images_acteurs = o.images_acteurs;
+    f.format_nfo = o.format_nfo;
+    f.nfo_propre = o.nfo_propre;
+    f.nfo_date_ajout = o.nfo_date_ajout;
+    f.creer_synopsis = o.creer_synopsis;
+    f.nfo_infos_fichier = o.nfo_infos_fichier;
+    f.nfo_urls_artwork = o.nfo_urls_artwork;
+    f.bandes_annonces_auto = o.bandes_annonces_auto;
+    f.qualite_bande_annonce = o.qualite_bande_annonce;
+    if let Ok(l) = validation::langue(&o.langue_sous_titres) {
+        f.langue_sous_titres = l;
+    }
+    f.duree_depuis_analyse = o.duree_depuis_analyse;
+    f.dossier_donnees_sagas = o.dossier_donnees_sagas.trim().to_string();
+    f.afficher_films_manquants_sagas = o.afficher_films_manquants_sagas;
+}
+
+/// Idem pour les séries.
+fn appliquer_series(o: &ReglagesSeries, f: &mut ReglagesSeries) {
+    f.ignorer_dossiers_nomedia = o.ignorer_dossiers_nomedia;
+    f.dossiers_ignores = o
+        .dossiers_ignores
+        .iter()
+        .map(|x| x.trim().to_string())
+        .filter(|x| !x.is_empty())
+        .collect();
+    f.mots_exclus = o
+        .mots_exclus
+        .iter()
+        .filter_map(|m| validation::mot(m).ok())
+        .collect();
+    f.mise_a_jour_au_demarrage = o.mise_a_jour_au_demarrage;
+    f.cache_images_a_l_import = o.cache_images_a_l_import;
+    if !o.scraper.trim().is_empty() {
+        f.scraper = o.scraper.trim().to_string();
+    }
+    if let Ok(l) = validation::langue(&o.langue_scraping) {
+        f.langue_scraping = l;
+    }
+    if let Ok(p) = validation::pays(&o.pays_certification) {
+        f.pays_certification = p;
+    }
+    f.recuperer_toutes_notes = o.recuperer_toutes_notes;
+    f.meilleure_image_auto = o.meilleure_image_auto;
+    f.taille_affiche = o.taille_affiche;
+    f.taille_fanart = o.taille_fanart;
+    f.taille_vignette = o.taille_vignette;
+    f.repli_artwork_saison = o.repli_artwork_saison;
+    f.format_nfo = o.format_nfo;
+    f.nfo_guide_episodes = o.nfo_guide_episodes;
+    f.nfo_date_fin = o.nfo_date_fin;
+    f.nfo_tous_acteurs = o.nfo_tous_acteurs;
+    f.bandes_annonces_auto = o.bandes_annonces_auto;
+    f.qualite_bande_annonce = o.qualite_bande_annonce;
+    if let Ok(l) = validation::langue(&o.langue_sous_titres) {
+        f.langue_sous_titres = l;
+    }
+    f.duree_depuis_analyse = o.duree_depuis_analyse;
+    f.renommer_apres_scraping = o.renommer_apres_scraping;
 }
 
 /// Reporte les réglages affichés dans les réglages du stockage.
@@ -659,11 +816,16 @@ pub fn appliquer_services(s: &ReglagesServices, r: &mut Reglages) {
             .map(PathBuf::from)
             .collect()
     };
+    // Groupes complets d'abord ; les champs plats (sources, dossiers ignorés, langue,
+    // renommage, affichage des séries) sont appliqués ensuite et font foi.
+    appliquer_films(&s.films, &mut r.films);
+    appliquer_series(&s.series, &mut r.series);
+    appliquer_generales(&s.generales, &mut r.general);
     r.films.sources = vers_chemins(&s.sources_films);
     r.series.sources = vers_chemins(&s.sources_series);
     r.films.dossiers_ignores = s.dossiers_ignores.clone();
-    if !s.langue_scraping.trim().is_empty() {
-        r.films.langue_scraping = s.langue_scraping.trim().to_string();
+    if let Ok(l) = validation::langue(&s.langue_scraping) {
+        r.films.langue_scraping = l;
     }
     r.films.renommer_apres_scraping = s.renommer_apres_scraping;
     let rr = &mut r.renommeur;
@@ -696,6 +858,81 @@ pub fn appliquer_services(s: &ReglagesServices, r: &mut Reglages) {
 mod tests {
     use super::*;
     use mediamanager_core::modele::{BandeAnnonce, Note, Saison};
+
+    #[test]
+    fn reglages_complets_sans_perte_a_l_aller_retour() {
+        let mut r = Reglages::default();
+        r.films.sources = vec![PathBuf::from("/films")];
+        r.series.sources = vec![PathBuf::from("/series")];
+        r.films.seuil_scraper = 0.6;
+        r.series.taille_vignette = mediamanager_store::reglages::TailleImage::Petite;
+        r.general.extensions_video = vec![".mkv".into()];
+        let s = services(&r);
+        let mut r2 = r.clone();
+        appliquer_services(&s, &mut r2);
+        assert_eq!(r2, r);
+        assert!(!s.generales.cle_tmdb_definie);
+        r.general.cle_api_tmdb = "k".into();
+        assert!(services(&r).generales.cle_tmdb_definie);
+    }
+
+    #[test]
+    fn valeurs_invalides_ne_remplacent_pas_les_valeurs_valides() {
+        let r0 = Reglages::default();
+        let mut s = services(&r0);
+        s.films.pays_certification = "FRANCE".into();
+        s.films.langue_sous_titres = "x1".into();
+        s.series.langue_scraping = String::new();
+        s.series.pays_certification = "1".into();
+        s.langue_scraping = "français".into();
+        let mut r = r0.clone();
+        appliquer_services(&s, &mut r);
+        assert_eq!(r.films.pays_certification, r0.films.pays_certification);
+        assert_eq!(r.films.langue_sous_titres, r0.films.langue_sous_titres);
+        assert_eq!(r.series.langue_scraping, r0.series.langue_scraping);
+        assert_eq!(r.series.pays_certification, r0.series.pays_certification);
+        assert_eq!(r.films.langue_scraping, r0.films.langue_scraping);
+    }
+
+    #[test]
+    fn valeurs_normalisees_a_l_enregistrement() {
+        let mut s = services(&Reglages::default());
+        s.films.pays_certification = " be ".into();
+        s.films.seuil_scraper = 7.0;
+        s.films.nombre_fanarts_extra = 500;
+        s.films.langues_images = vec!["FR".into(), "pt-br".into(), "???".into()];
+        s.generales.extensions_video =
+            vec!["MKV".into(), ".mkv".into(), "a b".into(), "avi".into()];
+        s.generales.motifs_nettoyage = vec![r"\.txt$".into(), "(".into()];
+        s.generales.prefixes_titre = vec![" Le ".into(), String::new()];
+        s.generales.chemin_yt_dlp = "  /usr/bin/yt-dlp ".into();
+        let mut r = Reglages::default();
+        appliquer_services(&s, &mut r);
+        assert_eq!(r.films.pays_certification, "BE");
+        assert_eq!(r.films.seuil_scraper, 1.0);
+        assert_eq!(r.films.nombre_fanarts_extra, 50);
+        assert_eq!(r.films.langues_images, vec!["fr", "pt_BR"]);
+        assert_eq!(r.general.extensions_video, vec![".mkv", ".avi"]);
+        assert_eq!(r.general.motifs_nettoyage, vec![r"\.txt$"]);
+        assert_eq!(r.general.prefixes_titre, vec!["Le"]);
+        assert_eq!(r.general.chemin_yt_dlp, "/usr/bin/yt-dlp");
+    }
+
+    #[test]
+    fn champs_plats_font_foi_sur_les_groupes() {
+        let mut s = services(&Reglages::default());
+        s.sources_films = vec!["/plat".into()];
+        s.films.sources = vec![PathBuf::from("/groupe")];
+        s.dossiers_ignores = vec!["plat".into()];
+        s.films.dossiers_ignores = vec!["groupe".into()];
+        s.afficher_non_diffuses = true;
+        s.series.afficher_non_diffuses = false;
+        let mut r = Reglages::default();
+        appliquer_services(&s, &mut r);
+        assert_eq!(r.films.sources, vec![PathBuf::from("/plat")]);
+        assert_eq!(r.films.dossiers_ignores, vec!["plat"]);
+        assert!(r.series.afficher_non_diffuses);
+    }
 
     #[test]
     fn dates_lisibles() {

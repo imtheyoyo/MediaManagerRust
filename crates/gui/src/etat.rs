@@ -1390,7 +1390,7 @@ impl Etat {
                 return self.lancer_travail(Travail::MettreAJourSeries);
             }
             Commande::AjouterSource => {
-                self.appliquer_sans_recalcul(Message::OuvrirReglagesPage(Page::Series));
+                self.appliquer_sans_recalcul(Message::OuvrirReglagesPage(Page::SeriesSource));
                 return self.choisir_dossier(CibleDossier::SourceSeries);
             }
             Commande::ScrapeNonTraites => {
@@ -1849,6 +1849,7 @@ impl Etat {
                 if !cle.trim().is_empty() {
                     match self.source.transmettre_secret(SECRET_CLE_TMDB, cle.trim()) {
                         Ok(()) => {
+                            self.services.generales.cle_tmdb_definie = true;
                             let texte = self.i18n.t("gui.settings.keysaved");
                             self.notifier(Niveau::Info, texte);
                         }
