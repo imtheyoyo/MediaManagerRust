@@ -8,6 +8,7 @@
 //!   générées localement, recherche et tâches simulées).
 
 use crate::details_film::DetailsFilm;
+use crate::details_serie::DetailsSerie;
 use crate::dialogues::appliquer_resultat;
 use crate::donnees::films_factices;
 use crate::etat::{Message, Niveau, NoeudSerie};
@@ -588,6 +589,60 @@ pub struct SagaAffichage {
     pub banniere: Option<PathBuf>,
 }
 
+/// Issue de la création d'un film hors ligne.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CreationHorsLigne {
+    /// Le film est déjà dans la bibliothèque.
+    Ajoute,
+    /// Le dossier et son marqueur `.disc` sont créés : une mise à jour des sources les importe.
+    AAnalyser,
+}
+
+/// Nom de dossier d'un film hors ligne : « Titre (année) », sans caractère interdit dans un nom
+/// de fichier ; `None` si le titre ne laisse rien d'utilisable.
+pub fn nom_film_hors_ligne(titre: &str, annee: u32) -> Option<String> {
+    let propre: String = titre
+        .chars()
+        .map(|c| match c {
+            '<' | '>' | ':' | '"' | '/' | '\\' | '|' | '?' | '*' => '-',
+            c if c.is_control() => ' ',
+            c => c,
+        })
+        .collect();
+    let propre = propre.trim().trim_matches('.').trim().to_string();
+    if propre.is_empty() {
+        return None;
+    }
+    Some(if annee > 0 {
+        format!("{propre} ({annee})")
+    } else {
+        propre
+    })
+}
+
+/// Crée, dans `source`, le dossier « Titre (année) » et le marqueur vide `Titre (année).disc`
+/// d'un film hors ligne (il est importé par la mise à jour des sources). Renvoie le dossier.
+pub fn creer_marqueur_hors_ligne(
+    source: &Path,
+    titre: &str,
+    annee: u32,
+) -> Result<PathBuf, String> {
+    let nom = nom_film_hors_ligne(titre, annee).ok_or_else(|| "titre invalide".to_string())?;
+    if !source.is_dir() {
+        return Err(format!("dossier source introuvable : {}", source.display()));
+    }
+    let dossier = source.join(&nom);
+    if dossier.exists() {
+        return Err(format!("{} existe déjà", dossier.display()));
+    }
+    std::fs::create_dir_all(&dossier).map_err(|e| e.to_string())?;
+    if let Err(e) = std::fs::write(dossier.join(format!("{nom}.disc")), b"") {
+        let _ = std::fs::remove_dir(&dossier);
+        return Err(e.to_string());
+    }
+    Ok(dossier)
+}
+
 /// Ce que l'interface attend des services. Les méthodes bloquantes (`rechercher`) sont
 /// appelées hors du thread de l'interface ; les autres sont courtes.
 pub trait SourceDonnees: Send + Sync {
@@ -620,6 +675,17 @@ pub trait SourceDonnees: Send + Sync {
         let _ = details;
         self.enregistrer_films(std::slice::from_ref(film))
     }
+    /// Crée un film hors ligne (sans fichier vidéo) dans la source de films `source`. Par défaut :
+    /// dossier et marqueur `.disc` sur le disque, importés par la mise à jour des sources.
+    fn creer_film_hors_ligne(
+        &self,
+        source: &str,
+        titre: &str,
+        annee: u32,
+    ) -> Result<CreationHorsLigne, String> {
+        creer_marqueur_hors_ligne(Path::new(source), titre, annee)?;
+        Ok(CreationHorsLigne::AAnalyser)
+    }
     /// Retire des films de la base ; avec `deplacer_fichiers`, leurs fichiers sont déplacés
     /// dans la corbeille de leur source (`.corbeille`). Renvoie les films retirés
     /// immédiatement ; ceux qui le sont par une tâche de fond arrivent par `FilmRetire`.
@@ -642,6 +708,22 @@ pub trait SourceDonnees: Send + Sync {
     ) -> Result<Vec<ResultatRecherche>, String>;
     /// Écrit une série modifiée dans l'éditeur (base, puis NFO en tâche).
     fn enregistrer_serie(&self, serie: &SerieAffichage) -> Result<(), String>;
+    /// Données de la fenêtre « Éditer une série » qui ne figurent pas dans [`SerieAffichage`]
+    /// (titres, notes par source, identifiants, distribution, illustrations...). Par défaut :
+    /// déduites de la série.
+    fn details_serie(&self, serie: &SerieAffichage) -> DetailsSerie {
+        DetailsSerie::depuis_serie(serie)
+    }
+    /// Enregistre une série éditée avec ses détails (base, puis NFO en tâche). Par défaut, seuls
+    /// les champs de la série d'affichage sont écrits.
+    fn enregistrer_serie_detaillee(
+        &self,
+        serie: &SerieAffichage,
+        details: &DetailsSerie,
+    ) -> Result<(), String> {
+        let _ = details;
+        self.enregistrer_serie(serie)
+    }
     /// Films de la saga présents chez le fournisseur mais absents de la bibliothèque
     /// (bloquant : appelé hors du thread de l'interface).
     fn films_manquants(&self, saga: &str) -> Result<Vec<ElementManquant>, String>;
@@ -760,6 +842,8 @@ pub struct SourceFactice {
     annulations: Arc<Mutex<HashMap<u64, Arc<AtomicBool>>>>,
     /// Détails d'édition enregistrés par film.
     details: Mutex<HashMap<u64, DetailsFilm>>,
+    /// Détails d'édition enregistrés par série.
+    details_series: Mutex<HashMap<String, DetailsSerie>>,
     prochain_id: AtomicU64,
     /// Latence simulée de la recherche.
     pub latence: Duration,
@@ -804,6 +888,7 @@ impl SourceFactice {
             secrets: Mutex::new(HashMap::new()),
             annulations: Arc::default(),
             details: Mutex::new(HashMap::new()),
+            details_series: Mutex::new(HashMap::new()),
             prochain_id: AtomicU64::new(1),
             latence: Duration::from_millis(250),
             pas: Duration::from_millis(80),
@@ -1344,6 +1429,34 @@ impl SourceDonnees for SourceFactice {
         Ok(())
     }
 
+    fn creer_film_hors_ligne(
+        &self,
+        source: &str,
+        titre: &str,
+        annee: u32,
+    ) -> Result<CreationHorsLigne, String> {
+        let nom = nom_film_hors_ligne(titre, annee).ok_or_else(|| "titre invalide".to_string())?;
+        let mut tous = self.films.lock().map_err(|e| e.to_string())?;
+        let dossier = format!("{source}\\{nom}");
+        if tous.iter().any(|f| f.dossier == dossier) {
+            return Err(format!("{dossier} existe déjà"));
+        }
+        let id = tous.iter().map(|f| f.id).max().unwrap_or(0) + 1;
+        tous.push(Film {
+            id,
+            titre: titre.trim().to_string(),
+            titre_triable: titre.trim().to_string(),
+            annee,
+            dossier,
+            source: source.to_string(),
+            nom_fichier: format!("{nom}.disc"),
+            nouveau: true,
+            date_ajout: "2026-11-16 12:00".into(),
+            ..Film::default()
+        });
+        Ok(CreationHorsLigne::Ajoute)
+    }
+
     fn retirer_films(&self, ids: &[u64], _deplacer_fichiers: bool) -> Result<Vec<u64>, String> {
         let mut tous = self.films.lock().map_err(|e| e.to_string())?;
         let retires: Vec<u64> = tous
@@ -1462,6 +1575,27 @@ impl SourceDonnees for SourceFactice {
             *x = serie.clone();
             x.saisons = saisons;
         }
+        Ok(())
+    }
+
+    fn details_serie(&self, serie: &SerieAffichage) -> DetailsSerie {
+        self.details_series
+            .lock()
+            .ok()
+            .and_then(|d| d.get(&serie.id).cloned())
+            .unwrap_or_else(|| DetailsSerie::depuis_serie(serie))
+    }
+
+    fn enregistrer_serie_detaillee(
+        &self,
+        serie: &SerieAffichage,
+        details: &DetailsSerie,
+    ) -> Result<(), String> {
+        self.enregistrer_serie(serie)?;
+        self.details_series
+            .lock()
+            .map_err(|e| e.to_string())?
+            .insert(serie.id.clone(), details.clone());
         Ok(())
     }
 
@@ -1744,5 +1878,33 @@ mod tests {
         let s = SourceFactice::default();
         s.transmettre_secret("tmdb", "abc").unwrap();
         assert_eq!(s.secret("tmdb").as_deref(), Some("abc"));
+    }
+}
+
+#[cfg(test)]
+mod tests_hors_ligne {
+    use super::*;
+
+    #[test]
+    fn nom_de_dossier_sans_caracteres_interdits() {
+        assert_eq!(
+            nom_film_hors_ligne("Mission: Impossible / 2", 1996).as_deref(),
+            Some("Mission- Impossible - 2 (1996)")
+        );
+        assert_eq!(nom_film_hors_ligne(" Alien ", 0).as_deref(), Some("Alien"));
+        assert_eq!(nom_film_hors_ligne("  ...  ", 2000), None);
+    }
+
+    #[test]
+    fn marqueur_cree_sur_le_disque_sans_ecraser() {
+        let d = std::env::temp_dir().join(format!("mmr-horsligne-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        let dossier = creer_marqueur_hors_ligne(&d, "Le Film", 2010).unwrap();
+        assert_eq!(dossier, d.join("Le Film (2010)"));
+        assert!(dossier.join("Le Film (2010).disc").is_file());
+        assert!(creer_marqueur_hors_ligne(&d, "Le Film", 2010).is_err());
+        assert!(creer_marqueur_hors_ligne(&d.join("absent"), "X", 0).is_err());
+        let _ = std::fs::remove_dir_all(&d);
     }
 }

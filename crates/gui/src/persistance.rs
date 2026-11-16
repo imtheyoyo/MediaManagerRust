@@ -11,7 +11,10 @@ use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
-pub const VERSION_FORMAT: u32 = 1;
+/// Version du format : 2 ajoute les colonnes et l'affichage du tableau des séries et l'affichage
+/// du tableau des films (un fichier de version 1 se charge sans changement : les champs absents
+/// reprennent leur valeur par défaut).
+pub const VERSION_FORMAT: u32 = 2;
 pub const NOM_FICHIER: &str = "ui.json";
 
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
@@ -57,6 +60,26 @@ pub struct ColonnePersistee {
     pub largeur: Option<f32>,
 }
 
+/// Options d'affichage d'un tableau (lignes rayées, hauteur de ligne, icônes d'état).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AffichagePersiste {
+    pub lignes_rayees: bool,
+    /// Identifiant d'une `HauteurLigne` (`compacte`, `normale`, `aeree`).
+    pub hauteur_ligne: String,
+    pub icones_etat: bool,
+}
+
+impl Default for AffichagePersiste {
+    fn default() -> Self {
+        Self {
+            lignes_rayees: false,
+            hauteur_ligne: "normale".into(),
+            icones_etat: true,
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct TriPersiste {
     pub colonne: String,
@@ -77,6 +100,10 @@ pub struct EtatInterface {
     pub separateur: Option<f32>,
     /// Ordre d'affichage = ordre de la liste.
     pub colonnes: Vec<ColonnePersistee>,
+    /// Colonnes du tableau des séries (même format que `colonnes`).
+    pub colonnes_series: Vec<ColonnePersistee>,
+    pub affichage_films: AffichagePersiste,
+    pub affichage_series: AffichagePersiste,
     pub tri: Vec<TriPersiste>,
     pub filtrage_actif: bool,
     pub filtres: Vec<LigneFiltre>,
@@ -97,6 +124,9 @@ impl Default for EtatInterface {
             langue: "fr".into(),
             separateur: None,
             colonnes: Vec::new(),
+            colonnes_series: Vec::new(),
+            affichage_films: AffichagePersiste::default(),
+            affichage_series: AffichagePersiste::default(),
             tri: Vec::new(),
             filtrage_actif: true,
             filtres: Vec::new(),
@@ -237,6 +267,31 @@ mod tests {
             charger(&chemin),
             Err(ErreurPersistance::Format(_))
         ));
+        let _ = fs::remove_dir_all(d);
+    }
+
+    #[test]
+    fn fichier_de_version_1_se_charge() {
+        let d = dossier("v1");
+        fs::create_dir_all(&d).unwrap();
+        let chemin = d.join("ui.json");
+        fs::write(
+            &chemin,
+            r#"{"version":1,"theme":"clair","colonnes":[{"id":"year","visible":true,"largeur":80.0}]}"#,
+        )
+        .unwrap();
+        let e = charger(&chemin).unwrap();
+        assert_eq!(e.version, 1);
+        assert_eq!(e.colonnes.len(), 1);
+        assert!(e.colonnes_series.is_empty());
+        assert_eq!(e.affichage_films, AffichagePersiste::default());
+        // Réécrit, il passe à la version courante en gardant son contenu.
+        let mut e = e;
+        e.version = VERSION_FORMAT;
+        enregistrer(&chemin, &e).unwrap();
+        let relu = charger(&chemin).unwrap();
+        assert_eq!(relu.version, 2);
+        assert_eq!(relu.colonnes[0].id, "year");
         let _ = fs::remove_dir_all(d);
     }
 

@@ -477,6 +477,143 @@ pub fn colonnes_par_defaut() -> Vec<ColonneEtat> {
         .collect()
 }
 
+// ------------------------------------------------------------------ colonnes du tableau Séries
+
+/// Colonnes du tableau Séries (arbre série > saison > épisode).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum ColonneSerie {
+    Titre,
+    TitreOriginal,
+    Annee,
+    Statut,
+    Note,
+    Saisons,
+    Episodes,
+    Manquants,
+    Chemin,
+    Vu,
+}
+
+impl ColonneSerie {
+    pub const TOUTES: [ColonneSerie; 10] = [
+        ColonneSerie::Titre,
+        ColonneSerie::TitreOriginal,
+        ColonneSerie::Annee,
+        ColonneSerie::Statut,
+        ColonneSerie::Note,
+        ColonneSerie::Saisons,
+        ColonneSerie::Episodes,
+        ColonneSerie::Manquants,
+        ColonneSerie::Chemin,
+        ColonneSerie::Vu,
+    ];
+
+    /// Identifiant stable (clé de persistance).
+    pub fn id(self) -> &'static str {
+        match self {
+            ColonneSerie::Titre => "title",
+            ColonneSerie::TitreOriginal => "originalTitle",
+            ColonneSerie::Annee => "year",
+            ColonneSerie::Statut => "status",
+            ColonneSerie::Note => "rating",
+            ColonneSerie::Saisons => "seasons",
+            ColonneSerie::Episodes => "episodes",
+            ColonneSerie::Manquants => "missing",
+            ColonneSerie::Chemin => "path",
+            ColonneSerie::Vu => "watched",
+        }
+    }
+
+    pub fn depuis_id(id: &str) -> Option<ColonneSerie> {
+        ColonneSerie::TOUTES.into_iter().find(|c| c.id() == id)
+    }
+
+    pub fn cle_i18n(self) -> &'static str {
+        match self {
+            ColonneSerie::Titre => "metatag.title",
+            ColonneSerie::TitreOriginal => "metatag.originaltitle",
+            ColonneSerie::Annee => "metatag.year",
+            ColonneSerie::Statut => "gui.series.status",
+            ColonneSerie::Note => "metatag.rating",
+            ColonneSerie::Saisons => "gui.tvshows.seasons",
+            ColonneSerie::Episodes => "gui.tvshows.episodecount",
+            ColonneSerie::Manquants => "gui.tvshows.missingcount",
+            ColonneSerie::Chemin => "metatag.path",
+            ColonneSerie::Vu => "metatag.watched",
+        }
+    }
+
+    /// En-tête abrégé (`S`, `E`) ; le libellé complet est l'info-bulle.
+    pub fn entete_court(self) -> Option<&'static str> {
+        match self {
+            ColonneSerie::Saisons => Some("S"),
+            ColonneSerie::Episodes => Some("E"),
+            _ => None,
+        }
+    }
+
+    /// Visibles par défaut : titre, année, saisons, épisodes, vu.
+    pub fn visible_par_defaut(self) -> bool {
+        matches!(
+            self,
+            ColonneSerie::Titre
+                | ColonneSerie::Annee
+                | ColonneSerie::Saisons
+                | ColonneSerie::Episodes
+                | ColonneSerie::Vu
+        )
+    }
+
+    /// Colonne à pictogramme d'état (largeur fixe).
+    pub fn est_booleenne(self) -> bool {
+        self == ColonneSerie::Vu
+    }
+
+    pub fn aligne_a_droite(self) -> bool {
+        matches!(
+            self,
+            ColonneSerie::Annee
+                | ColonneSerie::Note
+                | ColonneSerie::Saisons
+                | ColonneSerie::Episodes
+                | ColonneSerie::Manquants
+        )
+    }
+
+    pub fn largeur_initiale(self) -> f32 {
+        match self {
+            ColonneSerie::Titre | ColonneSerie::TitreOriginal => 240.0,
+            ColonneSerie::Chemin => 260.0,
+            ColonneSerie::Statut => 90.0,
+            ColonneSerie::Annee => 52.0,
+            ColonneSerie::Saisons => 32.0,
+            ColonneSerie::Episodes => 44.0,
+            ColonneSerie::Vu => 27.0,
+            _ => 70.0,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ColonneSerieEtat {
+    pub colonne: ColonneSerie,
+    pub visible: bool,
+    /// Largeur mémorisée ; `None` : largeur initiale.
+    pub largeur: Option<f32>,
+}
+
+/// État initial des colonnes du tableau Séries.
+pub fn colonnes_series_par_defaut() -> Vec<ColonneSerieEtat> {
+    ColonneSerie::TOUTES
+        .iter()
+        .map(|&c| ColonneSerieEtat {
+            colonne: c,
+            visible: c.visible_par_defaut(),
+            largeur: None,
+        })
+        .collect()
+}
+
 /// Taille en gigaoctets (base 10^9), comme l'original.
 pub fn gigaoctets(octets: u64) -> f64 {
     octets as f64 / 1e9
@@ -528,6 +665,28 @@ mod tests {
         };
         assert_eq!(Colonne::FormatVideo.comparer(&a, &b), Ordering::Less);
         assert_eq!(Colonne::TailleFichier.comparer(&a, &b), Ordering::Greater);
+    }
+
+    #[test]
+    fn colonnes_des_series_par_defaut() {
+        let visibles: Vec<&str> = colonnes_series_par_defaut()
+            .iter()
+            .filter(|c| c.visible)
+            .map(|c| c.colonne.id())
+            .collect();
+        assert_eq!(
+            visibles,
+            ["title", "year", "seasons", "episodes", "watched"]
+        );
+        let mut ids: Vec<_> = ColonneSerie::TOUTES.iter().map(|c| c.id()).collect();
+        ids.sort();
+        ids.dedup();
+        assert_eq!(ids.len(), ColonneSerie::TOUTES.len());
+        assert_eq!(
+            ColonneSerie::depuis_id("episodes"),
+            Some(ColonneSerie::Episodes)
+        );
+        assert_eq!(ColonneSerie::depuis_id("x"), None);
     }
 
     #[test]

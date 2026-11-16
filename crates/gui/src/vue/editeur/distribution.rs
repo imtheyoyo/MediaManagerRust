@@ -17,7 +17,23 @@ use eframe::egui::{Align, Layout, Ui, vec2};
 const LARGEUR_BOUTONS: f32 = 64.0;
 
 pub fn afficher(ui: &mut Ui, ct: &Contexte<'_>, b: &mut FilmEdite) {
-    let i = ct.i;
+    let d = &mut b.details;
+    let s = &mut b.selections;
+    deux_tableaux(
+        ui,
+        ct.i,
+        (&mut d.acteurs, &mut s.acteur),
+        (&mut d.equipe, &mut s.equipe),
+    );
+}
+
+/// Les deux tableaux côte à côte (acteurs, équipe) : liste et sélection de chacun.
+pub(super) fn deux_tableaux(
+    ui: &mut Ui,
+    i: &I18n,
+    acteurs: (&mut Vec<PersonneFilm>, &mut Option<usize>),
+    equipe: (&mut Vec<PersonneFilm>, &mut Option<usize>),
+) {
     let total = ui.available_width();
     let bloc = ((total - 20.0) / 2.0).floor();
     let hauteur = (ui.available_height() - 4.0).max(120.0);
@@ -36,8 +52,8 @@ pub fn afficher(ui: &mut Ui, ct: &Contexte<'_>, b: &mut FilmEdite) {
                     colonne_role: i.t("metatag.role"),
                     fonction: FonctionPersonne::Acteur,
                 },
-                &mut b.details.acteurs,
-                &mut b.selections.acteur,
+                acteurs.0,
+                acteurs.1,
             );
         });
         ui.add_space(14.0);
@@ -54,8 +70,8 @@ pub fn afficher(ui: &mut Ui, ct: &Contexte<'_>, b: &mut FilmEdite) {
                     colonne_role: i.t("metatag.role"),
                     fonction: FonctionPersonne::Autre,
                 },
-                &mut b.details.equipe,
-                &mut b.selections.equipe,
+                equipe.0,
+                equipe.1,
             );
         });
     });

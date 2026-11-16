@@ -6,13 +6,15 @@ use super::details::{
     bandeau_onglets, colonne_images, largeur_libelles, lien_chemin, ligne, titres,
 };
 use super::tableau::{
-    HAUTEUR_ENTETE, HAUTEUR_LIGNE, LARGEUR_ETAT, droite, entete_icone, entete_texte, filets,
-    ligne_recherche, onglet_module,
+    HAUTEUR_ENTETE, cellule_etat_affichee, droite, entete_icone, entete_texte, filets,
+    largeur_etat, ligne_recherche, onglet_module,
 };
 use crate::etat::{Etat, Message, NoeudSerie, OngletDetails};
-use crate::icones::{EtatCellule, Icone, cellule_etat, peindre_triangle};
+use crate::icones::{EtatCellule, Icone, peindre_triangle};
 use crate::images::GestionnaireImages;
-use crate::source_donnees::{EpisodeAffichage, SaisonAffichage, SerieAffichage};
+use crate::modele::ColonneSerie;
+use crate::polices;
+use crate::source_donnees::{EpisodeAffichage, SaisonAffichage, SerieAffichage, StatutSerie};
 use eframe::egui::{
     self, Align, Frame, Label, Layout, Margin, Panel, RichText, ScrollArea, Sense, Vec2, vec2,
 };
@@ -33,6 +35,13 @@ pub struct LigneSerie {
     pub deploiement: Option<bool>,
     /// Épisode connu du fournisseur mais sans fichier local (affiché atténué).
     pub manquant: bool,
+    pub titre_original: String,
+    /// Statut de diffusion (séries seulement).
+    pub statut: Option<StatutSerie>,
+    pub note: f32,
+    /// Épisodes connus du fournisseur mais absents du disque.
+    pub manquants: usize,
+    pub chemin: String,
 }
 
 fn titre_saison(etat: &Etat, s: &SaisonAffichage) -> String {
@@ -91,6 +100,11 @@ pub fn lignes_series(etat: &Etat) -> Vec<LigneSerie> {
             vu: etat_vu(episodes),
             deploiement: (!s.saisons.is_empty()).then_some(deployee),
             manquant: false,
+            titre_original: s.titre_original.clone(),
+            statut: Some(s.statut),
+            note: s.note,
+            manquants: s.nombre_manquants(),
+            chemin: s.chemin.clone(),
         });
         if !deployee {
             continue;
@@ -109,6 +123,11 @@ pub fn lignes_series(etat: &Etat) -> Vec<LigneSerie> {
                 vu: etat_vu(saison.episodes.iter()),
                 deploiement: (!saison.episodes.is_empty()).then_some(ouverte),
                 manquant: false,
+                titre_original: String::new(),
+                statut: None,
+                note: 0.0,
+                manquants: saison.episodes.iter().filter(|e| e.manquant).count(),
+                chemin: String::new(),
             });
             if !ouverte {
                 continue;
@@ -148,6 +167,11 @@ pub fn lignes_series(etat: &Etat) -> Vec<LigneSerie> {
                     },
                     deploiement: None,
                     manquant: e.manquant,
+                    titre_original: String::new(),
+                    statut: None,
+                    note: 0.0,
+                    manquants: 0,
+                    chemin: String::new(),
                 });
             }
         }
@@ -250,83 +274,60 @@ fn episodes_du_noeud(etat: &Etat, noeud: &NoeudSerie) -> usize {
 
 fn table(ui: &mut egui::Ui, etat: &Etat, sortie: &mut Sortie) {
     let lignes = lignes_series(etat);
-    let i = &etat.i18n;
+    let colonnes = etat.colonnes_series_visibles();
+    let aff = etat.reglages.affichage_series;
+    let relache = ui.input(|i| !i.pointer.any_down());
     ui.spacing_mut().item_spacing = Vec2::ZERO;
-    TableBuilder::new(ui)
-        .id_salt("tableau_series")
-        .striped(false)
+    // L'état interne du tableau (largeurs) est lié à l'ensemble ordonné des colonnes visibles.
+    let ids: Vec<&str> = colonnes.iter().map(|c| c.id()).collect();
+    let mut builder = TableBuilder::new(ui)
+        .id_salt(("tableau_series", ids.join(",")))
+        .striped(aff.lignes_rayees)
         .resizable(true)
         .sense(Sense::click())
-        .cell_layout(Layout::left_to_right(Align::Center))
-        .column(Column::remainder().at_least(160.0).clip(true))
-        .column(Column::exact(52.0))
-        .column(Column::exact(32.0))
-        .column(Column::exact(44.0))
-        .column(Column::exact(LARGEUR_ETAT))
+        .cell_layout(Layout::left_to_right(Align::Center));
+    for col in &colonnes {
+        let c = if col.est_booleenne() {
+            Column::exact(largeur_etat(aff))
+        } else if *col == ColonneSerie::Titre {
+            // Le titre absorbe l'espace libre du tableau (pas de zone vide à droite).
+            Column::remainder().at_least(160.0).clip(true)
+        } else {
+            Column::initial(etat.largeur_colonne_serie(*col))
+                .at_least(30.0)
+                .clip(true)
+        };
+        builder = builder.column(c);
+    }
+    builder
         .header(HAUTEUR_ENTETE, |mut h| {
-            h.col(|ui| {
-                entete_texte(ui, i.t("metatag.title"));
-            });
-            h.col(|ui| {
-                entete_texte(ui, i.t("metatag.year"));
-            });
-            h.col(|ui| {
-                entete_texte(ui, "S".into()).on_hover_text(i.t("gui.tvshows.seasons"));
-            });
-            h.col(|ui| {
-                entete_texte(ui, "E".into()).on_hover_text(i.t("gui.tvshows.episodecount"));
-            });
-            h.col(|ui| {
-                entete_icone(ui, Icone::Vu).on_hover_text(i.t("metatag.watched"));
-            });
+            for col in &colonnes {
+                h.col(|ui| entete(ui, etat, *col, sortie));
+            }
         })
         .body(|body| {
-            body.rows(HAUTEUR_LIGNE, lignes.len(), |mut rang| {
+            // Largeurs modifiées par l'utilisateur : mémorisées au relâchement de la souris.
+            if relache {
+                let changees: Vec<(ColonneSerie, f32)> = colonnes
+                    .iter()
+                    .zip(body.widths())
+                    .filter(|(c, w)| {
+                        !c.est_booleenne()
+                            && **c != ColonneSerie::Titre
+                            && (etat.largeur_colonne_serie(**c) - **w).abs() > 0.5
+                    })
+                    .map(|(c, w)| (*c, *w))
+                    .collect();
+                if !changees.is_empty() {
+                    sortie.push(Message::LargeursColonnesSerie(changees));
+                }
+            }
+            body.rows(aff.hauteur_ligne.px(), lignes.len(), |mut rang| {
                 let l = &lignes[rang.index()];
                 rang.set_selected(etat.noeud_serie.as_ref() == Some(&l.noeud));
-                rang.col(|ui| {
-                    filets(ui);
-                    ui.add_space(4.0 + 16.0 * l.profondeur as f32);
-                    let (rect, rep) = ui.allocate_exact_size(vec2(14.0, 14.0), Sense::click());
-                    if let Some(ouvert) = l.deploiement {
-                        let couleur = ui.visuals().text_color();
-                        peindre_triangle(ui.painter(), rect.center(), 8.0, ouvert, couleur);
-                        if rep.clicked() {
-                            sortie.push(basculer(&l.noeud));
-                        }
-                    }
-                    ui.add_space(3.0);
-                    let texte = if l.profondeur == 0 {
-                        RichText::new(&l.titre)
-                    } else if l.manquant {
-                        RichText::new(&l.titre).size(12.5).weak().italics()
-                    } else {
-                        RichText::new(&l.titre).size(12.5)
-                    };
-                    ui.add(Label::new(texte).truncate());
-                });
-                rang.col(|ui| {
-                    filets(ui);
-                    if l.annee > 0 {
-                        droite(ui, l.annee.to_string());
-                    }
-                });
-                rang.col(|ui| {
-                    filets(ui);
-                    if let Some(n) = l.saisons {
-                        droite(ui, n.to_string());
-                    }
-                });
-                rang.col(|ui| {
-                    filets(ui);
-                    if l.episodes > 0 {
-                        droite(ui, l.episodes.to_string());
-                    }
-                });
-                rang.col(|ui| {
-                    filets(ui);
-                    cellule_etat(ui, l.vu);
-                });
+                for col in &colonnes {
+                    rang.col(|ui| cellule(ui, etat, l, *col, sortie));
+                }
                 let reponse = rang.response();
                 if reponse.clicked() {
                     sortie.push(Message::SelectionnerNoeudSerie(l.noeud.clone()));
@@ -336,6 +337,124 @@ fn table(ui: &mut egui::Ui, etat: &Etat, sortie: &mut Sortie) {
                 }
             });
         });
+}
+
+/// En-tête d'une colonne : libellé (ou pictogramme), menu contextuel de visibilité et d'ordre.
+fn entete(ui: &mut egui::Ui, etat: &Etat, col: ColonneSerie, sortie: &mut Sortie) {
+    let i = &etat.i18n;
+    let libelle = i.t(col.cle_i18n());
+    let reponse = if col == ColonneSerie::Vu {
+        entete_icone(ui, Icone::Vu)
+    } else {
+        entete_texte(
+            ui,
+            col.entete_court()
+                .map_or_else(|| libelle.clone(), str::to_string),
+        )
+    }
+    .on_hover_text(&libelle);
+    reponse.context_menu(|ui| {
+        ui.horizontal(|ui| {
+            if ui
+                .button(format!("{} {}", polices::GAUCHE, i.t("column.moveleft")))
+                .clicked()
+            {
+                sortie.push(Message::DeplacerColonneSerie(col, -1));
+            }
+            if ui
+                .button(format!("{} {}", i.t("column.moveright"), polices::DROITE))
+                .clicked()
+            {
+                sortie.push(Message::DeplacerColonneSerie(col, 1));
+            }
+        });
+        ui.separator();
+        ui.label(RichText::new(i.t("Button.selectvisiblecolumns")).weak());
+        ui.separator();
+        for c in &etat.colonnes_series {
+            let mut visible = c.visible;
+            let actif = c.colonne != ColonneSerie::Titre;
+            if ui
+                .add_enabled(
+                    actif,
+                    egui::Checkbox::new(&mut visible, i.t(c.colonne.cle_i18n())),
+                )
+                .changed()
+            {
+                sortie.push(Message::ColonneSerieVisible(c.colonne, visible));
+            }
+        }
+    });
+}
+
+/// Contenu d'une cellule de l'arbre pour la colonne `col`.
+fn cellule(ui: &mut egui::Ui, etat: &Etat, l: &LigneSerie, col: ColonneSerie, sortie: &mut Sortie) {
+    let i = &etat.i18n;
+    filets(ui);
+    match col {
+        ColonneSerie::Titre => {
+            ui.add_space(4.0 + 16.0 * l.profondeur as f32);
+            let (rect, rep) = ui.allocate_exact_size(vec2(14.0, 14.0), Sense::click());
+            if let Some(ouvert) = l.deploiement {
+                let couleur = ui.visuals().text_color();
+                peindre_triangle(ui.painter(), rect.center(), 8.0, ouvert, couleur);
+                if rep.clicked() {
+                    sortie.push(basculer(&l.noeud));
+                }
+            }
+            ui.add_space(3.0);
+            let texte = if l.profondeur == 0 {
+                RichText::new(&l.titre)
+            } else if l.manquant {
+                RichText::new(&l.titre).size(12.5).weak().italics()
+            } else {
+                RichText::new(&l.titre).size(12.5)
+            };
+            ui.add(Label::new(texte).truncate());
+        }
+        ColonneSerie::TitreOriginal => {
+            ui.add_space(5.0);
+            ui.add(Label::new(&l.titre_original).truncate());
+        }
+        ColonneSerie::Annee => {
+            if l.annee > 0 {
+                droite(ui, l.annee.to_string());
+            }
+        }
+        ColonneSerie::Statut => {
+            if let Some(s) = l.statut.filter(|s| *s != StatutSerie::Inconnu) {
+                ui.add_space(5.0);
+                ui.add(Label::new(i.t(s.cle())).truncate());
+            }
+        }
+        ColonneSerie::Note => {
+            if l.note > 0.0 {
+                droite(ui, i.decimal(f64::from(l.note), 1));
+            }
+        }
+        ColonneSerie::Saisons => {
+            if let Some(n) = l.saisons {
+                droite(ui, n.to_string());
+            }
+        }
+        ColonneSerie::Episodes => {
+            if l.episodes > 0 {
+                droite(ui, l.episodes.to_string());
+            }
+        }
+        ColonneSerie::Manquants => {
+            if l.manquants > 0 {
+                droite(ui, l.manquants.to_string());
+            }
+        }
+        ColonneSerie::Chemin => {
+            ui.add_space(5.0);
+            ui.add(Label::new(&l.chemin).truncate());
+        }
+        ColonneSerie::Vu => {
+            cellule_etat_affichee(ui, i, l.vu, etat.reglages.affichage_series.icones_etat);
+        }
+    }
 }
 
 fn basculer(noeud: &NoeudSerie) -> Message {
@@ -630,5 +749,68 @@ mod tests {
             basculer(&NoeudSerie::Episode("a".into(), 1, 0)),
             Message::BasculerNoeudSerie(_, Some(1))
         ));
+    }
+    fn textes_rendus(etat: &Etat, images: usize) -> Vec<String> {
+        use eframe::egui::{Pos2, RawInput, Rect, epaint::Shape};
+        let ctx = egui::Context::default();
+        ctx.set_visuals(crate::theme::visuals(etat.reglages.theme));
+        let mut textes = Vec::new();
+        for _ in 0..images {
+            let entree = RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1400.0, 700.0))),
+                ..Default::default()
+            };
+            let mut sortie = Vec::new();
+            let sortie_ref = &mut sortie;
+            let mut out = ctx.run_ui(entree, |ui| afficher(ui, etat, sortie_ref));
+            out.textures_delta.clear();
+            textes = out
+                .shapes
+                .iter()
+                .filter_map(|c| match &c.shape {
+                    Shape::Text(t) => Some(t.galley.text().to_string()),
+                    _ => None,
+                })
+                .collect();
+        }
+        textes
+    }
+
+    #[test]
+    fn tableau_applique_colonnes_et_options() {
+        use crate::reglages::{AffichageTableau, HauteurLigne};
+        let mut etat = etat_demo();
+        let i = etat.i18n.clone();
+        // Colonnes par défaut : pas de statut ni de chemin.
+        let t = textes_rendus(&etat, 3);
+        assert!(t.iter().any(|x| x == "Alpha"));
+        assert!(!t.iter().any(|x| *x == i.t("gui.series.status")));
+        // Toutes les colonnes, texte à la place des pictogrammes, lignes aérées et rayées.
+        for c in ColonneSerie::TOUTES {
+            etat.appliquer(Message::ColonneSerieVisible(c, true));
+        }
+        etat.reglages.affichage_series = AffichageTableau {
+            lignes_rayees: true,
+            hauteur_ligne: HauteurLigne::Aeree,
+            icones_etat: false,
+        };
+        let t = textes_rendus(&etat, 3);
+        for cle in [
+            "gui.series.status",
+            "metatag.path",
+            "gui.tvshows.missingcount",
+        ] {
+            assert!(t.iter().any(|x| *x == i.t(cle)), "{cle} absent : {t:?}");
+        }
+        assert!(t.iter().any(|x| *x == "/series/Alpha"));
+        assert!(
+            t.iter().any(|x| *x == i.t("Button.no")),
+            "état en texte : {t:?}"
+        );
+        // Colonne déplacée : l'ordre des colonnes visibles suit.
+        etat.appliquer(Message::DeplacerColonneSerie(ColonneSerie::Annee, -1));
+        assert_eq!(etat.colonnes_series_visibles()[1], ColonneSerie::Annee);
+        let t = textes_rendus(&etat, 3);
+        assert!(t.iter().any(|x| x == "Alpha"));
     }
 }

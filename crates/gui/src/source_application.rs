@@ -9,7 +9,9 @@
 
 use crate::conversion::{self, ContexteConversion};
 use crate::conversion_details;
+use crate::conversion_details_serie;
 use crate::details_film::DetailsFilm;
+use crate::details_serie::DetailsSerie;
 use crate::etat::NoeudSerie;
 use crate::etat::{Message, Niveau};
 use crate::modele::Film;
@@ -860,6 +862,45 @@ impl SourceDonnees for SourceApplication {
             };
             conversion::appliquer_edition_serie(serie, &mut s);
             let s = app.enregistrer_serie(s).map_err(|e| e.to_string())?;
+            let mut suivis = verrou(&i.suivis);
+            Interne::suivre(&mut suivis, app.ecrire_nfo_series(vec![s.id]), true, |_| {
+                None
+            });
+            Ok(())
+        })
+    }
+
+    fn details_serie(&self, serie: &SerieAffichage) -> DetailsSerie {
+        self.avec_app(|app| app.serie(&serie.id).map_err(|e| e.to_string()))
+            .ok()
+            .flatten()
+            .map(|s| conversion_details_serie::details(&s))
+            .unwrap_or_else(|| DetailsSerie::depuis_serie(serie))
+    }
+
+    fn enregistrer_serie_detaillee(
+        &self,
+        serie: &SerieAffichage,
+        details: &DetailsSerie,
+    ) -> Result<(), String> {
+        let i = &self.interne;
+        self.avec_app(|app| {
+            let Some(mut s) = app.serie(&serie.id).map_err(|e| e.to_string())? else {
+                return Err(format!("série {} introuvable", serie.id));
+            };
+            conversion::appliquer_edition_serie(serie, &mut s);
+            let supprimes = conversion_details_serie::appliquer_details(details, &mut s);
+            let source = s.source_donnees.clone();
+            // Base, puis événement `SerieModifiee` (l'affichage se rafraîchit).
+            let s = app.enregistrer_serie(s).map_err(|e| e.to_string())?;
+            // Jamais de suppression définitive : les illustrations vont à la corbeille.
+            for chemin in supprimes {
+                if let Err(e) =
+                    mediamanager_app::gestion_films::mettre_a_la_corbeille(&chemin, &source)
+                {
+                    tracing::warn!("illustration {} non supprimée : {e}", chemin.display());
+                }
+            }
             let mut suivis = verrou(&i.suivis);
             Interne::suivre(&mut suivis, app.ecrire_nfo_series(vec![s.id]), true, |_| {
                 None

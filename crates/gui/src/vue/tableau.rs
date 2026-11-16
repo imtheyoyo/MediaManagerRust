@@ -7,9 +7,11 @@ use super::details::bandeau_onglets;
 use super::{Sortie, menus};
 use crate::commandes::MENU_CONTEXTUEL;
 use crate::etat::{Etat, FiltreRapide, Message};
+use crate::i18n::I18n;
 use crate::icones::{self, EtatCellule, Icone, cellule_etat, etat_film, icone_entete};
 use crate::modele::{Colonne, Film, Ordre, gigaoctets};
 use crate::polices;
+use crate::reglages::AffichageTableau;
 use crate::theme::{BLEU, FILET_TABLEAU, ICONE_REPOS, ROUGE};
 use eframe::egui::{
     self, Align, Button, Frame, Id, Label, Layout, Margin, Panel, RichText, Sense, Stroke,
@@ -24,6 +26,8 @@ pub const HAUTEUR_LIGNE: f32 = 22.0;
 pub const HAUTEUR_ENTETE: f32 = 24.0;
 /// Largeur des colonnes d'état.
 pub const LARGEUR_ETAT: f32 = 27.0;
+/// Largeur des colonnes d'état en mode texte.
+pub const LARGEUR_ETAT_TEXTE: f32 = 34.0;
 /// Marge intérieure des cellules.
 const MARGE_CELLULE: f32 = 5.0;
 
@@ -191,6 +195,8 @@ pub fn entete_texte(ui: &mut egui::Ui, texte: String) -> egui::Response {
 
 fn table(ui: &mut egui::Ui, etat: &Etat, sortie: &mut Sortie) {
     let colonnes = etat.colonnes_visibles();
+    let aff = etat.reglages.affichage_films;
+    let largeur_etat = largeur_etat(aff);
     let modifs = ui.input(|i| i.modifiers);
     let relache = ui.input(|i| !i.pointer.any_down());
     ui.spacing_mut().item_spacing = Vec2::ZERO;
@@ -198,13 +204,13 @@ fn table(ui: &mut egui::Ui, etat: &Etat, sortie: &mut Sortie) {
     let ids: Vec<&str> = colonnes.iter().map(|c| c.id()).collect();
     let mut builder = TableBuilder::new(ui)
         .id_salt(("tableau_films", ids.join(",")))
-        .striped(false)
+        .striped(aff.lignes_rayees)
         .resizable(true)
         .sense(Sense::click())
         .cell_layout(Layout::left_to_right(Align::Center));
     for col in &colonnes {
         let c = if col.est_booleenne() {
-            Column::exact(LARGEUR_ETAT)
+            Column::exact(largeur_etat)
         } else if *col == Colonne::Titre {
             // Le titre absorbe l'espace libre du tableau (pas de zone vide à droite).
             Column::remainder().at_least(120.0).clip(true)
@@ -241,12 +247,12 @@ fn table(ui: &mut egui::Ui, etat: &Etat, sortie: &mut Sortie) {
                     sortie.push(Message::LargeursColonnes(changees));
                 }
             }
-            body.rows(HAUTEUR_LIGNE, etat.visibles.len(), |mut ligne| {
+            body.rows(aff.hauteur_ligne.px(), etat.visibles.len(), |mut ligne| {
                 let film = &etat.films[etat.visibles[ligne.index()]];
                 let selectionne = etat.selection.contains(&film.id);
                 ligne.set_selected(selectionne);
                 for col in &colonnes {
-                    ligne.col(|ui| cellule(ui, etat, film, *col));
+                    ligne.col(|ui| cellule(ui, etat, film, *col, aff));
                 }
                 let reponse = ligne.response();
                 if reponse.clicked() {
@@ -358,10 +364,51 @@ pub fn infobulle_etat(etat: &Etat, col: Colonne, e: EtatCellule) -> Option<Strin
     Some(etat.i18n.t_args(cle, &[("column", nom.as_str())]))
 }
 
-fn cellule(ui: &mut egui::Ui, etat: &Etat, film: &Film, col: Colonne) {
+/// Largeur des colonnes d'état : plus large quand elles affichent du texte.
+pub fn largeur_etat(aff: AffichageTableau) -> f32 {
+    if aff.icones_etat {
+        LARGEUR_ETAT
+    } else {
+        LARGEUR_ETAT_TEXTE
+    }
+}
+
+/// Cellule d'état : pictogramme, ou court texte (Oui, Non...) quand les icônes sont désactivées.
+pub fn cellule_etat_affichee(
+    ui: &mut egui::Ui,
+    i: &I18n,
+    e: EtatCellule,
+    icones: bool,
+) -> egui::Response {
+    if icones {
+        return cellule_etat(ui, e);
+    }
+    let taille = vec2(
+        ui.available_width().max(12.0),
+        ui.available_height().max(12.0),
+    );
+    let (rect, reponse) = ui.allocate_exact_size(taille, Sense::hover());
+    let (texte, couleur) = match e {
+        EtatCellule::Oui => (i.t("Button.yes"), ui.visuals().text_color()),
+        EtatCellule::Non => (i.t("Button.no"), ROUGE),
+        EtatCellule::Attention => (i.t("gui.state.short.partial"), ui.visuals().text_color()),
+        EtatCellule::Nouveau => (i.t("gui.state.short.new"), BLEU),
+        EtatCellule::Vide => return reponse,
+    };
+    ui.painter().with_clip_rect(rect).text(
+        rect.center(),
+        egui::Align2::CENTER_CENTER,
+        texte,
+        egui::FontId::proportional(12.0),
+        couleur,
+    );
+    reponse
+}
+
+fn cellule(ui: &mut egui::Ui, etat: &Etat, film: &Film, col: Colonne, aff: AffichageTableau) {
     if let Some(e) = etat_film(film, col) {
         filets(ui);
-        let reponse = cellule_etat(ui, e);
+        let reponse = cellule_etat_affichee(ui, &etat.i18n, e, aff.icones_etat);
         if let Some(texte) = infobulle_etat(etat, col, e) {
             reponse.on_hover_text(texte);
         }

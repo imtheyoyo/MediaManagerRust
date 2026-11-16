@@ -5,6 +5,7 @@
 //! - [`base`] : base SQLite (films, sagas, séries), migrations ;
 //! - [`reglages`] : réglages JSON atomiques ;
 //! - [`secrets`] : clés d'API et mots de passe hors du fichier de réglages ;
+//! - [`services`] : liste des services à clé d'API et accès à leurs clés ;
 //! - [`sauvegarde`] : archives quotidiennes, rotation, restauration.
 //!
 //! [`Stockage::demarrer`] enchaîne le tout dans l'ordre sûr.
@@ -16,6 +17,7 @@ pub mod erreur;
 pub mod reglages;
 pub mod sauvegarde;
 pub mod secrets;
+pub mod services;
 pub mod verrou;
 
 #[cfg(test)]
@@ -32,6 +34,7 @@ pub use reglages::{
 };
 pub use sauvegarde::{EtatOuverture, EtatSauvegarde};
 pub use secrets::{CoffreAuto, CoffreFichier, CoffreMemoire, CoffreSecrets};
+pub use services::{DefinitionService, SERVICES, definition_service};
 pub use verrou::VerrouInstance;
 
 /// Ce qui s'est passé au démarrage (à présenter à l'utilisateur au besoin).

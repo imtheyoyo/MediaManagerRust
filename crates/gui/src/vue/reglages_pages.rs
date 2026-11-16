@@ -12,7 +12,7 @@ use crate::etat::{ActionDialogue, Etat, EtatDialogueReglages, Message};
 use crate::gabarits::{self, ChampGabarit, Exemples};
 use crate::i18n::{I18n, Langue};
 use crate::polices;
-use crate::reglages::{Page, Reglages, Theme};
+use crate::reglages::{HauteurLigne, Page, Reglages, Theme};
 use crate::selecteur::{CibleDossier, CibleFichier};
 use crate::source_donnees::ReglagesServices;
 use crate::validation::{self, ErreurChamp};
@@ -77,7 +77,7 @@ fn nombre_borne(ui: &mut Ui, i: &I18n, cle: &str, valeur: &mut u32, min: u32, ma
     ui.end_row();
 }
 
-fn grille(id: &str) -> egui::Grid {
+fn grille(id: impl std::hash::Hash + std::fmt::Debug) -> egui::Grid {
     egui::Grid::new(id).num_columns(2).spacing([14.0, 8.0])
 }
 
@@ -202,6 +202,186 @@ fn bientot(ui: &mut Ui, i: &I18n, cles: &[&str]) {
                 .on_disabled_hover_text(i.t("gui.settings.soon"));
         }
     });
+}
+
+/// Hauteur maximale de la liste des colonnes (la liste défile au-delà).
+const HAUTEUR_COLONNES: f32 = 270.0;
+
+/// Une ligne de la liste des colonnes : ce que l'utilisateur a changé.
+#[derive(Default)]
+struct ChangeColonne {
+    visible: Option<bool>,
+    /// -1 : monter, 1 : descendre.
+    deplacement: i32,
+    largeur: Option<f32>,
+}
+
+/// Ligne de la liste des colonnes : case de visibilité, boutons monter / descendre, largeur par
+/// défaut (`None` : colonne à largeur automatique ou fixe).
+fn ligne_colonne(
+    ui: &mut Ui,
+    i: &I18n,
+    libelle: &str,
+    (visible, peut_masquer): (bool, bool),
+    (rang, total): (usize, usize),
+    largeur: Option<f32>,
+) -> ChangeColonne {
+    use crate::vue::editeur::composants::{Glyphe, bouton};
+    let mut c = ChangeColonne::default();
+    let mut v = visible;
+    if ui
+        .add_enabled(peut_masquer, egui::Checkbox::new(&mut v, libelle))
+        .changed()
+    {
+        c.visible = Some(v);
+    }
+    if bouton(ui, Glyphe::Haut, rang > 0, &i.t("Button.moveup")).clicked() {
+        c.deplacement = -1;
+    }
+    if bouton(ui, Glyphe::Bas, rang + 1 < total, &i.t("Button.movedown")).clicked() {
+        c.deplacement = 1;
+    }
+    match largeur {
+        Some(mut l) => {
+            if ui
+                .add(
+                    egui::DragValue::new(&mut l)
+                        .range(30.0..=900.0)
+                        .speed(1.0)
+                        .max_decimals(0)
+                        .suffix(" px"),
+                )
+                .changed()
+            {
+                c.largeur = Some(l.round());
+            }
+        }
+        None => {
+            ui.add_enabled(false, egui::Label::new(i.t("gui.settings.table.widthauto")));
+        }
+    }
+    ui.end_row();
+    c
+}
+
+/// Page « Interface » des films et des séries : colonnes du tableau (affichage, ordre, largeur
+/// par défaut), options d'affichage. Les colonnes sont appliquées tout de suite par messages ;
+/// les options d'affichage modifient la copie de travail des réglages.
+fn page_interface(ui: &mut Ui, etat: &Etat, m: Module, r: &mut Reglages, sortie: &mut Sortie) {
+    let i = &etat.i18n;
+    let series = m == Module::Series;
+    section(ui, i, "gui.settings.table.columns");
+    note(ui, i.t("gui.settings.table.columns.note"));
+    ui.add_space(4.0);
+    ScrollArea::vertical()
+        .id_salt(("colonnes_interface", series))
+        .max_height(HAUTEUR_COLONNES)
+        .auto_shrink([false, true])
+        .show(ui, |ui| {
+            egui::Grid::new(("grille_colonnes_interface", series))
+                .num_columns(4)
+                .spacing([10.0, 4.0])
+                .show(ui, |ui| {
+                    if series {
+                        let total = etat.colonnes_series.len();
+                        for (rang, c) in etat.colonnes_series.iter().enumerate() {
+                            let col = c.colonne;
+                            let libelle = i.t(col.cle_i18n());
+                            let largeur = (!col.est_booleenne()
+                                && col != crate::modele::ColonneSerie::Titre)
+                                .then(|| etat.largeur_colonne_serie(col));
+                            let ch = ligne_colonne(
+                                ui,
+                                i,
+                                &libelle,
+                                (c.visible, col != crate::modele::ColonneSerie::Titre),
+                                (rang, total),
+                                largeur,
+                            );
+                            if let Some(v) = ch.visible {
+                                sortie.push(Message::ColonneSerieVisible(col, v));
+                            }
+                            if ch.deplacement != 0 {
+                                sortie.push(Message::OrdreColonneSerie(col, ch.deplacement));
+                            }
+                            if let Some(l) = ch.largeur {
+                                sortie.push(Message::LargeurColonneSerie(col, Some(l)));
+                            }
+                        }
+                    } else {
+                        let total = etat.colonnes.len();
+                        for (rang, c) in etat.colonnes.iter().enumerate() {
+                            let col = c.colonne;
+                            let libelle = i.t(col.cle_i18n());
+                            let largeur = (!col.est_booleenne()
+                                && col != crate::modele::Colonne::Titre)
+                                .then(|| etat.largeur_colonne(col));
+                            let ch = ligne_colonne(
+                                ui,
+                                i,
+                                &libelle,
+                                (c.visible, col != crate::modele::Colonne::Titre),
+                                (rang, total),
+                                largeur,
+                            );
+                            if let Some(v) = ch.visible {
+                                sortie.push(Message::ColonneVisible(col, v));
+                            }
+                            if ch.deplacement != 0 {
+                                sortie.push(Message::OrdreColonne(col, ch.deplacement));
+                            }
+                            if let Some(l) = ch.largeur {
+                                sortie.push(Message::LargeurColonne(col, Some(l)));
+                            }
+                        }
+                    }
+                });
+        });
+    ui.add_space(4.0);
+    if ui.button(i.t("gui.settings.table.reset")).clicked() {
+        sortie.push(Message::ReinitialiserColonnes(series));
+    }
+    section(ui, i, "gui.settings.table.display");
+    let aff = if series {
+        &mut r.affichage_series
+    } else {
+        &mut r.affichage_films
+    };
+    case(ui, i, &mut aff.lignes_rayees, "gui.settings.table.striped");
+    case(
+        ui,
+        i,
+        &mut aff.icones_etat,
+        "gui.settings.table.statusicons",
+    );
+    ui.add_space(4.0);
+    grille(("grille_affichage_interface", series)).show(ui, |ui| {
+        etiquette(ui, i, "gui.settings.table.rowheight");
+        let options: Vec<(HauteurLigne, &str)> =
+            HauteurLigne::TOUTES.iter().map(|h| (*h, h.cle())).collect();
+        choix(
+            ui,
+            i,
+            if series {
+                "hauteur_ligne_series"
+            } else {
+                "hauteur_ligne_films"
+            },
+            &mut aff.hauteur_ligne,
+            &options,
+        );
+        ui.end_row();
+    });
+    ui.add_space(8.0);
+    bientot(
+        ui,
+        i,
+        &[
+            "gui.settings.soon.missing",
+            "gui.settings.soon.searchfields",
+            "gui.settings.soon.newindicator",
+        ],
+    );
 }
 
 const TAILLES_IMAGE: [(TailleImage, &str); 4] = [
@@ -336,16 +516,8 @@ pub fn page(
         Page::Divers => page_divers(ui, i, s),
         Page::Films => page_racine(ui, i, Module::Films, s),
         Page::Series => page_racine(ui, i, Module::Series, s),
-        Page::FilmsInterface | Page::SeriesInterface => bientot(
-            ui,
-            i,
-            &[
-                "gui.settings.soon.columns",
-                "gui.settings.soon.missing",
-                "gui.settings.soon.searchfields",
-                "gui.settings.soon.newindicator",
-            ],
-        ),
+        Page::FilmsInterface => page_interface(ui, etat, Module::Films, r, sortie),
+        Page::SeriesInterface => page_interface(ui, etat, Module::Series, r, sortie),
         Page::FilmsSource => page_source(ui, etat, d, Module::Films, s, sortie),
         Page::SeriesSource => page_source(ui, etat, d, Module::Series, s, sortie),
         Page::FilmsNfo => page_nfo(ui, i, Module::Films, s),

@@ -27,7 +27,10 @@ use std::time::Duration;
 use crate::modele::{FluxAudio, FluxSousTitres, FluxVideo};
 
 pub use application::appliquer_au_fichier;
-pub use outils::{ConfigOutils, Outils, trouver_outils, version_outil};
+pub use execution::executer_en_continu;
+pub use outils::{
+    ConfigOutils, Outils, trouver_outils, trouver_yt_dlp, version_outil, version_yt_dlp,
+};
 
 /// Délai maximal d'analyse par défaut.
 pub const DELAI_PAR_DEFAUT: Duration = Duration::from_secs(120);
@@ -63,6 +66,8 @@ pub enum ErreurFlux {
     },
     #[error("sortie de {outil} inexploitable : {raison}")]
     SortieInvalide { outil: String, raison: String },
+    #[error("exécution annulée")]
+    Annule,
 }
 
 /// Informations techniques normalisées d'un fichier média.

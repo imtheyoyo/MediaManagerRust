@@ -30,6 +30,74 @@ impl Theme {
     }
 }
 
+/// Hauteur des lignes d'un tableau.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum HauteurLigne {
+    Compacte,
+    #[default]
+    Normale,
+    Aeree,
+}
+
+impl HauteurLigne {
+    pub const TOUTES: [HauteurLigne; 3] = [
+        HauteurLigne::Compacte,
+        HauteurLigne::Normale,
+        HauteurLigne::Aeree,
+    ];
+
+    /// Hauteur en points.
+    pub fn px(self) -> f32 {
+        match self {
+            HauteurLigne::Compacte => 19.0,
+            HauteurLigne::Normale => 22.0,
+            HauteurLigne::Aeree => 28.0,
+        }
+    }
+
+    /// Identifiant de persistance (`ui.json`).
+    pub fn id(self) -> &'static str {
+        match self {
+            HauteurLigne::Compacte => "compacte",
+            HauteurLigne::Normale => "normale",
+            HauteurLigne::Aeree => "aeree",
+        }
+    }
+
+    pub fn depuis_id(id: &str) -> Option<HauteurLigne> {
+        HauteurLigne::TOUTES.into_iter().find(|h| h.id() == id)
+    }
+
+    /// Clé de traduction du libellé.
+    pub fn cle(self) -> &'static str {
+        match self {
+            HauteurLigne::Compacte => "gui.settings.table.rowheight.compact",
+            HauteurLigne::Normale => "gui.settings.table.rowheight.normal",
+            HauteurLigne::Aeree => "gui.settings.table.rowheight.airy",
+        }
+    }
+}
+
+/// Options d'affichage d'un tableau (Films ou Séries).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct AffichageTableau {
+    /// Lignes alternées (fond rayé).
+    pub lignes_rayees: bool,
+    pub hauteur_ligne: HauteurLigne,
+    /// Pictogrammes dans les colonnes d'état (sinon : texte).
+    pub icones_etat: bool,
+}
+
+impl Default for AffichageTableau {
+    fn default() -> Self {
+        Self {
+            lignes_rayees: false,
+            hauteur_ligne: HauteurLigne::Normale,
+            icones_etat: true,
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct Reglages {
     pub langue: Langue,
@@ -38,6 +106,10 @@ pub struct Reglages {
     pub afficher_memoire: bool,
     /// Recherche d'une nouvelle version du programme au démarrage.
     pub verifier_mises_a_jour: bool,
+    /// Affichage du tableau des films.
+    pub affichage_films: AffichageTableau,
+    /// Affichage du tableau des séries.
+    pub affichage_series: AffichageTableau,
 }
 
 impl Default for Reglages {
@@ -48,6 +120,8 @@ impl Default for Reglages {
             memoriser_module: true,
             afficher_memoire: false,
             verifier_mises_a_jour: true,
+            affichage_films: AffichageTableau::default(),
+            affichage_series: AffichageTableau::default(),
         }
     }
 }

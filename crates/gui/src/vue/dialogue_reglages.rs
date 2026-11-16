@@ -428,7 +428,12 @@ mod tests {
             Divers => &["Settings.imagecache"],
             Films => &["gui.settings.section.tasks", "Settings.renamer.afterscrape"],
             Series => &["gui.settings.section.tasks"],
-            FilmsInterface | SeriesInterface => &["gui.settings.soon", "gui.settings.soon.columns"],
+            FilmsInterface | SeriesInterface => &[
+                "gui.settings.table.columns",
+                "gui.settings.table.display",
+                "gui.settings.soon",
+                "gui.settings.soon.missing",
+            ],
             FilmsSource | SeriesSource => &["Settings.folders"],
             FilmsNfo | SeriesNfo => &["gui.settings.nfo.format"],
             FilmsExtracteur | SeriesExtracteur => &["gui.settings.scraper.language"],

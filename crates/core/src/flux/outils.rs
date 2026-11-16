@@ -166,3 +166,44 @@ pub fn version_outil(chemin: &Path) -> Option<String> {
     }
     .map(str::to_string)
 }
+
+/// Cherche `yt-dlp` : chemin réglé par l'utilisateur (exécutable quel que
+/// soit son nom, ou dossier le contenant), puis dossier de l'application
+/// (`outils/`, `addons/`, le dossier lui-même), enfin `PATH`. Le délai de
+/// la configuration n'intervient pas ici.
+pub fn trouver_yt_dlp(config: &ConfigOutils, chemin_reglage: &str) -> Option<PathBuf> {
+    let regle = chemin_reglage.trim();
+    if !regle.is_empty() {
+        let regle = Path::new(regle);
+        if regle.is_file() {
+            if est_executable(regle) {
+                return Some(regle.to_path_buf());
+            }
+        } else if let Some(trouve) = dans_dossier("yt-dlp", regle) {
+            return Some(trouve);
+        }
+    }
+    let dossier = config.dossier_application.clone().or_else(|| {
+        std::env::current_exe()
+            .ok()
+            .and_then(|e| e.parent().map(Path::to_path_buf))
+    });
+    let path = config.path.clone().or_else(|| std::env::var_os("PATH"));
+    trouver_outil("yt-dlp", None, dossier.as_deref(), path.as_deref())
+}
+
+/// Version annoncée par `yt-dlp --version` (délai de 10 s) ; `None` si
+/// l'outil ne se lance pas.
+pub fn version_yt_dlp(chemin: &Path) -> Option<String> {
+    let sortie = execution::executer(
+        chemin,
+        &[OsString::from("--version")],
+        Duration::from_secs(10),
+    )
+    .ok()?;
+    sortie
+        .lines()
+        .map(str::trim)
+        .find(|l| !l.is_empty())
+        .map(str::to_string)
+}

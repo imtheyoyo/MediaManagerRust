@@ -33,6 +33,12 @@ pub enum ErreurApp {
     )]
     OutilsAnalyseAbsents,
 
+    /// Un outil externe (yt-dlp…) est introuvable.
+    #[error(
+        "{0} est introuvable : placez {0}.exe dans le dossier outils/ à côté de l'exécutable, ou indiquez son chemin dans les réglages (Outils externes)"
+    )]
+    OutilIntrouvable(String),
+
     /// Téléchargement d'une image impossible.
     #[error("téléchargement de {url} impossible : {message}")]
     Telechargement { url: String, message: String },

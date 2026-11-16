@@ -41,6 +41,9 @@ use crate::taches::{GestionnaireTaches, PoigneeTache, TypeTache};
 pub struct ConfigServices {
     /// URL de base de l'API TMDB (miroir, tests) ; `None` = service officiel.
     pub url_api_tmdb: Option<String>,
+    /// URL de base des autres services (`omdb`, `trakt`, `mdblist`, `fanart`,
+    /// `simkl`) : miroir, tests ; absent = service officiel.
+    pub urls_services: std::collections::BTreeMap<String, String>,
     /// Cache disque des réponses HTTP dans `cache/http`.
     pub cache_http: bool,
     pub mise_a_jour: OptionsMiseAJour,
@@ -61,6 +64,7 @@ impl Default for ConfigServices {
     fn default() -> Self {
         Self {
             url_api_tmdb: None,
+            urls_services: std::collections::BTreeMap::new(),
             cache_http: true,
             mise_a_jour: OptionsMiseAJour::default(),
             artwork: ConfigArtwork::default(),
@@ -125,7 +129,7 @@ impl Noyau {
 /// depuis un code synchrone ; les traitements longs renvoient une
 /// [`PoigneeTache`].
 pub struct Application {
-    noyau: Arc<Noyau>,
+    pub(crate) noyau: Arc<Noyau>,
     taches: GestionnaireTaches,
     diffuseur: Arc<Diffuseur>,
     rapport: RapportDemarrage,
@@ -304,7 +308,7 @@ impl Application {
         &self.taches
     }
 
-    fn lancer<T, F>(&self, nom: &str, t: TypeTache, f: F) -> PoigneeTache<T>
+    pub(crate) fn lancer<T, F>(&self, nom: &str, t: TypeTache, f: F) -> PoigneeTache<T>
     where
         T: Send + 'static,
         F: FnOnce(&Noyau, &crate::taches::ContexteTache) -> Resultat<T> + Send + 'static,

@@ -7,7 +7,6 @@ use crate::reglages::Theme;
 use crate::source_donnees::{
     EDITIONS, ElementManquant, FichierInutileAffiche, GroupeManquants, ModeleExportAffiche,
     ModifsLot, RapportExportAffiche, RequeteRecherche, ResultatRecherche, SOURCES_MEDIA,
-    SerieAffichage, StatutSerie,
 };
 use std::fmt;
 
@@ -23,10 +22,6 @@ pub(crate) fn liste(s: &str) -> Vec<String> {
         .map(|x| x.trim().to_string())
         .filter(|x| !x.is_empty())
         .collect()
-}
-
-pub(crate) fn nombre(s: &str) -> Option<f64> {
-    s.trim().replace(',', ".").parse().ok()
 }
 
 // ------------------------------------------------------------------ recherche d'extracteur
@@ -95,138 +90,55 @@ pub enum ActionRecherche {
 
 // ------------------------------------------------------------------ éditeur de série
 
-/// Copie éditable d'une série (champs numériques sous forme de texte pour la validation).
-#[derive(Clone, Debug, PartialEq, Default)]
-pub struct SerieEdite {
+pub use crate::editeur_serie::{
+    ActionEditeurSerie, ChampSerie, ErreurChampSerie, EtatEditeurSerie, OngletSerie, SerieEdite,
+    valider_serie,
+};
+
+// ------------------------------------------------------------------ film hors ligne
+
+/// Dialogue « Créer un film hors ligne » : titre, année et source de données.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct EtatHorsLigne {
     pub titre: String,
-    pub titre_original: String,
+    /// Année (vide : inconnue).
     pub annee: String,
-    pub resume: String,
-    /// Genres séparés par des virgules.
-    pub genres: String,
-    pub statut: StatutSerie,
-    pub note: String,
-    pub verrouillee: bool,
-    pub imdb: String,
-    pub tmdb: String,
-    pub tvdb: String,
+    /// Sources de films proposées.
+    pub sources: Vec<String>,
+    /// Rang de la source choisie.
+    pub source: usize,
+    /// Clé de traduction de l'erreur affichée.
+    pub erreur: Option<&'static str>,
 }
 
-impl SerieEdite {
-    pub fn depuis(s: &SerieAffichage) -> Self {
-        Self {
-            titre: s.titre.clone(),
-            titre_original: s.titre_original.clone(),
-            annee: if s.annee > 0 {
-                s.annee.to_string()
-            } else {
-                String::new()
-            },
-            resume: s.resume.clone(),
-            genres: s.genres.join(", "),
-            statut: s.statut,
-            note: if s.note > 0.0 {
-                format!("{:.1}", s.note)
-            } else {
-                String::new()
-            },
-            verrouillee: s.verrouillee,
-            imdb: s.imdb.clone(),
-            tmdb: s.tmdb.clone(),
-            tvdb: s.tvdb.clone(),
+impl EtatHorsLigne {
+    /// Titre rogné et année lue ; `Err` donne la clé de traduction de l'erreur.
+    pub fn valider(&self) -> Result<(String, u32), &'static str> {
+        let titre = self.titre.trim().to_string();
+        if titre.is_empty() {
+            return Err("editor.error.title");
         }
-    }
-
-    /// Écrit le brouillon (supposé valide) dans la série affichée.
-    pub fn appliquer(&self, s: &mut SerieAffichage) {
-        s.titre = self.titre.trim().to_string();
-        s.titre_original = self.titre_original.trim().to_string();
-        s.annee = self.annee.trim().parse().unwrap_or(0);
-        s.resume = self.resume.clone();
-        s.genres = liste(&self.genres);
-        s.statut = self.statut;
-        s.note = nombre(&self.note).map(|n| n as f32).unwrap_or(0.0);
-        s.verrouillee = self.verrouillee;
-        s.imdb = self.imdb.trim().to_string();
-        s.tmdb = self.tmdb.trim().to_string();
-        s.tvdb = self.tvdb.trim().to_string();
-    }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ChampSerie {
-    Titre,
-    Annee,
-    Note,
-    Imdb,
-    Tmdb,
-    Tvdb,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct ErreurChampSerie {
-    pub champ: ChampSerie,
-    pub cle: &'static str,
-}
-
-/// Validation du brouillon d'une série ; liste vide = valide. L'année, la note et les
-/// identifiants peuvent rester vides.
-pub fn valider_serie(b: &SerieEdite) -> Vec<ErreurChampSerie> {
-    let mut e = Vec::new();
-    let mut err = |champ, cle| e.push(ErreurChampSerie { champ, cle });
-    if b.titre.trim().is_empty() {
-        err(ChampSerie::Titre, "editor.error.title");
-    }
-    let annee = b.annee.trim();
-    if !annee.is_empty()
-        && !annee
-            .parse::<u32>()
-            .is_ok_and(|a| (1870..=2100).contains(&a))
-    {
-        err(ChampSerie::Annee, "editor.error.year");
-    }
-    if !b.note.trim().is_empty() && !nombre(&b.note).is_some_and(|n| (0.0..=10.0).contains(&n)) {
-        err(ChampSerie::Note, "editor.error.rating");
-    }
-    let imdb = b.imdb.trim();
-    if !imdb.is_empty()
-        && !(imdb.starts_with("tt")
-            && imdb.len() >= 9
-            && imdb[2..].chars().all(|c| c.is_ascii_digit()))
-    {
-        err(ChampSerie::Imdb, "editor.error.imdb");
-    }
-    let tmdb = b.tmdb.trim();
-    if !tmdb.is_empty() && !tmdb.chars().all(|c| c.is_ascii_digit()) {
-        err(ChampSerie::Tmdb, "editor.error.tmdb");
-    }
-    let tvdb = b.tvdb.trim();
-    if !tvdb.is_empty() && !tvdb.chars().all(|c| c.is_ascii_digit()) {
-        err(ChampSerie::Tvdb, "editor.error.tvdb");
-    }
-    e
-}
-
-#[derive(Clone, Debug)]
-pub struct EtatEditeurSerie {
-    /// Identifiant de la série éditée.
-    pub id: String,
-    pub brouillon: SerieEdite,
-    pub erreurs: Vec<ErreurChampSerie>,
-}
-
-impl EtatEditeurSerie {
-    pub fn erreur(&self, champ: ChampSerie) -> Option<&'static str> {
-        self.erreurs
-            .iter()
-            .find(|e| e.champ == champ)
-            .map(|e| e.cle)
+        let annee = self.annee.trim();
+        let annee = if annee.is_empty() {
+            0
+        } else {
+            match annee.parse::<u32>() {
+                Ok(a) if (1870..=2100).contains(&a) => a,
+                _ => return Err("editor.error.year"),
+            }
+        };
+        if self.sources.get(self.source).is_none() {
+            return Err("gui.offline.nosource");
+        }
+        Ok((titre, annee))
     }
 }
 
 #[derive(Clone, Debug)]
-pub enum ActionEditeurSerie {
-    Brouillon(Box<SerieEdite>),
+pub enum ActionHorsLigne {
+    Titre(String),
+    Annee(String),
+    Source(usize),
     Valider,
     Abandonner,
 }

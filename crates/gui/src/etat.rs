@@ -5,25 +5,31 @@ use crate::collections::NoeudSaga;
 use crate::commandes::Commande;
 use crate::dialogues::{
     ActionAssistant, ActionConfirmee, ActionEditeur, ActionEditeurSerie, ActionEditionLot,
-    ActionExport, ActionNettoyage, ActionRecherche, CaseConfirmation, EtatAssistant,
-    EtatConfirmation, EtatEditeur, EtatEditeurSerie, EtatEditionLot, EtatExport, EtatManquants,
-    EtatNettoyage, EtatRecherche, FilmEdite, LigneNettoyage, OngletEditeur, OptionsEditeur,
-    PhaseExport, PhaseNettoyage, SerieEdite, valider, valider_serie,
+    ActionExport, ActionHorsLigne, ActionNettoyage, ActionRecherche, CaseConfirmation,
+    EtatAssistant, EtatConfirmation, EtatEditeur, EtatEditeurSerie, EtatEditionLot, EtatExport,
+    EtatHorsLigne, EtatManquants, EtatNettoyage, EtatRecherche, FilmEdite, LigneNettoyage,
+    OngletEditeur, OngletSerie, OptionsEditeur, PhaseExport, PhaseNettoyage, SerieEdite, valider,
+    valider_serie,
 };
 use crate::filtres::{ActionFiltre, ContexteFiltre, FiltresAvances, OngletFiltre};
 use crate::i18n::{I18n, Langue};
 use crate::mise_a_jour::{self, ConfigMiseAJour, EtapeInstallation, Publication, Verdict};
-use crate::modele::{Colonne, ColonneEtat, Film, Ordre, colonnes_par_defaut, normaliser};
+use crate::modele::{
+    Colonne, ColonneEtat, ColonneSerie, ColonneSerieEtat, Film, Ordre, colonnes_par_defaut,
+    colonnes_series_par_defaut, normaliser,
+};
 use crate::ouverture::{self, CibleOuverture, Lanceur, Systeme};
-use crate::persistance::{ColonnePersistee, EtatInterface, GeometrieFenetre, TriPersiste};
-use crate::reglages::{Page, Reglages, Theme};
+use crate::persistance::{
+    AffichagePersiste, ColonnePersistee, EtatInterface, GeometrieFenetre, TriPersiste,
+};
+use crate::reglages::{AffichageTableau, HauteurLigne, Page, Reglages, Theme};
 use crate::renommage::ApercuFilm;
 use crate::selecteur::{self, CibleDossier, CibleFichier, SelecteurDossier, SelecteurFichier};
 use crate::source_donnees::{
-    CibleExport, DiagnosticOutils, FichierInutileAffiche, GroupeManquants, RapportExportAffiche,
-    ReglagesServices, RequeteRecherche, RequeteRechercheSerie, ResultatRecherche, Retour,
-    SECRET_CLE_TMDB, SagaAffichage, SerieAffichage, SourceDonnees, SourceFactice, Travail,
-    titre_nettoye,
+    CibleExport, CreationHorsLigne, DiagnosticOutils, FichierInutileAffiche, GroupeManquants,
+    RapportExportAffiche, ReglagesServices, RequeteRecherche, RequeteRechercheSerie,
+    ResultatRecherche, Retour, SECRET_CLE_TMDB, SagaAffichage, SerieAffichage, SourceDonnees,
+    SourceFactice, Travail, titre_nettoye,
 };
 use crate::taches::{IssueTache, Repaint, Tache};
 use regex::Regex;
@@ -190,6 +196,7 @@ pub enum Dialogue {
     Export(Box<EtatExport>),
     Nettoyage(Box<EtatNettoyage>),
     EditionLot(Box<EtatEditionLot>),
+    HorsLigne(Box<EtatHorsLigne>),
 }
 
 /// Étape affichée par le dialogue de mise à jour du programme.
@@ -241,6 +248,7 @@ pub enum ActionDialogue {
     Export(ActionExport),
     Nettoyage(ActionNettoyage),
     EditionLot(ActionEditionLot),
+    HorsLigne(ActionHorsLigne),
 }
 
 /// Messages : seul `Etat::appliquer` modifie l'état.
@@ -274,6 +282,19 @@ pub enum Message {
     DeplacerColonne(Colonne, i32),
     /// Largeurs relevées après redimensionnement par l'utilisateur.
     LargeursColonnes(Vec<(Colonne, f32)>),
+    /// Déplace une colonne d'un cran dans la liste complète (colonnes masquées comprises).
+    OrdreColonne(Colonne, i32),
+    /// Largeur par défaut d'une colonne (`None` : largeur initiale).
+    LargeurColonne(Colonne, Option<f32>),
+    ColonneSerieVisible(ColonneSerie, bool),
+    /// Déplace une colonne du tableau Séries d'un cran parmi les colonnes visibles.
+    DeplacerColonneSerie(ColonneSerie, i32),
+    /// Déplace une colonne du tableau Séries d'un cran dans la liste complète.
+    OrdreColonneSerie(ColonneSerie, i32),
+    LargeursColonnesSerie(Vec<(ColonneSerie, f32)>),
+    LargeurColonneSerie(ColonneSerie, Option<f32>),
+    /// Rétablit les colonnes par défaut du tableau Séries (`true`) ou Films (`false`).
+    ReinitialiserColonnes(bool),
     /// Largeur du panneau de détails (position du séparateur).
     LargeurDetails(f32),
     Fenetre(GeometrieFenetre),
@@ -419,6 +440,8 @@ pub struct Etat {
     pub filtres_ouverts: bool,
     pub onglet_filtres: OngletFiltre,
     pub colonnes: Vec<ColonneEtat>,
+    /// Colonnes du tableau des séries (ordre d'affichage, visibilité, largeur).
+    pub colonnes_series: Vec<ColonneSerieEtat>,
     pub tri: Vec<(Colonne, Ordre)>,
     /// Indices (dans `films`) triés ET filtrés.
     pub visibles: Vec<usize>,
@@ -519,6 +542,7 @@ impl Etat {
             filtres_ouverts: false,
             onglet_filtres: OngletFiltre::Details,
             colonnes: colonnes_par_defaut(),
+            colonnes_series: colonnes_series_par_defaut(),
             tri: vec![(Colonne::Titre, Ordre::Croissant)],
             visibles: Vec::new(),
             selection: BTreeSet::new(),
@@ -580,6 +604,17 @@ impl Etat {
                     largeur: c.largeur,
                 })
                 .collect(),
+            colonnes_series: self
+                .colonnes_series
+                .iter()
+                .map(|c| ColonnePersistee {
+                    id: c.colonne.id().into(),
+                    visible: c.visible,
+                    largeur: c.largeur,
+                })
+                .collect(),
+            affichage_films: affichage_persiste(self.reglages.affichage_films),
+            affichage_series: affichage_persiste(self.reglages.affichage_series),
             tri: self
                 .tri
                 .iter()
@@ -634,6 +669,28 @@ impl Etat {
             }
             self.colonnes = colonnes;
         }
+        self.reglages.affichage_films = affichage_depuis(&ui.affichage_films);
+        self.reglages.affichage_series = affichage_depuis(&ui.affichage_series);
+        if !ui.colonnes_series.is_empty() {
+            let mut colonnes: Vec<ColonneSerieEtat> = Vec::new();
+            for p in &ui.colonnes_series {
+                if let Some(c) = ColonneSerie::depuis_id(&p.id)
+                    && !colonnes.iter().any(|x| x.colonne == c)
+                {
+                    colonnes.push(ColonneSerieEtat {
+                        colonne: c,
+                        visible: p.visible || c == ColonneSerie::Titre,
+                        largeur: p.largeur.filter(|l| l.is_finite() && *l > 0.0),
+                    });
+                }
+            }
+            for d in colonnes_series_par_defaut() {
+                if !colonnes.iter().any(|x| x.colonne == d.colonne) {
+                    colonnes.push(d);
+                }
+            }
+            self.colonnes_series = colonnes;
+        }
         let tri: Vec<(Colonne, Ordre)> = ui
             .tri
             .iter()
@@ -675,6 +732,22 @@ impl Etat {
 
     pub fn largeur_colonne(&self, colonne: Colonne) -> f32 {
         self.colonnes
+            .iter()
+            .find(|c| c.colonne == colonne)
+            .and_then(|c| c.largeur)
+            .unwrap_or_else(|| colonne.largeur_initiale())
+    }
+
+    pub fn colonnes_series_visibles(&self) -> Vec<ColonneSerie> {
+        self.colonnes_series
+            .iter()
+            .filter(|c| c.visible)
+            .map(|c| c.colonne)
+            .collect()
+    }
+
+    pub fn largeur_colonne_serie(&self, colonne: ColonneSerie) -> f32 {
+        self.colonnes_series
             .iter()
             .find(|c| c.colonne == colonne)
             .and_then(|c| c.largeur)
@@ -878,6 +951,66 @@ impl Etat {
                     {
                         c.largeur = Some(l);
                     }
+                }
+            }
+            Message::OrdreColonne(col, delta) => {
+                if let Some(r) = self.colonnes.iter().position(|c| c.colonne == col) {
+                    echanger(&mut self.colonnes, r, delta);
+                }
+            }
+            Message::LargeurColonne(col, largeur) => {
+                if let Some(c) = self.colonnes.iter_mut().find(|c| c.colonne == col) {
+                    c.largeur = largeur.filter(|l| l.is_finite() && *l > 0.0);
+                }
+            }
+            Message::ColonneSerieVisible(col, visible) => {
+                // La colonne titre ne peut pas être masquée.
+                if let Some(c) = self.colonnes_series.iter_mut().find(|c| c.colonne == col)
+                    && col != ColonneSerie::Titre
+                {
+                    c.visible = visible;
+                }
+            }
+            Message::DeplacerColonneSerie(col, delta) => {
+                let visibles: Vec<usize> = (0..self.colonnes_series.len())
+                    .filter(|&i| self.colonnes_series[i].visible)
+                    .collect();
+                if let Some(rang) = visibles
+                    .iter()
+                    .position(|&i| self.colonnes_series[i].colonne == col)
+                {
+                    let cible = rang as i64 + i64::from(delta.signum());
+                    if cible >= 0 && (cible as usize) < visibles.len() {
+                        self.colonnes_series
+                            .swap(visibles[rang], visibles[cible as usize]);
+                    }
+                }
+            }
+            Message::OrdreColonneSerie(col, delta) => {
+                if let Some(r) = self.colonnes_series.iter().position(|c| c.colonne == col) {
+                    echanger(&mut self.colonnes_series, r, delta);
+                }
+            }
+            Message::LargeursColonnesSerie(largeurs) => {
+                for (col, l) in largeurs {
+                    if let Some(c) = self.colonnes_series.iter_mut().find(|c| c.colonne == col)
+                        && l.is_finite()
+                        && l > 0.0
+                    {
+                        c.largeur = Some(l);
+                    }
+                }
+            }
+            Message::LargeurColonneSerie(col, largeur) => {
+                if let Some(c) = self.colonnes_series.iter_mut().find(|c| c.colonne == col) {
+                    c.largeur = largeur.filter(|l| l.is_finite() && *l > 0.0);
+                }
+            }
+            Message::ReinitialiserColonnes(series) => {
+                if series {
+                    self.colonnes_series = colonnes_series_par_defaut();
+                } else {
+                    self.colonnes = colonnes_par_defaut();
                 }
             }
             Message::LargeurDetails(l) => {
@@ -1390,7 +1523,69 @@ impl Etat {
                 self.lancer_travail(Travail::RecupererEvaluations { ids });
             }
             Commande::EditionGlobale => self.ouvrir_edition_lot(),
+            Commande::CreerHorsLigne => self.ouvrir_hors_ligne(),
             autre => self.notifier_bientot(autre),
+        }
+    }
+
+    // ---- film hors ligne
+
+    fn ouvrir_hors_ligne(&mut self) {
+        if self.services.sources_films.is_empty() {
+            let texte = self.i18n.t("gui.offline.nosource");
+            self.notifier(Niveau::Avertissement, texte);
+            return;
+        }
+        self.dialogue = Some(Dialogue::HorsLigne(Box::new(EtatHorsLigne {
+            sources: self.services.sources_films.clone(),
+            ..EtatHorsLigne::default()
+        })));
+    }
+
+    fn action_hors_ligne(&mut self, action: ActionHorsLigne) {
+        let Some(Dialogue::HorsLigne(e)) = &mut self.dialogue else {
+            return;
+        };
+        match action {
+            ActionHorsLigne::Titre(t) => {
+                e.titre = t;
+                e.erreur = None;
+            }
+            ActionHorsLigne::Annee(a) => {
+                e.annee = a;
+                e.erreur = None;
+            }
+            ActionHorsLigne::Source(n) => e.source = n.min(e.sources.len().saturating_sub(1)),
+            ActionHorsLigne::Abandonner => self.dialogue = None,
+            ActionHorsLigne::Valider => {
+                let (titre, annee) = match e.valider() {
+                    Ok(v) => v,
+                    Err(cle) => {
+                        e.erreur = Some(cle);
+                        return;
+                    }
+                };
+                let source = e.sources[e.source].clone();
+                match self.source.creer_film_hors_ligne(&source, &titre, annee) {
+                    Ok(creation) => {
+                        self.dialogue = None;
+                        match creation {
+                            CreationHorsLigne::Ajoute => {
+                                self.films = self.source.films();
+                                self.recalculer();
+                            }
+                            CreationHorsLigne::AAnalyser => {
+                                self.lancer_travail(Travail::MettreAJourSources)
+                            }
+                        }
+                        let texte = self
+                            .i18n
+                            .t_args("gui.offline.created", &[("title", &titre)]);
+                        self.notifier(Niveau::Info, texte);
+                    }
+                    Err(err) => self.notifier(Niveau::Erreur, err),
+                }
+            }
         }
     }
 
@@ -1855,11 +2050,37 @@ impl Etat {
     // ---- éditeur de série
 
     fn ouvrir_editeur_serie(&mut self, serie: &SerieAffichage) {
+        let brouillon = SerieEdite::depuis(serie, self.source.details_serie(serie));
+        let options = self.options_editeur_serie();
         self.dialogue = Some(Dialogue::EditeurSerie(Box::new(EtatEditeurSerie {
             id: serie.id.clone(),
-            brouillon: SerieEdite::depuis(serie),
+            onglet: OngletSerie::Details,
+            brouillon,
+            options,
             erreurs: Vec::new(),
         })));
+    }
+
+    /// Valeurs proposées par les listes déroulantes de l'éditeur de série.
+    fn options_editeur_serie(&self) -> OptionsEditeur {
+        fn trie(mut v: Vec<String>) -> Vec<String> {
+            v.retain(|x| !x.trim().is_empty());
+            v.sort_by_key(|x| x.to_lowercase());
+            v.dedup_by_key(|x| x.to_lowercase());
+            v
+        }
+        let mut genres: Vec<String> = self.series.iter().flat_map(|s| s.genres.clone()).collect();
+        genres.extend(self.films.iter().flat_map(|f| f.genres.iter().cloned()));
+        let mut certifications: Vec<String> = ["-10", "-12", "-16", "-18", "TP"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        certifications.extend(self.films.iter().map(|f| f.certification.clone()));
+        OptionsEditeur {
+            genres: trie(genres),
+            certifications: trie(certifications),
+            ..OptionsEditeur::default()
+        }
     }
 
     fn action_editeur_serie(&mut self, action: ActionEditeurSerie) {
@@ -1867,11 +2088,18 @@ impl Etat {
             return;
         };
         match action {
+            ActionEditeurSerie::Onglet(o) => e.onglet = o,
             ActionEditeurSerie::Brouillon(b) => {
                 e.brouillon = *b;
                 // Les erreurs disparaissent au fil de la correction.
                 if !e.erreurs.is_empty() {
                     e.erreurs = valider_serie(&e.brouillon);
+                }
+            }
+            ActionEditeurSerie::BasculerVu(noeud) => {
+                match self.source.basculer_vu_series(&[noeud]) {
+                    Ok(()) => self.series = self.source.series(),
+                    Err(err) => self.notifier(Niveau::Erreur, err),
                 }
             }
             ActionEditeurSerie::Abandonner => self.dialogue = None,
@@ -1888,7 +2116,10 @@ impl Etat {
                 };
                 brouillon.appliquer(serie);
                 let copie = serie.clone();
-                if let Err(err) = self.source.enregistrer_serie(&copie) {
+                if let Err(err) = self
+                    .source
+                    .enregistrer_serie_detaillee(&copie, &brouillon.details)
+                {
                     self.notifier(Niveau::Erreur, err);
                 }
             }
@@ -2249,6 +2480,9 @@ impl Etat {
                 self.action_assistant(a)
             }
             (Some(Dialogue::Export(_)), ActionDialogue::Export(a)) => self.action_export(a),
+            (Some(Dialogue::HorsLigne(_)), ActionDialogue::HorsLigne(a)) => {
+                self.action_hors_ligne(a)
+            }
             (Some(Dialogue::Nettoyage(_)), ActionDialogue::Nettoyage(a)) => {
                 self.action_nettoyage(a)
             }
@@ -2852,6 +3086,30 @@ impl Etat {
         if !ids.is_empty() {
             self.lancer_travail(Travail::Renommer { ids });
         }
+    }
+}
+
+/// Échange l'élément de rang `rang` avec son voisin (`delta` < 0 : vers le début).
+fn echanger<T>(v: &mut [T], rang: usize, delta: i32) {
+    let cible = rang as i64 + i64::from(delta.signum());
+    if delta != 0 && cible >= 0 && (cible as usize) < v.len() {
+        v.swap(rang, cible as usize);
+    }
+}
+
+fn affichage_persiste(a: AffichageTableau) -> AffichagePersiste {
+    AffichagePersiste {
+        lignes_rayees: a.lignes_rayees,
+        hauteur_ligne: a.hauteur_ligne.id().into(),
+        icones_etat: a.icones_etat,
+    }
+}
+
+fn affichage_depuis(p: &AffichagePersiste) -> AffichageTableau {
+    AffichageTableau {
+        lignes_rayees: p.lignes_rayees,
+        hauteur_ligne: HauteurLigne::depuis_id(&p.hauteur_ligne).unwrap_or_default(),
+        icones_etat: p.icones_etat,
     }
 }
 
@@ -4320,5 +4578,240 @@ mod tests {
         assert!(e.series.iter().all(|s| s.id != "demo-2"));
         assert!(e.noeud_serie.is_none());
         assert!(notifie(&e, "corbeille"));
+    }
+    // --- Éditeur de série, colonnes des tableaux, film hors ligne ---
+
+    fn editer_serie(e: &mut Etat, f: impl FnOnce(&mut SerieEdite)) {
+        e.appliquer(Message::ChoisirModule(Module::Series));
+        e.appliquer(Message::SelectionnerNoeudSerie(NoeudSerie::Serie(
+            "demo-1".into(),
+        )));
+        e.appliquer(Message::Commande(Commande::Editer));
+        let Some(Dialogue::EditeurSerie(d)) = &e.dialogue else {
+            panic!("éditeur de série non ouvert");
+        };
+        let mut b = d.brouillon.clone();
+        f(&mut b);
+        e.appliquer(Message::Dialogue(ActionDialogue::EditeurSerie(
+            ActionEditeurSerie::Brouillon(Box::new(b)),
+        )));
+    }
+
+    #[test]
+    fn editeur_de_serie_aller_retour_de_l_enregistrement() {
+        use crate::details_film::{FonctionPersonne, PersonneFilm, TypeArt};
+        let mut e = Etat::nouveau();
+        editer_serie(&mut e, |b| {
+            b.titre = "Série modifiée".into();
+            b.annee = "2021".into();
+            b.genres.push("Thriller".into());
+            b.details.pays = "France".into();
+            b.details.production = "Arte".into();
+            b.details.premiere_diffusion = "05/06/2021".into();
+            b.details.titre_triable = "Modifiée (Série)".into();
+            b.details.evaluation_utilisateur = 9.0;
+            b.details.ids = vec![
+                ("tmdb".into(), "42".into()),
+                ("tvdb".into(), "7".into()),
+                ("imdb".into(), "tt1234567".into()),
+            ];
+            b.details.mots_cles = vec!["île".into()];
+            b.details.acteurs = vec![PersonneFilm {
+                nom: "Anna Durand".into(),
+                role: "Léa".into(),
+                fonction: FonctionPersonne::Acteur,
+                ..PersonneFilm::default()
+            }];
+            b.details.urls[TypeArt::Fanart.rang()] = "https://x/f.jpg".into();
+        });
+        e.appliquer(Message::Dialogue(ActionDialogue::EditeurSerie(
+            ActionEditeurSerie::Valider,
+        )));
+        assert!(e.dialogue.is_none());
+        let s = e.series.iter().find(|s| s.id == "demo-1").unwrap().clone();
+        assert_eq!((s.titre.as_str(), s.annee), ("Série modifiée", 2021));
+        assert_eq!(
+            (s.tmdb.as_str(), s.tvdb.as_str(), s.imdb.as_str()),
+            ("42", "7", "tt1234567")
+        );
+        assert_eq!(s.note, 9.0);
+        assert!(s.genres.contains(&"Thriller".to_string()));
+        // Réouverture : tout ce qui a été saisi revient (détails conservés par la source).
+        let d = e.source.details_serie(&s);
+        assert_eq!(d.pays, "France");
+        assert_eq!(d.production, "Arte");
+        assert_eq!(d.premiere_diffusion, "05/06/2021");
+        assert_eq!(d.titre_triable, "Modifiée (Série)");
+        assert_eq!(d.mots_cles, ["île"]);
+        assert_eq!(d.acteurs[0].nom, "Anna Durand");
+        assert_eq!(d.urls[TypeArt::Fanart.rang()], "https://x/f.jpg");
+        e.appliquer(Message::Commande(Commande::Editer));
+        let Some(Dialogue::EditeurSerie(d)) = &e.dialogue else {
+            panic!("éditeur de série non rouvert");
+        };
+        assert_eq!(d.brouillon.details.pays, "France");
+        assert_eq!(d.brouillon.titre, "Série modifiée");
+    }
+
+    #[test]
+    fn editeur_de_serie_refuse_un_brouillon_invalide() {
+        let mut e = Etat::nouveau();
+        editer_serie(&mut e, |b| {
+            b.details.premiere_diffusion = "31/02/2021".into();
+            b.details.ids = vec![("tmdb".into(), "abc".into())];
+        });
+        e.appliquer(Message::Dialogue(ActionDialogue::EditeurSerie(
+            ActionEditeurSerie::Valider,
+        )));
+        let Some(Dialogue::EditeurSerie(d)) = &e.dialogue else {
+            panic!("l'éditeur doit rester ouvert");
+        };
+        assert!(
+            d.erreur(crate::dialogues::ChampSerie::PremiereDiffusion)
+                .is_some()
+        );
+        assert!(d.erreur(crate::dialogues::ChampSerie::Tmdb).is_some());
+    }
+
+    #[test]
+    fn bascule_vu_depuis_l_editeur_de_serie() {
+        let mut e = Etat::nouveau();
+        editer_serie(&mut e, |_| {});
+        let avant = e.series[0].saisons[0].episodes[1].vu;
+        e.appliquer(Message::Dialogue(ActionDialogue::EditeurSerie(
+            ActionEditeurSerie::BasculerVu(NoeudSerie::Episode("demo-1".into(), 1, 1)),
+        )));
+        assert_ne!(e.series[0].saisons[0].episodes[1].vu, avant);
+        assert!(matches!(&e.dialogue, Some(Dialogue::EditeurSerie(_))));
+    }
+
+    #[test]
+    fn colonnes_des_films_ordre_largeur_et_reinitialisation() {
+        let mut e = Etat::nouveau();
+        let rang = |e: &Etat, c: Colonne| e.colonnes.iter().position(|x| x.colonne == c).unwrap();
+        let r = rang(&e, Colonne::Annee);
+        e.appliquer(Message::OrdreColonne(Colonne::Annee, -1));
+        assert_eq!(rang(&e, Colonne::Annee), r - 1);
+        // Une colonne masquée change de place elle aussi.
+        let r = rang(&e, Colonne::Duree);
+        e.appliquer(Message::OrdreColonne(Colonne::Duree, 1));
+        assert_eq!(rang(&e, Colonne::Duree), r + 1);
+        e.appliquer(Message::LargeurColonne(Colonne::Chemin, Some(321.0)));
+        assert_eq!(e.largeur_colonne(Colonne::Chemin), 321.0);
+        e.appliquer(Message::LargeurColonne(Colonne::Chemin, None));
+        assert_eq!(
+            e.largeur_colonne(Colonne::Chemin),
+            Colonne::Chemin.largeur_initiale()
+        );
+        e.appliquer(Message::ColonneVisible(Colonne::Duree, true));
+        e.appliquer(Message::ReinitialiserColonnes(false));
+        assert!(!e.colonnes_visibles().contains(&Colonne::Duree));
+        assert_eq!(e.colonnes_visibles()[0], Colonne::Titre);
+    }
+
+    #[test]
+    fn colonnes_des_series_et_persistance() {
+        use crate::reglages::HauteurLigne;
+        let mut e = Etat::nouveau();
+        assert_eq!(
+            e.colonnes_series_visibles(),
+            [
+                ColonneSerie::Titre,
+                ColonneSerie::Annee,
+                ColonneSerie::Saisons,
+                ColonneSerie::Episodes,
+                ColonneSerie::Vu
+            ]
+        );
+        e.appliquer(Message::ColonneSerieVisible(ColonneSerie::Statut, true));
+        e.appliquer(Message::ColonneSerieVisible(ColonneSerie::Titre, false));
+        assert!(e.colonnes_series_visibles().contains(&ColonneSerie::Titre));
+        e.appliquer(Message::DeplacerColonneSerie(ColonneSerie::Vu, -1));
+        e.appliquer(Message::OrdreColonneSerie(ColonneSerie::Note, 1));
+        e.appliquer(Message::LargeurColonneSerie(
+            ColonneSerie::Statut,
+            Some(150.0),
+        ));
+        let mut r = e.reglages.clone();
+        r.affichage_series.lignes_rayees = true;
+        r.affichage_series.hauteur_ligne = HauteurLigne::Aeree;
+        r.affichage_films.icones_etat = false;
+        e.appliquer(Message::AppliquerReglages(Box::new(r)));
+        let ui = e.instantane_interface();
+        assert_eq!(ui.version, crate::persistance::VERSION_FORMAT);
+        let json = serde_json::to_string(&ui).unwrap();
+        let relu: EtatInterface = serde_json::from_str(&json).unwrap();
+        let mut f = Etat::nouveau();
+        f.restaurer_interface(&relu);
+        assert_eq!(f.colonnes_series_visibles(), e.colonnes_series_visibles());
+        assert_eq!(f.largeur_colonne_serie(ColonneSerie::Statut), 150.0);
+        assert!(f.reglages.affichage_series.lignes_rayees);
+        assert_eq!(
+            f.reglages.affichage_series.hauteur_ligne,
+            HauteurLigne::Aeree
+        );
+        assert!(!f.reglages.affichage_films.icones_etat);
+        assert!(!f.reglages.affichage_films.lignes_rayees);
+        assert_eq!(f.instantane_interface(), ui);
+        e.appliquer(Message::ReinitialiserColonnes(true));
+        assert_eq!(e.colonnes_series.len(), ColonneSerie::TOUTES.len());
+        assert_eq!(e.colonnes_series_visibles().len(), 5);
+    }
+
+    #[test]
+    fn restauration_d_un_ui_json_de_version_1() {
+        // Un fichier écrit avant l'ajout des colonnes de séries se restaure sans les perdre.
+        let ui: EtatInterface = serde_json::from_str(
+            r#"{"version":1,"theme":"clair","colonnes":[{"id":"year","visible":true},{"id":"title","visible":true}]}"#,
+        )
+        .unwrap();
+        let mut e = Etat::nouveau();
+        e.restaurer_interface(&ui);
+        assert_eq!(e.colonnes_visibles()[..2], [Colonne::Annee, Colonne::Titre]);
+        assert_eq!(e.colonnes_series.len(), ColonneSerie::TOUTES.len());
+        assert_eq!(e.colonnes_series_visibles().len(), 5);
+        assert_eq!(
+            e.reglages.affichage_films,
+            crate::reglages::AffichageTableau::default()
+        );
+    }
+
+    #[test]
+    fn creer_un_film_hors_ligne() {
+        let mut e = Etat::nouveau();
+        let avant = e.films.len();
+        e.appliquer(Message::Commande(Commande::CreerHorsLigne));
+        assert!(matches!(&e.dialogue, Some(Dialogue::HorsLigne(_))));
+        // Titre vide : refusé, le dialogue reste ouvert.
+        e.appliquer(Message::Dialogue(ActionDialogue::HorsLigne(
+            ActionHorsLigne::Valider,
+        )));
+        let Some(Dialogue::HorsLigne(d)) = &e.dialogue else {
+            panic!("dialogue fermé");
+        };
+        assert_eq!(d.erreur, Some("editor.error.title"));
+        e.appliquer(Message::Dialogue(ActionDialogue::HorsLigne(
+            ActionHorsLigne::Titre("Mon film".into()),
+        )));
+        e.appliquer(Message::Dialogue(ActionDialogue::HorsLigne(
+            ActionHorsLigne::Annee("1800".into()),
+        )));
+        e.appliquer(Message::Dialogue(ActionDialogue::HorsLigne(
+            ActionHorsLigne::Valider,
+        )));
+        let Some(Dialogue::HorsLigne(d)) = &e.dialogue else {
+            panic!("dialogue fermé");
+        };
+        assert_eq!(d.erreur, Some("editor.error.year"));
+        e.appliquer(Message::Dialogue(ActionDialogue::HorsLigne(
+            ActionHorsLigne::Annee("2024".into()),
+        )));
+        e.appliquer(Message::Dialogue(ActionDialogue::HorsLigne(
+            ActionHorsLigne::Valider,
+        )));
+        assert!(e.dialogue.is_none());
+        assert_eq!(e.films.len(), avant + 1);
+        let f = e.films.iter().find(|f| f.titre == "Mon film").unwrap();
+        assert_eq!(f.annee, 2024);
     }
 }

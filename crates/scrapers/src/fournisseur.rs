@@ -4,9 +4,9 @@ use async_trait::async_trait;
 
 use crate::erreur::Resultat;
 use crate::types::{
-    Artwork, ArtworkEtendu, BandeAnnonce, CollectionFilm, MetadonneesEpisode, MetadonneesFilm,
-    MetadonneesSerie, OptionsEpisode, OptionsRecherche, ResultatRecherche, TypeArtwork,
-    TypeArtworkEtendu,
+    Artwork, ArtworkEtendu, BandeAnnonce, CollectionFilm, Evaluation, MetadonneesEpisode,
+    MetadonneesFilm, MetadonneesSerie, OptionsEpisode, OptionsRecherche, ResultatRecherche,
+    TypeArtwork, TypeArtworkEtendu,
 };
 
 /// Recherche et détail d'un film.
@@ -78,4 +78,18 @@ pub trait FournisseurArtworkSerie: Send + Sync {
     async fn artwork_episode(&self, _options: &OptionsEpisode) -> Resultat<Vec<ArtworkEtendu>> {
         Ok(Vec::new())
     }
+}
+
+/// Fournisseur de notes seules (OMDb, Trakt, MDBList).
+///
+/// Une erreur de type [`crate::ErreurScraper::AucunResultat`],
+/// [`crate::ErreurScraper::IdentifiantManquant`] ou de limitation de débit ne
+/// doit pas faire échouer les autres sources : c'est à l'appelant de la
+/// traiter comme un simple avertissement.
+#[async_trait]
+pub trait FournisseurEvaluations: Send + Sync {
+    /// Identifiant court du fournisseur (`omdb`, `trakt`, `mdblist`).
+    fn identifiant(&self) -> &'static str;
+    /// Notes du film ou de la série désigné par `options.ids`.
+    async fn evaluations(&self, options: &OptionsRecherche) -> Resultat<Vec<Evaluation>>;
 }

@@ -34,6 +34,14 @@ pub mod noms_secrets {
     pub const CLE_API_TMDB: &str = "cle_api_tmdb";
     pub const CLE_API_HTTP: &str = "cle_api_http";
     pub const MOT_DE_PASSE_PROXY: &str = "mot_de_passe_proxy";
+    pub const CLE_API_FANART: &str = "cle_api_fanart";
+    pub const CLE_API_TVDB: &str = "cle_api_tvdb";
+    pub const CLE_API_OMDB: &str = "cle_api_omdb";
+    /// Identifiant client (« client id ») Trakt.
+    pub const CLE_API_TRAKT: &str = "cle_api_trakt";
+    pub const CLE_API_MDBLIST: &str = "cle_api_mdblist";
+    /// Identifiant client Simkl.
+    pub const CLE_API_SIMKL: &str = "cle_api_simkl";
 }
 
 /// Désérialise une valeur ; en cas de valeur inconnue ou de type inattendu,
@@ -544,6 +552,18 @@ impl GestionnaireReglages {
     /// Accès au coffre (autres secrets : jetons de services…).
     pub fn coffre(&self) -> &dyn CoffreSecrets {
         self.coffre.as_ref()
+    }
+
+    /// Vrai si une clé d'API est enregistrée pour ce service (voir
+    /// [`crate::services`]).
+    pub fn cle_api_enregistree(&self, service: &str) -> Resultat<bool> {
+        crate::services::cle_api_enregistree(self.coffre.as_ref(), service)
+    }
+
+    /// Enregistre (ou, si vide, supprime) la clé d'un service autre que TMDB
+    /// (la clé TMDB passe par `Reglages::general.cle_api_tmdb`).
+    pub fn enregistrer_cle(&self, service: &str, secret: &str) -> Resultat<()> {
+        crate::services::enregistrer_cle(self.coffre.as_ref(), service, secret)
     }
 
     /// Charge les réglages. Fichier absent : valeurs par défaut écrites.

@@ -359,7 +359,7 @@ impl Application {
                 &mut sortie,
             ),
             Some(Dialogue::EditeurSerie(d)) => {
-                vue::dialogue_editeur_serie::afficher(&ctx, &self.etat, d, &mut sortie)
+                vue::editeur::serie::afficher(&ctx, &self.etat, &mut self.images, d, &mut sortie)
             }
             Some(Dialogue::Manquants(d)) => {
                 vue::dialogue_manquants::afficher(&ctx, &self.etat, d, &mut sortie)
@@ -375,6 +375,9 @@ impl Application {
             }
             Some(Dialogue::Export(d)) => {
                 vue::dialogue_export::afficher(&ctx, &self.etat, d, &mut sortie)
+            }
+            Some(Dialogue::HorsLigne(d)) => {
+                vue::dialogue_hors_ligne::afficher(&ctx, &self.etat, d, &mut sortie)
             }
             Some(Dialogue::Nettoyage(d)) => {
                 vue::dialogue_nettoyage::afficher(&ctx, &self.etat, d, &mut sortie)

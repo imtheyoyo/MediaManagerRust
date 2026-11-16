@@ -9,6 +9,7 @@ use super::composants::{
 };
 use crate::dialogues::{ChampEditeur, FilmEdite};
 use crate::editeur_film::{ajouter_texte, deplacer, retirer};
+use crate::i18n::I18n;
 use crate::source_donnees::{EDITIONS, SOURCES_MEDIA};
 use eframe::egui::{Align, Id, Layout, ScrollArea, Ui, vec2};
 
@@ -45,7 +46,7 @@ pub fn afficher(ui: &mut Ui, ct: &Contexte<'_>, b: &mut FilmEdite) {
                     let propositions = ct.e.options.genres.clone();
                     liste_avec_ajout(
                         ui,
-                        ct,
+                        ct.i,
                         ListeEdition {
                             id: "ed_genres",
                             libelle: ct.i.t("metatag.genre"),
@@ -65,7 +66,7 @@ pub fn afficher(ui: &mut Ui, ct: &Contexte<'_>, b: &mut FilmEdite) {
                     let propositions = ct.e.options.mots_cles.clone();
                     liste_avec_ajout(
                         ui,
-                        ct,
+                        ct.i,
                         ListeEdition {
                             id: "ed_mots_cles",
                             libelle: ct.i.t("editor.keywords"),
@@ -268,26 +269,25 @@ fn identifiants(ui: &mut Ui, ct: &Contexte<'_>, b: &mut FilmEdite, largeur: f32)
 }
 
 /// Paramètres d'une liste de textes avec champ d'ajout.
-struct ListeEdition<'a> {
-    id: &'a str,
-    libelle: String,
-    etiq: f32,
-    largeur: f32,
-    hauteur: f32,
-    propositions: &'a [String],
+pub(super) struct ListeEdition<'a> {
+    pub id: &'a str,
+    pub libelle: String,
+    pub etiq: f32,
+    pub largeur: f32,
+    pub hauteur: f32,
+    pub propositions: &'a [String],
 }
 
 /// Liste (genres, mots clés) : boutons plus, moins, haut et bas à gauche, liste sélectionnable, champ d'ajout à
 /// liste déroulante en dessous.
-fn liste_avec_ajout(
+pub(super) fn liste_avec_ajout(
     ui: &mut Ui,
-    ct: &Contexte<'_>,
+    i: &I18n,
     p: ListeEdition<'_>,
     elements: &mut Vec<String>,
     selection: &mut Option<usize>,
     ajout: &mut String,
 ) {
-    let i = ct.i;
     ui.horizontal_top(|ui| {
         ui.allocate_ui_with_layout(
             vec2(p.etiq, p.hauteur),

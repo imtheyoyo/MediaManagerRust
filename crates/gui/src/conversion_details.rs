@@ -14,12 +14,13 @@ use mediamanager_core::modele::{
     self as cm, DrapeauFlux, Edition, FichierMedia, FluxAudio, FluxSousTitres, Note, Personne,
     SourceMedia, TypeFichier as TypeCore, TypePersonne,
 };
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 /// Clé de la note de l'utilisateur dans la table des notes.
 const SOURCE_UTILISATEUR: &str = "user";
 
-fn type_core(t: TypeArt) -> TypeCore {
+pub(crate) fn type_core(t: TypeArt) -> TypeCore {
     match t {
         TypeArt::Affiche => TypeCore::Poster,
         TypeArt::Fanart => TypeCore::Fanart,
@@ -97,7 +98,7 @@ fn fonction(t: TypePersonne) -> FonctionPersonne {
     }
 }
 
-fn type_personne(f: FonctionPersonne) -> TypePersonne {
+pub(crate) fn type_personne(f: FonctionPersonne) -> TypePersonne {
     match f {
         FonctionPersonne::Acteur => TypePersonne::Acteur,
         FonctionPersonne::Realisateur => TypePersonne::Realisateur,
@@ -111,7 +112,7 @@ fn type_personne(f: FonctionPersonne) -> TypePersonne {
     }
 }
 
-fn personne_affichee(p: &Personne) -> PersonneFilm {
+pub(crate) fn personne_affichee(p: &Personne) -> PersonneFilm {
     PersonneFilm {
         nom: p.nom.clone(),
         role: p.role.clone(),
@@ -123,7 +124,11 @@ fn personne_affichee(p: &Personne) -> PersonneFilm {
 
 /// Fiche du modèle correspondant à une ligne de l'éditeur : l'existante (même nom et même
 /// rôle, sinon même nom et même type) garde ses identifiants.
-fn personne_modele(p: &PersonneFilm, existantes: &[Personne], t: TypePersonne) -> Personne {
+pub(crate) fn personne_modele(
+    p: &PersonneFilm,
+    existantes: &[Personne],
+    t: TypePersonne,
+) -> Personne {
     let nom = p.nom.trim();
     let base = existantes
         .iter()
@@ -143,7 +148,7 @@ fn personne_modele(p: &PersonneFilm, existantes: &[Personne], t: TypePersonne) -
     }
 }
 
-fn texte_chemin(p: &Path) -> String {
+pub(crate) fn texte_chemin(p: &Path) -> String {
     p.display().to_string()
 }
 
@@ -228,20 +233,24 @@ fn media_affiche(x: &FichierMedia) -> MediaEdit {
     }
 }
 
-/// Identifiants triés : tmdb et imdb d'abord, puis l'ordre alphabétique.
-fn identifiants(f: &cm::Film) -> Vec<(String, String)> {
-    let mut v: Vec<(String, String)> = f
-        .ids
+/// Identifiants triés : tmdb et imdb d'abord (puis tvdb), puis l'ordre alphabétique.
+pub(crate) fn table_identifiants(ids: &cm::Identifiants) -> Vec<(String, String)> {
+    let mut v: Vec<(String, String)> = ids
         .iter()
         .map(|(k, val)| (k.clone(), val.en_texte()))
         .collect();
     let rang = |k: &str| match k {
         "tmdb" => 0,
         "imdb" => 1,
-        _ => 2,
+        "tvdb" => 2,
+        _ => 3,
     };
     v.sort_by(|a, b| rang(&a.0).cmp(&rang(&b.0)).then_with(|| a.0.cmp(&b.0)));
     v
+}
+
+fn identifiants(f: &cm::Film) -> Vec<(String, String)> {
+    table_identifiants(&f.ids)
 }
 
 /// Film des services → données de la fenêtre d'édition. `saga` n'y figure pas : le titre de la
@@ -316,15 +325,19 @@ pub fn details(f: &cm::Film) -> DetailsFilm {
 
 /// Notes du tableau reportées dans la table des notes (la note de l'utilisateur est conservée
 /// ou mise à jour d'après l'évaluation saisie).
-fn appliquer_notes(d: &DetailsFilm, f: &mut cm::Film) {
-    let ancienne = f.notes.get(SOURCE_UTILISATEUR).cloned();
-    f.notes.clear();
-    for n in &d.notes {
+pub(crate) fn appliquer_table_notes(
+    notes: &[NoteSource],
+    evaluation: f32,
+    table: &mut BTreeMap<String, Note>,
+) {
+    let ancienne = table.get(SOURCE_UTILISATEUR).cloned();
+    table.clear();
+    for n in notes {
         let source = n.source.trim();
         if source.is_empty() || source == SOURCE_UTILISATEUR {
             continue;
         }
-        f.notes.insert(
+        table.insert(
             source.to_string(),
             Note::nouvelle(
                 source,
@@ -334,37 +347,46 @@ fn appliquer_notes(d: &DetailsFilm, f: &mut cm::Film) {
             ),
         );
     }
-    if d.evaluation_utilisateur > 0.0 {
+    if evaluation > 0.0 {
         let mut n = ancienne.unwrap_or_else(|| Note::nouvelle(SOURCE_UTILISATEUR, 0.0, 0, 10));
         // L'évaluation est saisie sur 10 : elle est ramenée à l'échelle de la note d'origine.
         let maximum = if n.maximum == 0 { 10 } else { n.maximum };
         n.maximum = maximum;
-        if (n.sur_dix() - d.evaluation_utilisateur).abs() > 0.005 {
-            n.valeur = d.evaluation_utilisateur * maximum as f32 / 10.0;
+        if (n.sur_dix() - evaluation).abs() > 0.005 {
+            n.valeur = evaluation * maximum as f32 / 10.0;
         }
-        f.notes.insert(SOURCE_UTILISATEUR.to_string(), n);
+        table.insert(SOURCE_UTILISATEUR.to_string(), n);
     }
 }
 
-fn appliquer_identifiants(d: &DetailsFilm, f: &mut cm::Film) {
-    let cles: Vec<String> = d
-        .ids
+fn appliquer_notes(d: &DetailsFilm, f: &mut cm::Film) {
+    appliquer_table_notes(&d.notes, d.evaluation_utilisateur, &mut f.notes);
+}
+
+/// Identifiants du tableau reportés dans la table des identifiants (ceux retirés du tableau
+/// sont effacés).
+pub(crate) fn appliquer_table_identifiants(ids: &[(String, String)], table: &mut cm::Identifiants) {
+    let cles: Vec<String> = ids
         .iter()
         .map(|(k, _)| k.trim().to_string())
         .filter(|k| !k.is_empty())
         .collect();
-    let anciennes: Vec<String> = f.ids.iter().map(|(k, _)| k.clone()).collect();
+    let anciennes: Vec<String> = table.iter().map(|(k, _)| k.clone()).collect();
     for k in anciennes {
         if !cles.contains(&k) {
-            f.ids.definir(&k, "");
+            table.definir(&k, "");
         }
     }
-    for (k, v) in &d.ids {
+    for (k, v) in ids {
         let k = k.trim();
         if !k.is_empty() {
-            f.ids.definir(k, v);
+            table.definir(k, v);
         }
     }
+}
+
+fn appliquer_identifiants(d: &DetailsFilm, f: &mut cm::Film) {
+    appliquer_table_identifiants(&d.ids, &mut f.ids);
 }
 
 fn appliquer_media(m: &MediaEdit, f: &mut FichierMedia) {

@@ -182,6 +182,9 @@ fn scraper_film(
     }
     let m = ctx.bloquer(f.metadonnees(&options))?;
     let mut images: Vec<Artwork> = m.artwork.clone();
+    // Images supplémentaires de Fanart.tv (bannière, clearart, disque) : vide
+    // sans clé Fanart.tv.
+    let mut images_fanart = Vec::new();
     if config.artwork {
         let mut o = options.clone();
         o.ids.extend(m.ids.clone());
@@ -192,9 +195,23 @@ fn scraper_film(
                 format!("images de « {} » indisponibles : {e}", film.titre),
             ),
         }
+        if let Some(fa) = crate::fournisseurs::images_fanart(n, ctx, &o) {
+            images = crate::fournisseurs::fusionner_artwork(images, fa.base);
+            images_fanart = fa.supplementaires;
+        }
     }
     appliquer_metadonnees(&mut film, &m, config, &reglages.films.pays_certification);
     film.derniere_langue_scraping = reglages.films.langue_scraping.clone();
+    let mut o_bandes = options.clone();
+    o_bandes.ids.extend(m.ids.clone());
+    crate::bandes_annonces::recuperer_au_scrap(
+        ctx,
+        f,
+        &mut film,
+        &o_bandes,
+        reglages,
+        config.ne_pas_ecraser,
+    );
     let saga = if config.saga {
         lier_saga(n, &mut film, &m.ids, &m.nom_collection)?
     } else {
@@ -202,7 +219,7 @@ fn scraper_film(
     };
 
     if config.artwork && !film.chemin.as_os_str().is_empty() {
-        let plan = planifier_images_n(
+        let mut plan = planifier_images_n(
             &film,
             &images,
             &n.config.artwork,
@@ -216,6 +233,12 @@ fn scraper_film(
                 reglages.films.nombre_fanarts_extra,
             ),
         );
+        plan.extend(crate::fournisseurs::planifier_images_supplementaires(
+            &film,
+            &images_fanart,
+            &n.config.artwork,
+            &reglages.films.langues_images,
+        ));
         if !plan.is_empty() {
             let client = reqwest::Client::builder()
                 .user_agent(ConfigHttp::default().user_agent)

@@ -7,12 +7,13 @@
 //! « disponible », qui ferait grandir la modale à chaque image) ; chaque onglet dessine dans un
 //! rectangle de taille fixe.
 
-mod composants;
+pub(crate) mod composants;
 mod detail;
 mod detail2;
 mod distribution;
 mod fichiers;
 mod illustrations;
+pub mod serie;
 mod urls;
 
 use super::Sortie;
@@ -32,12 +33,12 @@ use eframe::egui::{
 use std::path::PathBuf;
 
 /// Hauteur de la ligne de titre de la fenêtre.
-const HAUTEUR_TITRE: f32 = 28.0;
+pub(super) const HAUTEUR_TITRE: f32 = 28.0;
 /// Hauteur du pied (boutons Annuler / Valider).
-const HAUTEUR_PIED: f32 = 42.0;
+pub(super) const HAUTEUR_PIED: f32 = 42.0;
 /// Marges intérieures du corps d'un onglet.
-const MARGE_X: f32 = 12.0;
-const MARGE_Y: f32 = 8.0;
+pub(super) const MARGE_X: f32 = 12.0;
+pub(super) const MARGE_Y: f32 = 8.0;
 
 /// Taille de la fenêtre : ≈ 90 % de l'écran, bornée, et toujours contenue dans l'écran.
 pub fn taille_fenetre(ecran: Vec2) -> Vec2 {
