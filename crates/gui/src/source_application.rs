@@ -17,20 +17,24 @@ use crate::etat::{Message, Niveau};
 use crate::modele::Film;
 use crate::renommage::ApercuFilm;
 use crate::source_donnees::{
-    CibleExport, DiagnosticOutils, ElementManquant, FichierInutileAffiche, GenreImage,
-    ModeleExportAffiche, ModifsLot, OutilAffiche, RaisonNettoyage, RapportExportAffiche,
-    ReglagesServices, RequeteRecherche, RequeteRechercheSerie, ResultatRecherche, Retour,
-    SECRET_CLE_TMDB, SagaAffichage, SerieAffichage, SourceDonnees, Travail,
+    BilanRecuperation, BilanTelechargement, CibleExport, DiagnosticOutils, ElementManquant,
+    FichierInutileAffiche, GenreImage, MESSAGE_YT_DLP_ABSENT, ModeleExportAffiche, ModifsLot,
+    OutilAffiche, RaisonNettoyage, RapportExportAffiche, ReglagesServices, RequeteRecherche,
+    RequeteRechercheSerie, ResultatRecherche, Retour, SECRET_CLE_TMDB, SagaAffichage,
+    SerieAffichage, ServiceCle, SourceDonnees, Travail, masquer_secrets, services_cles_connus,
+    texte_bilan_recuperation, texte_bilan_telechargement,
 };
 use crate::taches::{IssueTache, compteur};
 use mediamanager_app::{
     Application as Services, CibleVu, ConfigMetadonnees, ConfigSerie, Evenement, FichierInutile,
     IdTache, IssueTache as IssueServices, ModeleExport, ModificationsLot, ModificationsLotSeries,
-    NiveauMessage, OptionsExport, PoigneeTache, RaisonInutile, RapportEvaluations, RapportExport,
-    RapportLot, RapportMiseAJour, RapportNettoyage, RapportRenommage, RapportRetrait, RapportScrap,
-    RequeteFilm, RequeteSerie, TypeExport,
+    NiveauMessage, OptionsExport, OptionsTelechargement, PoigneeTache, RaisonInutile,
+    RapportEvaluations, RapportExport, RapportLot, RapportMiseAJour, RapportNettoyage,
+    RapportRenommage, RapportRetrait, RapportScrap, RequeteFilm, RequeteSerie, TypeExport,
 };
-use mediamanager_core::modele::{Edition, Film as FilmModele, Saga, SourceMedia};
+use mediamanager_core::modele::{
+    BandeAnnonce as BandeAnnonceModele, Edition, Film as FilmModele, Saga, SourceMedia,
+};
 use mediamanager_scrapers::ResultatRecherche as ResultatScraper;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::PathBuf;
@@ -229,6 +233,62 @@ fn bilan_retrait(r: RapportRetrait, avec_fichiers: bool, quoi: &str) -> Option<(
         Niveau::Erreur
     };
     Some((n, t))
+}
+
+/// Refuse de lancer un téléchargement de bande-annonce sans yt-dlp (message explicatif).
+fn exiger_yt_dlp(app: &Services) -> Result<(), String> {
+    if app.yt_dlp_disponible() {
+        Ok(())
+    } else {
+        Err(MESSAGE_YT_DLP_ABSENT.to_string())
+    }
+}
+
+/// Notification de fin d'un téléchargement de bandes-annonces (ou message d'échec).
+fn bilan_telechargement_bandes(
+    r: Result<mediamanager_app::RapportTelechargement, String>,
+) -> Message {
+    match r {
+        Ok(r) => {
+            let (n, t) = texte_bilan_telechargement(&BilanTelechargement {
+                telecharges: r.telecharges.len(),
+                deja_presents: r.deja_presents.len(),
+                sans_bande_annonce: r.sans_bande_annonce.len(),
+                verrouilles: r.verrouilles.len(),
+                echecs: r.echecs.into_iter().map(|(_, e)| e).collect(),
+            });
+            Message::Notifier(n, t)
+        }
+        Err(e) => Message::Notifier(
+            Niveau::Erreur,
+            format!(
+                "Téléchargement des bandes-annonces : {}",
+                masquer_secrets(&e)
+            ),
+        ),
+    }
+}
+
+/// Notification de fin d'une récupération de bandes-annonces (ou message d'échec).
+fn bilan_recuperation_bandes(
+    r: Result<mediamanager_app::RapportBandesAnnonces, String>,
+) -> Message {
+    match r {
+        Ok(r) => {
+            let (n, t) = texte_bilan_recuperation(&BilanRecuperation {
+                films_mis_a_jour: r.mis_a_jour.len(),
+                bandes_trouvees: r.mis_a_jour.iter().map(|(_, n)| *n).sum(),
+                sans_resultat: r.sans_resultat.len(),
+                verrouilles: r.verrouilles.len(),
+                echecs: r.echecs.into_iter().map(|(_, e)| e).collect(),
+            });
+            Message::Notifier(n, t)
+        }
+        Err(e) => Message::Notifier(
+            Niveau::Erreur,
+            format!("Récupération des bandes-annonces : {}", masquer_secrets(&e)),
+        ),
+    }
 }
 
 /// Taille lisible (o, Ko ou Mo), pour les bilans.
@@ -1230,8 +1290,94 @@ impl SourceDonnees for SourceApplication {
                     let p = app.modifier_en_lot_series(ids, lot_series(&modifs));
                     Interne::suivre(&mut suivis, p, true, |r| bilan_lot(r, "série(s)"));
                 }
+                Travail::RecupererBandesAnnonces { ids } => {
+                    let p = app.recuperer_bandes_annonces(i.ids_modele(&ids));
+                    Interne::suivre_messages(&mut suivis, p, true, |r| {
+                        vec![bilan_recuperation_bandes(r)]
+                    });
+                }
+                Travail::TelechargerBandesAnnonces { ids } => {
+                    exiger_yt_dlp(app)?;
+                    let p = app.telecharger_bandes_annonces_auto(i.ids_modele(&ids));
+                    Interne::suivre_messages(&mut suivis, p, true, |r| {
+                        vec![bilan_telechargement_bandes(r)]
+                    });
+                }
+                Travail::TelechargerBandeAnnonce { film, bande } => {
+                    exiger_yt_dlp(app)?;
+                    let id = i
+                        .id_modele(film)
+                        .ok_or_else(|| format!("film {film} inconnu"))?;
+                    let modele = BandeAnnonceModele {
+                        id: bande.id,
+                        nom: bande.nom,
+                        url: bande.url,
+                        qualite: bande.qualite,
+                        langue: bande.langue,
+                        fournisseur: bande.source,
+                        dans_nfo: bande.dans_nfo,
+                        ..BandeAnnonceModele::default()
+                    };
+                    let options = OptionsTelechargement::depuis_reglages(&app.reglages());
+                    let p = app.telecharger_bande_annonce(&id, &modele, options);
+                    Interne::suivre_messages(&mut suivis, p, true, |r| {
+                        vec![bilan_telechargement_bandes(r)]
+                    });
+                }
+                Travail::TesterCle { service } => {
+                    let nom = mediamanager_store::services::definition_service(&service)
+                        .map_or_else(|| service.clone(), |d| d.nom.to_string());
+                    let p = app.tester_cle_api(&service);
+                    Interne::suivre_messages(&mut suivis, p, true, move |r| {
+                        vec![match r {
+                            Ok(()) => Message::Notifier(Niveau::Info, format!("Clé {nom} valide")),
+                            Err(e) => Message::Notifier(
+                                Niveau::Erreur,
+                                format!("Test de la clé {nom} : {}", masquer_secrets(&e)),
+                            ),
+                        }]
+                    });
+                }
             }
             Ok(())
+        })
+    }
+
+    fn etat_cles(&self) -> Vec<ServiceCle> {
+        self.avec_app(|app| {
+            let etat = app.etat_services().map_err(|e| e.to_string())?;
+            Ok(etat
+                .into_iter()
+                .map(|e| ServiceCle {
+                    id: e.id,
+                    nom: e.nom,
+                    type_cle: e.type_cle,
+                    usage: e.usage,
+                    cle_presente: e.cle_presente,
+                })
+                .collect())
+        })
+        .unwrap_or_else(|_| services_cles_connus())
+    }
+
+    fn enregistrer_cle(&self, service: &str, secret: &str) -> Result<(), String> {
+        self.avec_app(|app| {
+            app.enregistrer_cle(service, secret)
+                .map_err(|e| masquer_secrets(&e.to_string()))
+        })
+    }
+
+    fn yt_dlp_disponible(&self) -> bool {
+        self.avec_app(|app| Ok(app.yt_dlp_disponible()))
+            .unwrap_or(false)
+    }
+
+    fn tester_yt_dlp(&self, chemin: &str) -> Result<Option<OutilAffiche>, String> {
+        self.avec_app(|app| {
+            Ok(app.diagnostiquer_yt_dlp(chemin).map(|o| OutilAffiche {
+                chemin: o.chemin.display().to_string(),
+                version: o.version,
+            }))
         })
     }
 
@@ -1429,6 +1575,56 @@ pub(crate) mod tests {
         source.arreter().unwrap();
         source.arreter().unwrap();
         assert!(source.films().is_empty());
+    }
+
+    #[test]
+    fn cles_d_api_et_yt_dlp_avec_la_source_reelle() {
+        use crate::etat::{ActionDialogue, Secret};
+        let d = tempfile::tempdir().unwrap();
+        let source = source_reelle(d.path());
+        let cles = source.etat_cles();
+        assert_eq!(cles.len(), 7);
+        assert!(cles.iter().all(|c| !c.cle_presente));
+        let mut e = Etat::avec_source(source.clone());
+        e.appliquer(Message::OuvrirDialogue(crate::etat::TypeDialogue::Reglages));
+        for (id, valeur) in [("omdb", "cle-omdb-test"), ("tmdb", "cle-tmdb-test")] {
+            e.appliquer(Message::Dialogue(ActionDialogue::CleSaisie(
+                id.into(),
+                Secret::new(valeur),
+            )));
+            e.appliquer(Message::Dialogue(ActionDialogue::CleEnregistrer(id.into())));
+        }
+        let cles = source.etat_cles();
+        assert!(cles.iter().find(|c| c.id == "omdb").unwrap().cle_presente);
+        assert!(cles.iter().find(|c| c.id == "tmdb").unwrap().cle_presente);
+        assert!(!cles.iter().find(|c| c.id == "trakt").unwrap().cle_presente);
+        assert!(
+            !e.notifications
+                .iter()
+                .any(|n| n.texte.contains("cle-omdb-test") || n.texte.contains("cle-tmdb-test"))
+        );
+        e.appliquer(Message::Dialogue(ActionDialogue::CleSupprimer(
+            "omdb".into(),
+        )));
+        assert!(
+            !source
+                .etat_cles()
+                .iter()
+                .find(|c| c.id == "omdb")
+                .unwrap()
+                .cle_presente
+        );
+        assert!(source.enregistrer_cle("inconnu", "valeur-secrete").is_err());
+        // yt-dlp : la détection est cohérente avec le diagnostic.
+        let diag = source.tester_yt_dlp("").unwrap();
+        assert_eq!(diag.is_some(), source.yt_dlp_disponible());
+        assert!(
+            source
+                .tester_yt_dlp("/chemin/inexistant/yt-dlp")
+                .unwrap()
+                .is_none()
+        );
+        source.arreter().unwrap();
     }
 
     #[test]

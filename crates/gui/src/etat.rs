@@ -3,6 +3,7 @@
 
 use crate::collections::NoeudSaga;
 use crate::commandes::Commande;
+use crate::details_film::BandeAnnonceEdit;
 use crate::dialogues::{
     ActionAssistant, ActionConfirmee, ActionEditeur, ActionEditeurSerie, ActionEditionLot,
     ActionExport, ActionHorsLigne, ActionNettoyage, ActionRecherche, CaseConfirmation,
@@ -27,13 +28,13 @@ use crate::renommage::ApercuFilm;
 use crate::selecteur::{self, CibleDossier, CibleFichier, SelecteurDossier, SelecteurFichier};
 use crate::source_donnees::{
     CibleExport, CreationHorsLigne, DiagnosticOutils, FichierInutileAffiche, GroupeManquants,
-    RapportExportAffiche, ReglagesServices, RequeteRecherche, RequeteRechercheSerie,
-    ResultatRecherche, Retour, SECRET_CLE_TMDB, SagaAffichage, SerieAffichage, SourceDonnees,
-    SourceFactice, Travail, titre_nettoye,
+    OutilAffiche, RapportExportAffiche, ReglagesServices, RequeteRecherche, RequeteRechercheSerie,
+    ResultatRecherche, Retour, SECRET_CLE_TMDB, SagaAffichage, SerieAffichage, ServiceCle,
+    SourceDonnees, SourceFactice, Travail, cle_testable, titre_nettoye,
 };
 use crate::taches::{IssueTache, Repaint, Tache};
 use regex::Regex;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 use std::sync::mpsc::{Receiver, channel};
 use std::sync::{Arc, Mutex};
@@ -167,14 +168,54 @@ pub struct EtatApercu {
     pub series: Option<Vec<String>>,
 }
 
+/// Secret en cours de saisie (clé d'API) : sa mise en forme `Debug` ne montre jamais la valeur,
+/// pour qu'aucun journal ni message d'erreur ne puisse la divulguer.
+#[derive(Clone, Default, PartialEq, Eq)]
+pub struct Secret(String);
+
+impl Secret {
+    pub fn new(valeur: impl Into<String>) -> Self {
+        Self(valeur.into())
+    }
+
+    /// Valeur saisie (à ne transmettre qu'au coffre à secrets).
+    pub fn valeur(&self) -> &str {
+        &self.0
+    }
+
+    /// Vrai si rien d'exploitable n'est saisi (vide ou espaces).
+    pub fn est_vide(&self) -> bool {
+        self.0.trim().is_empty()
+    }
+}
+
+impl std::fmt::Debug for Secret {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(if self.0.is_empty() {
+            "Secret(vide)"
+        } else {
+            "Secret(***)"
+        })
+    }
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct EtatDialogueReglages {
     pub page: Page,
     pub filtre: String,
-    /// Saisies en cours (ajout d'un dossier source films / séries, clé d'API).
+    /// Saisies en cours (ajout d'un dossier source films / séries).
     pub saisie_source: String,
     pub saisie_source_serie: String,
-    pub saisie_cle: String,
+    /// Services à clé d'API (page « Services externes »), lus à l'ouverture et après chaque
+    /// enregistrement ou suppression.
+    pub cles: Vec<ServiceCle>,
+    /// Clés en cours de saisie, par identifiant de service.
+    pub saisies_cles: BTreeMap<String, Secret>,
+    /// yt-dlp est localisable (relevé à l'ouverture, sans lancement).
+    pub yt_dlp_detecte: bool,
+    /// Test de yt-dlp en cours / dernier résultat (`Ok(None)` : introuvable).
+    pub test_yt_dlp_en_cours: bool,
+    pub test_yt_dlp: Option<Result<Option<OutilAffiche>, String>>,
     /// Test des outils d'analyse en cours / dernier résultat.
     pub test_outils_en_cours: bool,
     pub test_outils: Option<Result<DiagnosticOutils, String>>,
@@ -233,9 +274,14 @@ pub enum ActionDialogue {
     ReglagesFiltre(String),
     ReglagesSaisieSource(String),
     ReglagesSaisieSourceSerie(String),
-    ReglagesSaisieCle(String),
-    /// Transmet la clé saisie au coffre à secrets.
-    ReglagesEnregistrerCle,
+    /// Saisie de la clé d'un service (identifiant du service, secret).
+    CleSaisie(String, Secret),
+    /// Transmet au coffre à secrets la clé saisie pour ce service.
+    CleEnregistrer(String),
+    /// Supprime du coffre la clé de ce service.
+    CleSupprimer(String),
+    /// Teste la clé enregistrée de ce service (tâche de fond).
+    CleTester(String),
     Editeur(ActionEditeur),
     Recherche(ActionRecherche),
     EditeurSerie(ActionEditeurSerie),
@@ -339,6 +385,14 @@ pub enum Message {
     /// Teste les outils d'analyse avec le chemin saisi dans les réglages.
     TesterOutils,
     ResultatTestOutils(Result<DiagnosticOutils, String>),
+    /// Teste yt-dlp avec le chemin saisi dans les réglages.
+    TesterYtDlp,
+    ResultatTestYtDlp(Result<Option<OutilAffiche>, String>),
+    /// Télécharge la bande-annonce d'une ligne du tableau de l'éditeur du film `film`.
+    TelechargerBandeAnnonce {
+        film: u64,
+        bande: BandeAnnonceEdit,
+    },
     /// Fin de la recherche des éléments manquants (sagas ou série).
     ManquantsTrouves {
         id_requete: u64,
@@ -1084,6 +1138,17 @@ impl Etat {
                     self.fichier_choisi(cible, c);
                 }
             }
+            Message::TesterYtDlp => self.tester_yt_dlp(),
+            Message::ResultatTestYtDlp(r) => {
+                if let Some(Dialogue::Reglages(d)) = &mut self.dialogue {
+                    d.test_yt_dlp_en_cours = false;
+                    d.yt_dlp_detecte = matches!(&r, Ok(Some(_)));
+                    d.test_yt_dlp = Some(r);
+                }
+            }
+            Message::TelechargerBandeAnnonce { film, bande } => {
+                self.telecharger_une_bande_annonce(film, bande)
+            }
             Message::TesterOutils => self.tester_outils(),
             Message::ResultatTestOutils(r) => {
                 if let Some(Dialogue::Reglages(d)) = &mut self.dialogue {
@@ -1524,6 +1589,16 @@ impl Etat {
             }
             Commande::EditionGlobale => self.ouvrir_edition_lot(),
             Commande::CreerHorsLigne => self.ouvrir_hors_ligne(),
+            Commande::RecupererBandesAnnonces => {
+                let ids = self.selection_ordonnee();
+                self.lancer_travail(Travail::RecupererBandesAnnonces { ids });
+            }
+            Commande::TelechargerBandesAnnonces => {
+                if self.exiger_yt_dlp() {
+                    let ids = self.selection_ordonnee();
+                    self.lancer_travail(Travail::TelechargerBandesAnnonces { ids });
+                }
+            }
             autre => self.notifier_bientot(autre),
         }
     }
@@ -1691,7 +1766,10 @@ impl Etat {
             Commande::SupprimerFichiers => {
                 self.demander_confirmation(ActionConfirmee::SupprimerFichiers)
             }
-            Commande::Nettoyer | Commande::RecupererEvaluations => {
+            Commande::Nettoyer
+            | Commande::RecupererEvaluations
+            | Commande::RecupererBandesAnnonces
+            | Commande::TelechargerBandesAnnonces => {
                 let texte = self.i18n.t("gui.moviesonly");
                 self.notifier(Niveau::Info, texte);
             }
@@ -2237,6 +2315,120 @@ impl Etat {
         }
     }
 
+    /// Nom affiché d'un service à clé d'API.
+    fn nom_service(&self, service: &str) -> String {
+        match self.dialogue {
+            Some(Dialogue::Reglages(ref d)) => d.cles.iter().find(|c| c.id == service),
+            _ => None,
+        }
+        .map_or_else(|| service.to_string(), |c| c.nom.clone())
+    }
+
+    /// Enregistre (ou, avec `supprimer`, retire) la clé d'un service dans le coffre à secrets.
+    /// La saisie est effacée de l'état dès qu'elle est transmise ; la valeur n'apparaît dans
+    /// aucune notification.
+    fn enregistrer_cle_service(&mut self, service: &str, supprimer: bool) {
+        let nom = self.nom_service(service);
+        let secret = if supprimer {
+            String::new()
+        } else {
+            let Some(Dialogue::Reglages(d)) = &mut self.dialogue else {
+                return;
+            };
+            match d.saisies_cles.get(service) {
+                Some(s) if !s.est_vide() => s.valeur().trim().to_string(),
+                _ => return,
+            }
+        };
+        match self.source.enregistrer_cle(service, &secret) {
+            Ok(()) => {
+                let cles = self.source.etat_cles();
+                if let Some(Dialogue::Reglages(d)) = &mut self.dialogue {
+                    d.saisies_cles.remove(service);
+                    d.cles = cles;
+                }
+                if service.eq_ignore_ascii_case("tmdb") {
+                    self.services.generales.cle_tmdb_definie = !supprimer;
+                }
+                let cle = if supprimer {
+                    "gui.settings.keys.removed"
+                } else {
+                    "gui.settings.keysaved"
+                };
+                let texte = self.i18n.t_args(cle, &[("service", nom.as_str())]);
+                self.notifier(Niveau::Info, texte);
+            }
+            Err(e) => {
+                let texte = crate::source_donnees::masquer_secrets(&e);
+                self.notifier(Niveau::Erreur, texte);
+            }
+        }
+    }
+
+    /// Teste la clé enregistrée d'un service (tâche de fond ; résultat en notification).
+    fn tester_cle_service(&mut self, service: &str) {
+        let nom = self.nom_service(service);
+        if !cle_testable(service) {
+            let texte = self.i18n.t_args(
+                "gui.settings.keys.test.unavailable.msg",
+                &[("service", nom.as_str())],
+            );
+            self.notifier(Niveau::Info, texte);
+            return;
+        }
+        let presente = self
+            .source
+            .etat_cles()
+            .iter()
+            .any(|c| c.id == service && c.cle_presente);
+        if !presente {
+            let texte = self
+                .i18n
+                .t_args("gui.settings.keys.test.nokey", &[("service", nom.as_str())]);
+            self.notifier(Niveau::Avertissement, texte);
+            return;
+        }
+        self.lancer_travail(Travail::TesterCle {
+            service: service.to_string(),
+        });
+    }
+
+    /// Teste yt-dlp avec le chemin des réglages (hors du thread de l'interface).
+    fn tester_yt_dlp(&mut self) {
+        if let Some(Dialogue::Reglages(d)) = &mut self.dialogue {
+            d.test_yt_dlp_en_cours = true;
+            d.test_yt_dlp = None;
+        }
+        let chemin = self.services.generales.chemin_yt_dlp.clone();
+        let (source, retour) = (self.source.clone(), self.retour.clone());
+        std::thread::spawn(move || {
+            retour.envoyer(Message::ResultatTestYtDlp(source.tester_yt_dlp(&chemin)));
+        });
+    }
+
+    /// Avertit (et renvoie `false`) si yt-dlp est introuvable : le téléchargement des
+    /// bandes-annonces en a besoin.
+    fn exiger_yt_dlp(&mut self) -> bool {
+        if self.source.yt_dlp_disponible() {
+            return true;
+        }
+        let texte = self.i18n.t("gui.trailer.noytdlp");
+        self.notifier(Niveau::Avertissement, texte);
+        false
+    }
+
+    /// Télécharge la bande-annonce d'une ligne du tableau de l'éditeur.
+    fn telecharger_une_bande_annonce(&mut self, film: u64, bande: BandeAnnonceEdit) {
+        if !ouverture::adresse_web_valide(&bande.url) {
+            let texte = self.i18n.t("gui.trailer.badurl");
+            self.notifier(Niveau::Avertissement, texte);
+            return;
+        }
+        if self.exiger_yt_dlp() {
+            self.lancer_travail(Travail::TelechargerBandeAnnonce { film, bande });
+        }
+    }
+
     /// Teste les outils d'analyse avec le chemin saisi (hors du thread de l'interface).
     fn tester_outils(&mut self) {
         if let Some(Dialogue::Reglages(d)) = &mut self.dialogue {
@@ -2410,7 +2602,11 @@ impl Etat {
             TypeDialogue::Reglages => {
                 self.services = self.source.reglages_services();
                 self.services_modifies = false;
-                self.dialogue = Some(Dialogue::Reglages(EtatDialogueReglages::default()));
+                self.dialogue = Some(Dialogue::Reglages(EtatDialogueReglages {
+                    cles: self.source.etat_cles(),
+                    yt_dlp_detecte: self.source.yt_dlp_disponible(),
+                    ..EtatDialogueReglages::default()
+                }));
             }
             TypeDialogue::Messages => {
                 self.dialogue = Some(Dialogue::Messages);
@@ -2442,19 +2638,17 @@ impl Etat {
             (Some(Dialogue::Reglages(r)), ActionDialogue::ReglagesSaisieSourceSerie(s)) => {
                 r.saisie_source_serie = s
             }
-            (Some(Dialogue::Reglages(r)), ActionDialogue::ReglagesSaisieCle(s)) => r.saisie_cle = s,
-            (Some(Dialogue::Reglages(r)), ActionDialogue::ReglagesEnregistrerCle) => {
-                let cle = std::mem::take(&mut r.saisie_cle);
-                if !cle.trim().is_empty() {
-                    match self.source.transmettre_secret(SECRET_CLE_TMDB, cle.trim()) {
-                        Ok(()) => {
-                            self.services.generales.cle_tmdb_definie = true;
-                            let texte = self.i18n.t("gui.settings.keysaved");
-                            self.notifier(Niveau::Info, texte);
-                        }
-                        Err(e) => self.notifier(Niveau::Erreur, e),
-                    }
-                }
+            (Some(Dialogue::Reglages(r)), ActionDialogue::CleSaisie(service, secret)) => {
+                r.saisies_cles.insert(service, secret);
+            }
+            (Some(Dialogue::Reglages(_)), ActionDialogue::CleEnregistrer(service)) => {
+                self.enregistrer_cle_service(&service, false)
+            }
+            (Some(Dialogue::Reglages(_)), ActionDialogue::CleSupprimer(service)) => {
+                self.enregistrer_cle_service(&service, true)
+            }
+            (Some(Dialogue::Reglages(_)), ActionDialogue::CleTester(service)) => {
+                self.tester_cle_service(&service)
             }
             (Some(Dialogue::Confirmation(c)), ActionDialogue::ConfirmationNePlusDemander(v)) => {
                 c.ne_plus_demander = v
@@ -3604,15 +3798,18 @@ mod tests {
         );
         // Clé saisie dans les réglages : transmise au coffre, effacée de l'état.
         e.appliquer(Message::OuvrirDialogue(TypeDialogue::Reglages));
-        e.appliquer(Message::Dialogue(ActionDialogue::ReglagesSaisieCle(
-            "k1".into(),
+        e.appliquer(Message::Dialogue(ActionDialogue::CleSaisie(
+            "tmdb".into(),
+            Secret::new("k1"),
         )));
-        e.appliquer(Message::Dialogue(ActionDialogue::ReglagesEnregistrerCle));
+        e.appliquer(Message::Dialogue(ActionDialogue::CleEnregistrer(
+            "tmdb".into(),
+        )));
         assert_eq!(source.secret(SECRET_CLE_TMDB).as_deref(), Some("k1"));
         let Some(Dialogue::Reglages(d)) = &e.dialogue else {
             panic!()
         };
-        assert!(d.saisie_cle.is_empty());
+        assert!(d.saisies_cles.is_empty());
     }
 
     #[test]
@@ -4400,6 +4597,333 @@ mod tests {
             assert_eq!(e.notifications.len(), avant + 1);
             assert!(notifie(&e, "qu'aux films"), "{c:?}");
         }
+    }
+
+    // --- Services externes (clés d'API) et bandes-annonces ---
+
+    fn source_sans_yt_dlp() -> Arc<SourceFactice> {
+        let mut s = SourceFactice::new(
+            std::env::temp_dir().join(format!("mmr-etat-ytdlp-{}", std::process::id())),
+        );
+        s.latence = Duration::ZERO;
+        s.pas = Duration::from_millis(1);
+        s.yt_dlp_present = false;
+        Arc::new(s)
+    }
+
+    fn ouvrir_reglages(e: &mut Etat) {
+        e.appliquer(Message::OuvrirDialogue(TypeDialogue::Reglages));
+    }
+
+    fn cles_du_dialogue(e: &Etat) -> Vec<ServiceCle> {
+        match &e.dialogue {
+            Some(Dialogue::Reglages(d)) => d.cles.clone(),
+            _ => panic!("réglages attendus"),
+        }
+    }
+
+    #[test]
+    fn secret_jamais_visible_dans_debug() {
+        let s = Secret::new("super-secret-123");
+        assert!(!format!("{s:?}").contains("super-secret"));
+        let m = Message::Dialogue(ActionDialogue::CleSaisie("omdb".into(), s.clone()));
+        assert!(!format!("{m:?}").contains("super-secret"));
+        let mut e = Etat::nouveau();
+        ouvrir_reglages(&mut e);
+        e.appliquer(Message::Dialogue(ActionDialogue::CleSaisie(
+            "omdb".into(),
+            s,
+        )));
+        assert!(!format!("{:?}", e.dialogue).contains("super-secret"));
+        assert!(Secret::new("   ").est_vide());
+        assert!(!Secret::new(" a ").est_vide());
+    }
+
+    #[test]
+    fn les_sept_services_enregistrement_et_suppression_des_cles() {
+        let source = source_rapide();
+        let mut e = Etat::avec_source(source.clone());
+        ouvrir_reglages(&mut e);
+        let cles = cles_du_dialogue(&e);
+        let ids: Vec<&str> = cles.iter().map(|c| c.id.as_str()).collect();
+        assert_eq!(
+            ids,
+            [
+                "tmdb", "fanart", "tvdb", "omdb", "trakt", "mdblist", "simkl"
+            ]
+        );
+        assert!(cles.iter().all(|c| !c.cle_presente));
+        // Enregistrer sans saisie : rien.
+        e.appliquer(Message::Dialogue(ActionDialogue::CleEnregistrer(
+            "omdb".into(),
+        )));
+        assert!(!cles_du_dialogue(&e).iter().any(|c| c.cle_presente));
+        assert!(e.notifications.is_empty());
+        // Enregistrer une clé OMDb et un identifiant Trakt.
+        for (id, valeur) in [("omdb", " cle-omdb "), ("trakt", "client-trakt")] {
+            e.appliquer(Message::Dialogue(ActionDialogue::CleSaisie(
+                id.into(),
+                Secret::new(valeur),
+            )));
+            e.appliquer(Message::Dialogue(ActionDialogue::CleEnregistrer(id.into())));
+        }
+        let cles = cles_du_dialogue(&e);
+        assert!(cles.iter().find(|c| c.id == "omdb").unwrap().cle_presente);
+        assert!(cles.iter().find(|c| c.id == "trakt").unwrap().cle_presente);
+        assert!(!cles.iter().find(|c| c.id == "fanart").unwrap().cle_presente);
+        assert_eq!(source.secret("omdb.cle_api").as_deref(), Some("cle-omdb"));
+        assert!(notifie(&e, "OMDb enregistrée"));
+        // Les notifications ne contiennent jamais le secret.
+        assert!(!e.notifications.iter().any(|n| n.texte.contains("cle-omdb")));
+        let Some(Dialogue::Reglages(d)) = &e.dialogue else {
+            panic!()
+        };
+        assert!(d.saisies_cles.is_empty());
+        // Suppression.
+        e.appliquer(Message::Dialogue(ActionDialogue::CleSupprimer(
+            "omdb".into(),
+        )));
+        assert!(
+            !cles_du_dialogue(&e)
+                .iter()
+                .find(|c| c.id == "omdb")
+                .unwrap()
+                .cle_presente
+        );
+        assert_eq!(source.secret("omdb.cle_api"), None);
+        assert!(notifie(&e, "OMDb supprimée"));
+        // La clé TMDB met à jour l'indicateur des réglages.
+        e.appliquer(Message::Dialogue(ActionDialogue::CleSaisie(
+            "tmdb".into(),
+            Secret::new("k"),
+        )));
+        e.appliquer(Message::Dialogue(ActionDialogue::CleEnregistrer(
+            "tmdb".into(),
+        )));
+        assert!(e.services.generales.cle_tmdb_definie);
+        e.appliquer(Message::Dialogue(ActionDialogue::CleSupprimer(
+            "tmdb".into(),
+        )));
+        assert!(!e.services.generales.cle_tmdb_definie);
+        // Service inconnu : erreur notifiée, sans valeur.
+        e.appliquer(Message::Dialogue(ActionDialogue::CleSaisie(
+            "inconnu".into(),
+            Secret::new("valeur-secrete"),
+        )));
+        e.appliquer(Message::Dialogue(ActionDialogue::CleEnregistrer(
+            "inconnu".into(),
+        )));
+        assert!(notifie(&e, "service inconnu"));
+        assert!(
+            !e.notifications
+                .iter()
+                .any(|n| n.texte.contains("valeur-secrete"))
+        );
+    }
+
+    #[test]
+    fn test_de_cle_en_tache_de_fond_et_cas_limites() {
+        let mut e = etat_rapide();
+        ouvrir_reglages(&mut e);
+        // Sans clé : avertissement, aucune tâche.
+        e.appliquer(Message::Dialogue(ActionDialogue::CleTester("omdb".into())));
+        assert!(notifie(&e, "Aucune clé enregistrée pour OMDb"));
+        assert!(e.taches.is_empty());
+        // TheTVDB : test indisponible, même avec une clé.
+        e.appliquer(Message::Dialogue(ActionDialogue::CleSaisie(
+            "tvdb".into(),
+            Secret::new("x"),
+        )));
+        e.appliquer(Message::Dialogue(ActionDialogue::CleEnregistrer(
+            "tvdb".into(),
+        )));
+        e.appliquer(Message::Dialogue(ActionDialogue::CleTester("tvdb".into())));
+        assert!(notifie(&e, "indisponible"));
+        assert!(e.taches.is_empty());
+        // Avec une clé : tâche de fond et résultat en notification.
+        e.appliquer(Message::Dialogue(ActionDialogue::CleSaisie(
+            "omdb".into(),
+            Secret::new("abc"),
+        )));
+        e.appliquer(Message::Dialogue(ActionDialogue::CleEnregistrer(
+            "omdb".into(),
+        )));
+        e.appliquer(Message::Dialogue(ActionDialogue::CleTester("omdb".into())));
+        attendre_etat(&mut e, |e| notifie(e, "Clé omdb valide"));
+        assert!(!e.notifications.iter().any(|n| n.texte.contains("abc")));
+    }
+
+    #[test]
+    fn test_de_yt_dlp_dans_les_reglages() {
+        let mut e = etat_rapide();
+        ouvrir_reglages(&mut e);
+        let Some(Dialogue::Reglages(d)) = &e.dialogue else {
+            panic!()
+        };
+        assert!(d.yt_dlp_detecte && d.test_yt_dlp.is_none());
+        e.appliquer(Message::TesterYtDlp);
+        let Some(Dialogue::Reglages(d)) = &e.dialogue else {
+            panic!()
+        };
+        assert!(d.test_yt_dlp_en_cours);
+        attendre_etat(
+            &mut e,
+            |e| matches!(&e.dialogue, Some(Dialogue::Reglages(d)) if d.test_yt_dlp.is_some()),
+        );
+        let Some(Dialogue::Reglages(d)) = &e.dialogue else {
+            panic!()
+        };
+        assert!(!d.test_yt_dlp_en_cours);
+        assert!(matches!(&d.test_yt_dlp, Some(Ok(Some(o))) if o.version.is_some()));
+        // Sans yt-dlp : « introuvable ».
+        let mut e = Etat::avec_source(source_sans_yt_dlp());
+        ouvrir_reglages(&mut e);
+        e.appliquer(Message::TesterYtDlp);
+        attendre_etat(
+            &mut e,
+            |e| matches!(&e.dialogue, Some(Dialogue::Reglages(d)) if d.test_yt_dlp.is_some()),
+        );
+        let Some(Dialogue::Reglages(d)) = &e.dialogue else {
+            panic!()
+        };
+        assert!(!d.yt_dlp_detecte);
+        assert_eq!(d.test_yt_dlp, Some(Ok(None)));
+    }
+
+    #[test]
+    fn recuperer_puis_telecharger_les_bandes_annonces_de_la_selection() {
+        let mut e = etat_rapide();
+        let id = choisir_film_libre(&mut e);
+        assert!(!e.film(id).unwrap().a_fichier_bande_annonce());
+        // « Chercher & extraire » : bilan en notification.
+        e.appliquer(Message::Commande(Commande::RecupererBandesAnnonces));
+        attendre_etat(&mut e, |e| notifie(e, "film(s) mis à jour"));
+        assert!(!e.film(id).unwrap().bandes_annonces.is_empty());
+        // Téléchargement automatique : une bande-annonce téléchargée.
+        e.appliquer(Message::Commande(Commande::TelechargerBandesAnnonces));
+        attendre_etat(&mut e, |e| {
+            notifie(e, "1 téléchargée(s), 0 déjà présente(s)")
+        });
+        let f = e.film(id).unwrap();
+        assert!(f.a_fichier_bande_annonce());
+        assert_eq!(f.fichiers_bande_annonce().len(), 1);
+        // Deuxième passage : déjà présente.
+        e.appliquer(Message::Commande(Commande::TelechargerBandesAnnonces));
+        attendre_etat(&mut e, |e| {
+            notifie(e, "0 téléchargée(s), 1 déjà présente(s)")
+        });
+        // Aucun message « bientôt disponible ».
+        assert!(!e.notifications.iter().any(|n| n.texte.contains("bientôt")));
+    }
+
+    #[test]
+    fn telechargement_d_une_ligne_de_l_editeur() {
+        let mut e = etat_rapide();
+        let id = choisir_film_libre(&mut e);
+        let bande = BandeAnnonceEdit {
+            nom: "Teaser".into(),
+            source: "YouTube".into(),
+            url: "https://www.youtube.com/watch?v=abc".into(),
+            ..BandeAnnonceEdit::default()
+        };
+        // Adresse non web : refus sans tâche.
+        e.appliquer(Message::TelechargerBandeAnnonce {
+            film: id,
+            bande: BandeAnnonceEdit {
+                url: "file:///tmp/x.mp4".into(),
+                ..bande.clone()
+            },
+        });
+        assert!(notifie(&e, "http ou https"));
+        assert!(e.taches.is_empty());
+        e.appliquer(Message::TelechargerBandeAnnonce {
+            film: id,
+            bande: bande.clone(),
+        });
+        attendre_etat(&mut e, |e| notifie(e, "Bande-annonce téléchargée"));
+        attendre_etat(&mut e, |e| e.film(id).unwrap().a_fichier_bande_annonce());
+        // Second téléchargement : un nouveau fichier, jamais d'écrasement.
+        e.appliquer(Message::TelechargerBandeAnnonce { film: id, bande });
+        attendre_etat(&mut e, |e| {
+            e.film(id).unwrap().fichiers_bande_annonce().len() == 2
+        });
+    }
+
+    #[test]
+    fn sans_yt_dlp_message_clair_et_aucune_tache() {
+        let mut e = Etat::avec_source(source_sans_yt_dlp());
+        let id = choisir_film_libre(&mut e);
+        e.appliquer(Message::Commande(Commande::TelechargerBandesAnnonces));
+        assert!(notifie(&e, "placer yt-dlp.exe dans le dossier outils/"));
+        assert!(notifie(&e, "Paramètres › Outils externes"));
+        e.appliquer(Message::TelechargerBandeAnnonce {
+            film: id,
+            bande: BandeAnnonceEdit {
+                url: "https://youtu.be/x".into(),
+                ..BandeAnnonceEdit::default()
+            },
+        });
+        assert_eq!(
+            e.notifications
+                .iter()
+                .filter(|n| n.texte.contains("yt-dlp.exe"))
+                .count(),
+            2
+        );
+        assert!(e.taches.is_empty());
+        // La récupération chez le fournisseur n'a pas besoin de yt-dlp.
+        e.appliquer(Message::Commande(Commande::RecupererBandesAnnonces));
+        attendre_etat(&mut e, |e| notifie(e, "film(s) mis à jour"));
+    }
+
+    #[test]
+    fn commandes_de_bandes_annonces_reservees_aux_films() {
+        let mut e = etat_rapide();
+        e.appliquer(Message::ChoisirModule(Module::Series));
+        e.appliquer(Message::SelectionnerNoeudSerie(NoeudSerie::Serie(
+            "demo-1".into(),
+        )));
+        for c in [
+            Commande::RecupererBandesAnnonces,
+            Commande::TelechargerBandesAnnonces,
+        ] {
+            let avant = e.notifications.len();
+            e.appliquer(Message::Commande(c));
+            assert_eq!(e.notifications.len(), avant + 1);
+            assert!(notifie(&e, "qu'aux films"), "{c:?}");
+        }
+        // Sans sélection (films) : « Aucune entrée sélectionnée ».
+        let mut e = etat_rapide();
+        e.selection.clear();
+        e.appliquer(Message::Commande(Commande::RecupererBandesAnnonces));
+        assert!(notifie(&e, "Aucune entrée sélectionnée"));
+    }
+
+    #[test]
+    fn bilans_de_bandes_annonces_et_masquage_des_secrets() {
+        use crate::source_donnees::{
+            BilanRecuperation, BilanTelechargement, masquer_secrets, texte_bilan_recuperation,
+            texte_bilan_telechargement,
+        };
+        let (n, t) = texte_bilan_telechargement(&BilanTelechargement {
+            telecharges: 2,
+            deja_presents: 3,
+            sans_bande_annonce: 1,
+            verrouilles: 1,
+            echecs: vec!["échec https://x/y?api_key=SECRET&a=1".into()],
+        });
+        assert_eq!(n, Niveau::Avertissement);
+        assert!(
+            t.contains("2 téléchargée(s), 3 déjà présente(s), 1 sans bande-annonce, 1 échec(s)")
+        );
+        assert!(t.contains("1 film(s) verrouillé(s)"));
+        assert!(!t.contains("SECRET") && t.contains("api_key=***&a=1"));
+        let (n, _) = texte_bilan_recuperation(&BilanRecuperation::default());
+        assert_eq!(n, Niveau::Info);
+        assert_eq!(
+            masquer_secrets("apikey=abc token=def client_id=ghi ok=1"),
+            "apikey=*** token=*** client_id=*** ok=1"
+        );
     }
 
     #[test]

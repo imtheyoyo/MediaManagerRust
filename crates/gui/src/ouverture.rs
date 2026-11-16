@@ -134,6 +134,13 @@ pub fn adresse_valide(url: &str) -> bool {
     u.starts_with("http://") || u.starts_with("https://") || u.starts_with("file://")
 }
 
+/// Adresse web ouvrable dans le navigateur ou téléchargeable : `http://` ou `https://` seulement
+/// (jamais `file://` ni un schéma inconnu).
+pub fn adresse_web_valide(url: &str) -> bool {
+    let u = url.trim().to_lowercase();
+    (u.starts_with("http://") && u.len() > 7) || (u.starts_with("https://") && u.len() > 8)
+}
+
 /// Signature d'un lanceur de commandes (remplaçable en test).
 pub type Lanceur = std::sync::Arc<dyn Fn(CommandeSysteme) -> Result<(), String> + Send + Sync>;
 
@@ -218,6 +225,12 @@ mod tests {
         assert!(adresse_valide("file:///srv/a.mkv"));
         assert!(!adresse_valide("youtube:abc"));
         assert!(!adresse_valide(""));
+        assert!(adresse_web_valide(" HTTPS://youtu.be/x "));
+        assert!(adresse_web_valide("http://exemple.org"));
+        assert!(!adresse_web_valide("file:///srv/a.mkv"));
+        assert!(!adresse_web_valide("https://"));
+        assert!(!adresse_web_valide("ftp://x/y"));
+        assert!(!adresse_web_valide(""));
     }
 
     #[test]

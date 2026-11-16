@@ -3,6 +3,7 @@
 //! grilles libellé / valeur, liens).
 
 use super::{Sortie, image_ou_emplacement};
+use crate::details_film::BandeAnnonceEdit;
 use crate::etat::{Etat, Message, OngletDetails};
 use crate::images::GestionnaireImages;
 use crate::modele::{Film, TypeFichier, gigaoctets};
@@ -787,10 +788,20 @@ fn onglet_illustration(
 
 fn onglet_bande_annonce(ui: &mut egui::Ui, etat: &Etat, film: &Film, sortie: &mut Sortie) {
     let i = &etat.i18n;
+    let fichiers = film.fichiers_bande_annonce();
+    if !fichiers.is_empty() {
+        let texte = i.t_args(
+            "gui.trailer.downloaded.files",
+            &[("files", &fichiers.join(", "))],
+        );
+        ui.add(Label::new(RichText::new(format!("{} {texte}", polices::COCHE))).truncate());
+        ui.add_space(4.0);
+    }
     if film.bandes_annonces.is_empty() {
         ui.label(RichText::new(i.t("gui.trailer.none")).weak());
         return;
     }
+    let telechargee = film.a_fichier_bande_annonce();
     TableBuilder::new(ui)
         .id_salt("table_bandes_annonces")
         .striped(true)
@@ -800,6 +811,7 @@ fn onglet_bande_annonce(ui: &mut egui::Ui, etat: &Etat, film: &Film, sortie: &mu
         .column(Column::initial(80.0).at_least(50.0).clip(true))
         .column(Column::initial(70.0).at_least(40.0).clip(true))
         .column(Column::initial(200.0).at_least(60.0).clip(true))
+        .column(Column::initial(36.0))
         .column(Column::initial(36.0))
         .header(22.0, |mut h| {
             for cle in [
@@ -813,11 +825,13 @@ fn onglet_bande_annonce(ui: &mut egui::Ui, etat: &Etat, film: &Film, sortie: &mu
                 });
             }
             h.col(|_| {});
+            h.col(|_| {});
         })
         .body(|body| {
             body.rows(24.0, film.bandes_annonces.len(), |mut ligne| {
                 let b = &film.bandes_annonces[ligne.index()];
                 let valide = ouverture::adresse_valide(&b.url);
+                let telechargeable = ouverture::adresse_web_valide(&b.url);
                 ligne.col(|ui| {
                     ui.add(Label::new(if b.nom.is_empty() { &b.url } else { &b.nom }).truncate());
                 });
@@ -830,6 +844,32 @@ fn onglet_bande_annonce(ui: &mut egui::Ui, etat: &Etat, film: &Film, sortie: &mu
                 ligne.col(|ui| {
                     ui.add(Label::new(RichText::new(&b.url).weak()).truncate())
                         .on_hover_text(&b.url);
+                });
+                ligne.col(|ui| {
+                    let (glyphe, aide) = if telechargee {
+                        (
+                            format!("{}{}", polices::COCHE, polices::BAS),
+                            i.t("gui.trailer.download.again"),
+                        )
+                    } else {
+                        (polices::BAS.to_string(), i.t("gui.trailer.download"))
+                    };
+                    if ui
+                        .add_enabled(telechargeable, egui::Button::new(glyphe).small())
+                        .on_hover_text(aide)
+                        .clicked()
+                    {
+                        sortie.push(Message::TelechargerBandeAnnonce {
+                            film: film.id,
+                            bande: BandeAnnonceEdit {
+                                nom: b.nom.clone(),
+                                source: b.source.clone(),
+                                qualite: b.qualite.clone(),
+                                url: b.url.clone(),
+                                ..BandeAnnonceEdit::default()
+                            },
+                        });
+                    }
                 });
                 ligne.col(|ui| {
                     if ui

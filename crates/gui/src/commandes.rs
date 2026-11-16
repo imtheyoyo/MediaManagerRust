@@ -30,6 +30,8 @@ pub enum Commande {
     Lire,
     RetirerBase,
     SupprimerFichiers,
+    RecupererBandesAnnonces,
+    TelechargerBandesAnnonces,
 }
 
 /// Élément d'un menu déclaratif.
@@ -60,6 +62,8 @@ pub const MENU_RECHERCHE: &[Entree] = &[
     Cmd(C::ScrapeNonTraites),
     Sep,
     Cmd(C::RecupererEvaluations),
+    Cmd(C::RecupererBandesAnnonces),
+    Cmd(C::TelechargerBandesAnnonces),
     Cmd(C::InfosMedia),
 ];
 
@@ -85,6 +89,8 @@ pub const MENU_CONTEXTUEL: &[Entree] = &[
     Cmd(C::ScrapeInteractif),
     Cmd(C::ScrapeMeilleur),
     Cmd(C::RecupererEvaluations),
+    Cmd(C::RecupererBandesAnnonces),
+    Cmd(C::TelechargerBandesAnnonces),
     Sep,
     Cmd(C::MettreAJourSelection),
     Cmd(C::Editer),
@@ -132,6 +138,8 @@ impl Commande {
             C::Lire => "movie.play",
             C::RetirerBase => "movie.remove",
             C::SupprimerFichiers => "movie.delete",
+            C::RecupererBandesAnnonces => "gui.cmd.fetchtrailers",
+            C::TelechargerBandesAnnonces => "gui.cmd.downloadtrailers",
         }
     }
 
@@ -180,7 +188,7 @@ impl Commande {
         self.raccourci().map(|(t, _, _)| t)
     }
 
-    pub const TOUTES: [Commande; 25] = [
+    pub const TOUTES: [Commande; 27] = [
         C::MettreAJourToutesSources,
         C::MettreAJourSelection,
         C::TrouverManquants,
@@ -206,6 +214,8 @@ impl Commande {
         C::Lire,
         C::RetirerBase,
         C::SupprimerFichiers,
+        C::RecupererBandesAnnonces,
+        C::TelechargerBandesAnnonces,
     ];
 }
 
@@ -248,6 +258,8 @@ mod tests {
             C::Exporter,
             C::Nettoyer,
             C::RecupererEvaluations,
+            C::RecupererBandesAnnonces,
+            C::TelechargerBandesAnnonces,
             C::EditionGlobale,
             C::BasculerVu,
         ] {

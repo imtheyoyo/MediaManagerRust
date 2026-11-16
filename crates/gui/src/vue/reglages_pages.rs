@@ -8,13 +8,16 @@
 
 use super::Sortie;
 use crate::conversion::{NB_AFFICHES_MAX, NB_FANARTS_MAX};
-use crate::etat::{ActionDialogue, Etat, EtatDialogueReglages, Message};
+use crate::etat::{ActionDialogue, Etat, EtatDialogueReglages, Message, Secret};
 use crate::gabarits::{self, ChampGabarit, Exemples};
 use crate::i18n::{I18n, Langue};
 use crate::polices;
 use crate::reglages::{HauteurLigne, Page, Reglages, Theme};
 use crate::selecteur::{CibleDossier, CibleFichier};
-use crate::source_donnees::ReglagesServices;
+use crate::source_donnees::{
+    OutilAffiche, ReglagesServices, ServiceCle, cle_testable, est_identifiant_client,
+    lien_obtention_cle,
+};
 use crate::validation::{self, ErreurChamp};
 use eframe::egui::{
     self, Id, Response, RichText, ScrollArea, TextEdit, Ui,
@@ -526,8 +529,8 @@ pub fn page(
         Page::SeriesExtracteur => page_extracteur(ui, i, Module::Series, s),
         Page::FilmsIllustrations => page_illustrations(ui, i, Module::Films, s),
         Page::SeriesIllustrations => page_illustrations(ui, i, Module::Series, s),
-        Page::FilmsBandesAnnonces => page_bandes_annonces(ui, i, Module::Films, s),
-        Page::SeriesBandesAnnonces => page_bandes_annonces(ui, i, Module::Series, s),
+        Page::FilmsBandesAnnonces => page_bandes_annonces(ui, etat, d, Module::Films, s, sortie),
+        Page::SeriesBandesAnnonces => page_bandes_annonces(ui, etat, d, Module::Series, s, sortie),
         Page::FilmsSousTitres => page_sous_titres(ui, i, Module::Films, s),
         Page::SeriesSousTitres => page_sous_titres(ui, i, Module::Series, s),
         Page::FilmsRenommeur => page_renommeur(ui, etat, Module::Films, s),
@@ -760,71 +763,139 @@ fn page_outils(
 // Services externes (clés d'API)
 // ---------------------------------------------------------------------------
 
-fn page_services(
+/// Texte court d'usage d'un service : traduction propre à l'interface, à défaut celui des
+/// services.
+fn usage_service(i: &I18n, c: &ServiceCle) -> String {
+    let cle = format!("gui.settings.service.{}.usage", c.id);
+    i.brut(&cle).map_or_else(|| c.usage.clone(), str::to_string)
+}
+
+/// Services dont une partie reste à venir : mention « Bientôt disponible » à côté du nom
+/// (TheTVDB : fournisseur et test absents ; Simkl : aucun fournisseur de notes).
+fn service_partiel(id: &str) -> bool {
+    matches!(id, "tvdb" | "simkl")
+}
+
+/// Page « Services externes » : une ligne par service à clé d'API (état, saisie masquée,
+/// enregistrement, suppression, test). Les valeurs des clés ne sont jamais affichées : le
+/// champ de saisie est masqué et la saisie vit dans un type dont le `Debug` est expurgé.
+pub(crate) fn page_services(
     ui: &mut Ui,
     etat: &Etat,
     d: &EtatDialogueReglages,
-    s: &ReglagesServices,
+    _s: &ReglagesServices,
     sortie: &mut Sortie,
 ) {
     let i = &etat.i18n;
-    ui.label(RichText::new(i.t("gui.settings.keys.tmdb")).strong())
-        .on_hover_text(infobulle(i, "gui.settings.keys.tmdb"));
-    ui.horizontal(|ui| {
-        let mut cle = d.saisie_cle.clone();
-        if ui
-            .add(
-                TextEdit::singleline(&mut cle)
-                    .password(true)
-                    .desired_width(320.0),
+    ui.label(RichText::new(i.t("gui.settings.keys.title")).strong());
+    note(ui, i.t("gui.settings.keys.note"));
+    for c in &d.cles {
+        ui.add_space(10.0);
+        ligne_service(ui, i, d, c, sortie);
+    }
+}
+
+fn ligne_service(
+    ui: &mut Ui,
+    i: &I18n,
+    d: &EtatDialogueReglages,
+    c: &ServiceCle,
+    sortie: &mut Sortie,
+) {
+    let identifiant = est_identifiant_client(&c.id);
+    ui.horizontal_wrapped(|ui| {
+        ui.label(RichText::new(&c.nom).strong());
+        let (statut, couleur) = if c.cle_presente {
+            (
+                format!("{} {}", polices::COCHE, i.t("gui.settings.keys.stored")),
+                None,
             )
-            .on_hover_text(infobulle(i, "gui.settings.keys.tmdb"))
-            .changed()
-        {
-            sortie.push(Message::Dialogue(ActionDialogue::ReglagesSaisieCle(cle)));
+        } else {
+            (
+                i.t("gui.settings.keys.missing"),
+                Some(ui.visuals().weak_text_color()),
+            )
+        };
+        let mut t = RichText::new(statut).small();
+        if let Some(col) = couleur {
+            t = t.color(col);
+        }
+        ui.label(t);
+        if service_partiel(&c.id) {
+            ui.label(RichText::new(i.t("gui.settings.soon")).weak().small());
+        }
+    });
+    note(ui, usage_service(i, c));
+    let saisie = d.saisies_cles.get(&c.id).cloned().unwrap_or_default();
+    ui.horizontal_wrapped(|ui| {
+        let mut valeur = saisie.valeur().to_string();
+        let tip = if identifiant {
+            i.t("gui.settings.keys.field.id.tip")
+        } else {
+            i.t("gui.settings.keys.field.key.tip")
+        };
+        let champ = ui
+            .add(
+                TextEdit::singleline(&mut valeur)
+                    .password(true)
+                    .hint_text(if identifiant {
+                        i.t("gui.settings.keys.field.id")
+                    } else {
+                        i.t("gui.settings.keys.field.key")
+                    })
+                    .desired_width(240.0),
+            )
+            .on_hover_text(tip);
+        if champ.changed() {
+            sortie.push(Message::Dialogue(ActionDialogue::CleSaisie(
+                c.id.clone(),
+                Secret::new(valeur),
+            )));
         }
         if ui
-            .add_enabled(
-                !d.saisie_cle.trim().is_empty(),
-                egui::Button::new(i.t("Button.save")),
-            )
+            .add_enabled(!saisie.est_vide(), egui::Button::new(i.t("Button.save")))
             .clicked()
         {
-            sortie.push(Message::Dialogue(ActionDialogue::ReglagesEnregistrerCle));
+            sortie.push(Message::Dialogue(ActionDialogue::CleEnregistrer(
+                c.id.clone(),
+            )));
+        }
+        if ui
+            .add_enabled(c.cle_presente, egui::Button::new(i.t("Button.remove")))
+            .clicked()
+        {
+            sortie.push(Message::Dialogue(ActionDialogue::CleSupprimer(
+                c.id.clone(),
+            )));
+        }
+        let testable = cle_testable(&c.id);
+        let test = ui.add_enabled(
+            c.cle_presente && testable,
+            egui::Button::new(i.t("gui.tools.test")),
+        );
+        let test = if testable {
+            test.on_hover_text(i.t("gui.settings.keys.test.tip"))
+        } else {
+            test.on_disabled_hover_text(i.t("gui.settings.keys.test.unavailable.tip"))
+        };
+        if test.clicked() {
+            sortie.push(Message::Dialogue(ActionDialogue::CleTester(c.id.clone())));
         }
     });
-    let statut = if s.generales.cle_tmdb_definie {
-        format!("{} {}", polices::COCHE, i.t("gui.settings.keys.stored"))
-    } else {
-        i.t("gui.settings.keys.missing")
-    };
-    ui.label(RichText::new(statut).small());
-    note(ui, i.t("wizard.scraper.apikey.note"));
-    section(ui, i, "gui.settings.keys.others");
-    note(ui, i.t("gui.settings.soon.note"));
-    ui.add_space(4.0);
-    ui.add_enabled_ui(false, |ui| {
-        grille("g_cles_bientot").show(ui, |ui| {
-            for cle in [
-                "gui.settings.keys.fanart",
-                "gui.settings.keys.tvdb",
-                "gui.settings.keys.omdb",
-                "gui.settings.keys.trakt",
-                "gui.settings.keys.simkl",
-                "gui.settings.keys.mdblist",
-            ] {
-                ui.label(i.t(cle));
-                let mut vide = String::new();
-                ui.add(
-                    TextEdit::singleline(&mut vide)
-                        .hint_text(i.t("gui.settings.soon"))
-                        .desired_width(240.0),
-                )
-                .on_disabled_hover_text(i.t("gui.settings.soon"));
-                ui.end_row();
-            }
+    if !cle_testable(&c.id) {
+        note(ui, i.t("gui.settings.keys.test.unavailable"));
+    }
+    let lien = lien_obtention_cle(&c.id);
+    if !lien.is_empty() {
+        ui.horizontal_wrapped(|ui| {
+            ui.label(
+                RichText::new(i.t("gui.settings.keys.getkey"))
+                    .weak()
+                    .small(),
+            );
+            ui.add(egui::Label::new(RichText::new(lien).monospace().small()).selectable(true));
         });
-    });
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1304,16 +1375,103 @@ fn page_illustrations(ui: &mut Ui, i: &I18n, m: Module, s: &mut ReglagesServices
     }
 }
 
-fn page_bandes_annonces(ui: &mut Ui, i: &I18n, m: Module, s: &mut ReglagesServices) {
+fn page_bandes_annonces(
+    ui: &mut Ui,
+    etat: &Etat,
+    d: &EtatDialogueReglages,
+    m: Module,
+    s: &mut ReglagesServices,
+    sortie: &mut Sortie,
+) {
+    let i = &etat.i18n;
     let c = commun(m, &mut s.films, &mut s.series);
     case(ui, i, c.bandes_auto, "gui.settings.trailer.auto");
     ui.add_space(6.0);
+    let qualite = c.qualite_bande;
     grille("g_bandes").show(ui, |ui| {
         etiquette(ui, i, "gui.settings.trailer.quality");
-        choix(ui, i, "qualite_bande", c.qualite_bande, &QUALITES_BANDE)
+        choix(ui, i, "qualite_bande", qualite, &QUALITES_BANDE)
             .on_hover_text(infobulle(i, "gui.settings.trailer.quality"));
         ui.end_row();
     });
+    if m == Module::Films {
+        let libelle = QUALITES_BANDE
+            .iter()
+            .find(|(q, _)| *q == *qualite)
+            .map(|(_, cle)| i.t(cle))
+            .unwrap_or_default();
+        section(ui, i, "gui.settings.trailer.ytdlp");
+        bloc_yt_dlp(ui, i, d, &libelle, sortie);
+    }
+}
+
+/// Texte d'état de yt-dlp : version et chemin s'ils sont connus, sinon « introuvable ».
+pub(crate) fn etat_yt_dlp(
+    i: &I18n,
+    detecte: bool,
+    test: Option<&Result<Option<OutilAffiche>, String>>,
+) -> (bool, String) {
+    match test {
+        Some(Ok(Some(o))) => {
+            let version = o
+                .version
+                .clone()
+                .unwrap_or_else(|| i.t("gui.tools.noversion"));
+            (
+                true,
+                format!("{} yt-dlp : {version}\n    {}", polices::COCHE, o.chemin),
+            )
+        }
+        Some(Ok(None)) => (false, i.t("gui.settings.trailer.ytdlp.notfound")),
+        Some(Err(e)) => (false, e.clone()),
+        None if detecte => (true, i.t("gui.settings.trailer.ytdlp.found")),
+        None => (false, i.t("gui.settings.trailer.ytdlp.notfound")),
+    }
+}
+
+/// État de yt-dlp (détecté ou non), bouton de test et rappel de la qualité visée.
+fn bloc_yt_dlp(
+    ui: &mut Ui,
+    i: &I18n,
+    d: &EtatDialogueReglages,
+    qualite: &str,
+    sortie: &mut Sortie,
+) {
+    ui.horizontal(|ui| {
+        if ui
+            .add_enabled(
+                !d.test_yt_dlp_en_cours,
+                egui::Button::new(i.t("gui.tools.test")),
+            )
+            .on_hover_text(i.t("gui.settings.trailer.ytdlp.test.tip"))
+            .clicked()
+        {
+            sortie.push(Message::TesterYtDlp);
+        }
+        if d.test_yt_dlp_en_cours {
+            ui.spinner();
+            ui.label(i.t("gui.tools.testing"));
+        }
+    });
+    if !d.test_yt_dlp_en_cours {
+        let (ok, texte) = etat_yt_dlp(i, d.yt_dlp_detecte, d.test_yt_dlp.as_ref());
+        if ok {
+            ui.label(texte);
+        } else {
+            ui.label(
+                RichText::new(format!("{} {texte}", polices::AVERTISSEMENT))
+                    .color(crate::theme::ROUGE),
+            );
+            note(ui, i.t("gui.trailer.noytdlp"));
+        }
+    }
+    note(
+        ui,
+        i.t_args(
+            "gui.settings.trailer.ytdlp.quality",
+            &[("quality", qualite)],
+        ),
+    );
 }
 
 fn page_sous_titres(ui: &mut Ui, i: &I18n, m: Module, s: &mut ReglagesServices) {

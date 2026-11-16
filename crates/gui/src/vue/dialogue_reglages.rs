@@ -413,6 +413,219 @@ mod tests {
         assert!(textes.iter().any(|(t, _)| *t == parcourir));
     }
 
+    /// Ouvre la page « Services externes » avec quelques clés enregistrées et une saisie en
+    /// cours (jamais affichée en clair).
+    fn etat_services() -> Etat {
+        use crate::etat::Secret;
+        let mut etat = Etat::nouveau();
+        etat.appliquer(Message::OuvrirReglagesPage(Page::ServicesExternes));
+        for (id, valeur) in [
+            ("tmdb", "cle-tmdb-secrete"),
+            ("trakt", "client-trakt-secret"),
+        ] {
+            etat.appliquer(Message::Dialogue(ActionDialogue::CleSaisie(
+                id.into(),
+                Secret::new(valeur),
+            )));
+            etat.appliquer(Message::Dialogue(ActionDialogue::CleEnregistrer(id.into())));
+        }
+        etat.appliquer(Message::Dialogue(ActionDialogue::CleSaisie(
+            "omdb".into(),
+            Secret::new("saisie-en-cours-secrete"),
+        )));
+        etat
+    }
+
+    /// Une ligne par service, boutons et liens présents, aucun secret dessiné, aucun
+    /// « bientôt disponible » hors TheTVDB et Simkl, taille stable à 1914×1026 et 1366×768.
+    #[test]
+    fn page_services_externes_sept_lignes_et_taille_stable() {
+        let etat = etat_services();
+        let i = &etat.i18n;
+        for ecran in [Vec2::new(1914.0, 1026.0), Vec2::new(1366.0, 768.0)] {
+            let (textes, r4, sortie) = rendre(&etat, ecran, 4);
+            let (_, r20, _) = rendre(&etat, ecran, 20);
+            assert_eq!(r4.size(), r20.size(), "taille instable à {ecran:?}");
+            assert!(Rect::from_min_size(Pos2::ZERO, ecran).contains_rect(r20));
+            assert!(sortie.is_empty(), "{sortie:?}");
+            let nombre = |t: &str| textes.iter().filter(|(x, _)| x == t).count();
+            // La page défile dans la fenêtre : seules les premières lignes sont visibles.
+            for nom in ["TMDB", "Fanart.tv", "TheTVDB"] {
+                assert_eq!(nombre(nom), 1, "{nom} à {ecran:?}");
+            }
+            assert!(nombre(&i.t("gui.settings.keys.title")) == 1);
+            // Contenu de la page visible : au moins les boutons du début (la page défile).
+            assert!(nombre(&i.t("Button.save")) >= 2, "{ecran:?}");
+            assert!(nombre(&i.t("gui.tools.test")) >= 2);
+            assert!(nombre(&i.t("Button.remove")) >= 2);
+            assert!(
+                textes
+                    .iter()
+                    .any(|(t, _)| t.contains("https://www.themoviedb.org/settings/api"))
+            );
+            // Les secrets (enregistrés ou en cours de saisie) ne sont jamais dessinés.
+            for (t, _) in &textes {
+                assert!(
+                    !t.contains("secrete") && !t.contains("secret-"),
+                    "secret affiché : {t}"
+                );
+                assert!(!t.contains("???"), "traduction manquante : {t}");
+            }
+        }
+    }
+
+    /// Les sept services sont dessinés (page entière, sans défilement) avec leurs trois boutons,
+    /// leur lien, et seuls TheTVDB et Simkl portent la mention « Bientôt disponible ».
+    #[test]
+    fn page_services_dessine_les_sept_services() {
+        let etat = etat_services();
+        let Some(Dialogue::Reglages(d)) = &etat.dialogue else {
+            panic!("dialogue attendu");
+        };
+        let ctx = egui::Context::default();
+        ctx.set_visuals(crate::theme::visuals(etat.reglages.theme));
+        let entree = RawInput {
+            screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(900.0, 4000.0))),
+            ..Default::default()
+        };
+        let mut sortie = Vec::new();
+        let mut hauteurs = Vec::new();
+        let mut textes = Vec::new();
+        for _ in 0..4 {
+            sortie.clear();
+            let mut out = ctx.run_ui(entree.clone(), |ui| {
+                let r = egui::CentralPanel::default().show(ui, |ui| {
+                    reglages_pages::page_services(ui, &etat, d, &etat.services, &mut sortie);
+                });
+                hauteurs.push(r.response.rect.height());
+            });
+            out.textures_delta.clear();
+            textes = out
+                .shapes
+                .iter()
+                .filter_map(|c| match &c.shape {
+                    egui::epaint::Shape::Text(t) => Some(t.galley.text().to_string()),
+                    _ => None,
+                })
+                .collect();
+        }
+        assert!(sortie.is_empty(), "{sortie:?}");
+        assert_eq!(hauteurs[2], hauteurs[3], "hauteur instable");
+        let i = &etat.i18n;
+        let nombre = |t: &str| textes.iter().filter(|x| x.as_str() == t).count();
+        for nom in [
+            "TMDB",
+            "Fanart.tv",
+            "TheTVDB",
+            "OMDb",
+            "Trakt",
+            "MDBList",
+            "Simkl",
+        ] {
+            assert_eq!(nombre(nom), 1, "{nom}");
+        }
+        assert_eq!(nombre(&i.t("Button.save")), 7);
+        assert_eq!(nombre(&i.t("Button.remove")), 7);
+        assert_eq!(nombre(&i.t("gui.tools.test")), 7);
+        assert_eq!(nombre(&i.t("gui.settings.keys.getkey")), 7);
+        // Clés enregistrées : TMDB et Trakt ; les autres : « aucune clé ».
+        assert_eq!(
+            nombre(&format!(
+                "{} {}",
+                crate::polices::COCHE,
+                i.t("gui.settings.keys.stored")
+            )),
+            2
+        );
+        assert_eq!(nombre(&i.t("gui.settings.keys.missing")), 5);
+        assert_eq!(nombre(&i.t("gui.settings.soon")), 2);
+        assert_eq!(nombre(&i.t("gui.settings.keys.test.unavailable")), 1);
+        // Indications des champs vides : Trakt et Simkl (identifiant client), 4 autres clés
+        // (OMDb a une saisie en cours, donc pas d'indication).
+        assert_eq!(nombre(&i.t("gui.settings.keys.field.id")), 2);
+        assert_eq!(nombre(&i.t("gui.settings.keys.field.key")), 4);
+        assert!(
+            textes
+                .iter()
+                .all(|t| !t.contains("secrete") && !t.contains("???"))
+        );
+    }
+
+    /// Chaque service a un texte d'usage, un lien de clé et ses traductions fr / en.
+    #[test]
+    fn services_textes_liens_et_traductions() {
+        use crate::i18n::analyser;
+        use crate::source_donnees::{
+            cle_testable, est_identifiant_client, lien_obtention_cle, services_cles_connus,
+        };
+        let fr = analyser(include_str!("../../i18n/fr.properties"));
+        let en = analyser(include_str!("../../i18n/en.properties"));
+        for c in services_cles_connus() {
+            let cle = format!("gui.settings.service.{}.usage", c.id);
+            assert!(fr.contains_key(&cle) && en.contains_key(&cle), "{cle}");
+            assert!(
+                lien_obtention_cle(&c.id).starts_with("https://"),
+                "{}",
+                c.id
+            );
+        }
+        assert!(!cle_testable("tvdb") && cle_testable("omdb"));
+        assert!(est_identifiant_client("trakt") && est_identifiant_client("Simkl"));
+        assert!(!est_identifiant_client("omdb"));
+        assert_eq!(lien_obtention_cle("inconnu"), "");
+        for cle in ["gui.cmd.fetchtrailers", "gui.cmd.downloadtrailers"] {
+            assert!(fr.contains_key(cle) && en.contains_key(cle), "{cle}");
+        }
+    }
+
+    /// Page Films / Bandes-annonces : état de yt-dlp (détecté ou non), bouton Tester, rappel de la
+    /// qualité ; taille stable.
+    #[test]
+    fn page_bandes_annonces_etat_de_yt_dlp() {
+        let mut etat = Etat::nouveau();
+        etat.appliquer(Message::OuvrirReglagesPage(Page::FilmsBandesAnnonces));
+        let i = &etat.i18n;
+        for ecran in [Vec2::new(1914.0, 1026.0), Vec2::new(1366.0, 768.0)] {
+            let (textes, r4, sortie) = rendre(&etat, ecran, 4);
+            let (_, r20, _) = rendre(&etat, ecran, 20);
+            assert_eq!(r4.size(), r20.size(), "{ecran:?}");
+            assert!(sortie.is_empty());
+            let present = |t: &str| textes.iter().any(|(x, _)| x == t);
+            assert!(present(&i.t("gui.settings.trailer.ytdlp")));
+            assert!(present(&i.t("gui.settings.trailer.ytdlp.found")));
+            assert!(present(&i.t("gui.tools.test")));
+            let qualite = i.t("gui.settings.trailer.hd720");
+            assert!(
+                textes
+                    .iter()
+                    .any(|(t, _)| t.contains(&format!("{qualite} au plus")))
+            );
+        }
+        // yt-dlp introuvable : avertissement et explication.
+        if let Some(Dialogue::Reglages(d)) = &mut etat.dialogue {
+            d.yt_dlp_detecte = false;
+        }
+        let (textes, _, _) = rendre(&etat, Vec2::new(1366.0, 768.0), 4);
+        assert!(
+            textes
+                .iter()
+                .any(|(t, _)| t.contains("yt-dlp est introuvable"))
+        );
+        assert!(
+            textes
+                .iter()
+                .any(|(t, _)| t.contains("Paramètres › Outils externes"))
+        );
+        // La page des séries ne propose pas le téléchargement.
+        etat.appliquer(Message::OuvrirReglagesPage(Page::SeriesBandesAnnonces));
+        let (textes, _, _) = rendre(&etat, Vec2::new(1366.0, 768.0), 4);
+        assert!(
+            !textes
+                .iter()
+                .any(|(t, _)| t == &etat.i18n.t("gui.settings.trailer.ytdlp"))
+        );
+    }
+
     /// Premiers libellés (clés de traduction) visibles en haut de chaque page.
     fn libelles_attendus(page: Page) -> &'static [&'static str] {
         use Page::*;
@@ -422,7 +635,7 @@ mod tests {
             TriTitre => &["gui.settings.sort.prefixes"],
             OutilsExternes => &["gui.tools.path"],
             MaterielsExternes => &["gui.settings.soon", "gui.settings.soon.devices"],
-            ServicesExternes => &["gui.settings.keys.tmdb"],
+            ServicesExternes => &["gui.settings.keys.title"],
             Systeme => &["Settings.proxy", "Settings.proxy.host"],
             Ard => &["gui.settings.soon", "gui.settings.soon.ard"],
             Divers => &["Settings.imagecache"],

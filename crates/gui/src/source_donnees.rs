@@ -7,17 +7,18 @@
 //! - [`SourceFactice`] : démonstration et tests visuels (données de `donnees.rs`, images
 //!   générées localement, recherche et tâches simulées).
 
-use crate::details_film::DetailsFilm;
+use crate::details_film::{BandeAnnonceEdit, DetailsFilm};
 use crate::details_serie::DetailsSerie;
 use crate::dialogues::appliquer_resultat;
 use crate::donnees::films_factices;
 use crate::etat::{Message, Niveau, NoeudSerie};
-use crate::modele::{Film, normaliser};
+use crate::modele::{BandeAnnonceFilm, FichierFilm, Film, TypeFichier, normaliser};
 use crate::renommage::{self, ApercuFilm, LigneFichier};
 use crate::taches::{IssueTache, Repaint};
 use mediamanager_store::reglages::{
     QualiteCacheImages, ReglagesFilms, ReglagesGeneraux, ReglagesSeries, TailleCacheImages,
 };
+use mediamanager_store::services::SERVICES;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -201,6 +202,24 @@ pub enum Travail {
         ids: Vec<String>,
         modifs: ModifsLot,
     },
+    /// Récupère chez le fournisseur les bandes-annonces des films choisis (« Chercher &
+    /// extraire »).
+    RecupererBandesAnnonces {
+        ids: Vec<u64>,
+    },
+    /// Télécharge la meilleure bande-annonce de chaque film choisi (yt-dlp).
+    TelechargerBandesAnnonces {
+        ids: Vec<u64>,
+    },
+    /// Télécharge la bande-annonce d'une ligne du tableau de l'éditeur.
+    TelechargerBandeAnnonce {
+        film: u64,
+        bande: BandeAnnonceEdit,
+    },
+    /// Teste la clé enregistrée d'un service (identifiant : `tmdb`, `omdb`...).
+    TesterCle {
+        service: String,
+    },
 }
 
 /// Éléments d'un export : films (identifiants affichés) ou séries ; `None` = tous.
@@ -354,6 +373,10 @@ impl Travail {
             Travail::EditionLotFilms { .. } | Travail::EditionLotSeries { .. } => {
                 "gui.task.bulkedit"
             }
+            Travail::RecupererBandesAnnonces { .. } => "gui.task.trailers.fetch",
+            Travail::TelechargerBandesAnnonces { .. } => "gui.task.trailers.download",
+            Travail::TelechargerBandeAnnonce { .. } => "gui.task.trailer.download",
+            Travail::TesterCle { .. } => "gui.task.testkey",
         }
     }
 }
@@ -574,6 +597,147 @@ impl DiagnosticOutils {
     }
 }
 
+/// État d'un service à clé d'API affiché dans les réglages (la valeur de la clé n'est jamais
+/// exposée : seulement sa présence).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ServiceCle {
+    /// Identifiant stable : `tmdb`, `fanart`, `tvdb`, `omdb`, `trakt`, `mdblist`, `simkl`.
+    pub id: String,
+    pub nom: String,
+    /// Nature de la clé (« clé d'API », « identifiant client »...).
+    pub type_cle: String,
+    /// À quoi sert le service (texte court).
+    pub usage: String,
+    pub cle_presente: bool,
+}
+
+/// Services connus, sans aucune clé enregistrée (état par défaut d'une source).
+pub fn services_cles_connus() -> Vec<ServiceCle> {
+    SERVICES
+        .iter()
+        .map(|d| ServiceCle {
+            id: d.id.into(),
+            nom: d.nom.into(),
+            type_cle: d.type_cle.into(),
+            usage: d.usage.into(),
+            cle_presente: false,
+        })
+        .collect()
+}
+
+/// Vrai si le service dispose d'un test de clé (TheTVDB : fournisseur non implémenté).
+pub fn cle_testable(service: &str) -> bool {
+    !service.trim().eq_ignore_ascii_case("tvdb")
+}
+
+/// Vrai si le service est saisi sous forme d'identifiant client (et non de clé d'API).
+pub fn est_identifiant_client(service: &str) -> bool {
+    matches!(service.trim().to_lowercase().as_str(), "trakt" | "simkl")
+}
+
+/// Adresse (affichée en texte, jamais ouverte automatiquement) où obtenir la clé d'un service.
+pub fn lien_obtention_cle(service: &str) -> &'static str {
+    match service.trim().to_lowercase().as_str() {
+        "tmdb" => "https://www.themoviedb.org/settings/api",
+        "fanart" => "https://fanart.tv/get-an-api-key/",
+        "tvdb" => "https://thetvdb.com/api-information",
+        "omdb" => "https://www.omdbapi.com/apikey.aspx",
+        "trakt" => "https://trakt.tv/oauth/applications",
+        "mdblist" => "https://mdblist.com/preferences/",
+        "simkl" => "https://simkl.com/settings/developer/",
+        _ => "",
+    }
+}
+
+/// Remplace la valeur des paramètres sensibles (`api_key=`, `apikey=`, `token=`, `client_id=`,
+/// `key=`) d'un message d'erreur : les messages des services ne doivent jamais laisser
+/// passer une clé (adresse de requête citée par une erreur réseau, par exemple).
+pub fn masquer_secrets(texte: &str) -> String {
+    static MOTIF: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    let motif = MOTIF.get_or_init(|| {
+        regex::Regex::new(r#"(?i)\b(api[_-]?key|apikey|client[_-]?id|token|key)=([^&\s"')]+)"#)
+            .expect("motif valide")
+    });
+    motif.replace_all(texte, "${1}=***").into_owned()
+}
+
+/// Explication du message affiché quand yt-dlp est introuvable.
+pub const MESSAGE_YT_DLP_ABSENT: &str = "yt-dlp est introuvable : placez yt-dlp.exe dans le dossier outils/ ou indiquez son chemin dans Paramètres › Outils externes";
+
+/// Compteurs du bilan d'un téléchargement de bandes-annonces.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct BilanTelechargement {
+    pub telecharges: usize,
+    pub deja_presents: usize,
+    pub sans_bande_annonce: usize,
+    pub verrouilles: usize,
+    /// Messages d'erreur (un par échec).
+    pub echecs: Vec<String>,
+}
+
+/// Texte et niveau de la notification de fin d'un téléchargement de bandes-annonces.
+pub fn texte_bilan_telechargement(b: &BilanTelechargement) -> (Niveau, String) {
+    let mut t = format!(
+        "Bandes-annonces : {} téléchargée(s), {} déjà présente(s), {} sans bande-annonce, {} échec(s)",
+        b.telecharges,
+        b.deja_presents,
+        b.sans_bande_annonce,
+        b.echecs.len()
+    );
+    if b.verrouilles > 0 {
+        t.push_str(&format!(
+            "\n{} film(s) verrouillé(s) ignoré(s)",
+            b.verrouilles
+        ));
+    }
+    for e in &b.echecs {
+        t.push_str(&format!("\n{}", masquer_secrets(e)));
+    }
+    let n = if b.echecs.is_empty() {
+        Niveau::Info
+    } else {
+        Niveau::Avertissement
+    };
+    (n, t)
+}
+
+/// Compteurs du bilan d'une récupération de bandes-annonces chez le fournisseur.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct BilanRecuperation {
+    pub films_mis_a_jour: usize,
+    /// Nombre total de bandes-annonces trouvées.
+    pub bandes_trouvees: usize,
+    pub sans_resultat: usize,
+    pub verrouilles: usize,
+    pub echecs: Vec<String>,
+}
+
+/// Texte et niveau de la notification de fin d'une récupération de bandes-annonces.
+pub fn texte_bilan_recuperation(b: &BilanRecuperation) -> (Niveau, String) {
+    let mut t = format!(
+        "Bandes-annonces : {} film(s) mis à jour ({} bande(s)-annonce(s) trouvée(s)), {} sans résultat, {} échec(s)",
+        b.films_mis_a_jour,
+        b.bandes_trouvees,
+        b.sans_resultat,
+        b.echecs.len()
+    );
+    if b.verrouilles > 0 {
+        t.push_str(&format!(
+            "\n{} film(s) verrouillé(s) ignoré(s)",
+            b.verrouilles
+        ));
+    }
+    for e in &b.echecs {
+        t.push_str(&format!("\n{}", masquer_secrets(e)));
+    }
+    let n = if b.echecs.is_empty() {
+        Niveau::Info
+    } else {
+        Niveau::Avertissement
+    };
+    (n, t)
+}
+
 /// Saga (collection de films) affichée par le module Collections.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct SagaAffichage {
@@ -755,6 +919,28 @@ pub trait SourceDonnees: Send + Sync {
     fn annuler_tache(&self, id: u64);
     /// Installe le canal de retour des événements spontanés des services.
     fn brancher(&self, _retour: Retour) {}
+    /// État des services à clé d'API (présence de la clé seulement, jamais sa valeur), dans
+    /// l'ordre d'affichage. Par défaut : tous les services connus, sans clé.
+    fn etat_cles(&self) -> Vec<ServiceCle> {
+        services_cles_connus()
+    }
+    /// Enregistre la clé d'un service dans le coffre ; une valeur vide la supprime. Le secret
+    /// n'est ni journalisé ni repris dans un message d'erreur. Par défaut : non prise en
+    /// charge.
+    fn enregistrer_cle(&self, service: &str, secret: &str) -> Result<(), String> {
+        let _ = (service, secret);
+        Err("l'enregistrement des clés n'est pas pris en charge par cette source".into())
+    }
+    /// Vrai si yt-dlp est localisable (rapide : aucun lancement). Par défaut : non.
+    fn yt_dlp_disponible(&self) -> bool {
+        false
+    }
+    /// Localise yt-dlp pour un chemin donné (vide = recherche automatique) et l'interroge pour
+    /// sa version (bloquant : appelé hors du thread de l'interface). `None` : introuvable.
+    fn tester_yt_dlp(&self, chemin: &str) -> Result<Option<OutilAffiche>, String> {
+        let _ = chemin;
+        Ok(None)
+    }
 }
 
 /// Similarité de deux titres : coefficient de Dice sur les bigrammes de caractères normalisés.
@@ -849,6 +1035,8 @@ pub struct SourceFactice {
     pub latence: Duration,
     /// Durée d'une unité de travail des tâches simulées.
     pub pas: Duration,
+    /// yt-dlp est-il « installé » (démonstration et tests) ?
+    pub yt_dlp_present: bool,
 }
 
 impl Default for SourceFactice {
@@ -892,6 +1080,7 @@ impl SourceFactice {
             prochain_id: AtomicU64::new(1),
             latence: Duration::from_millis(250),
             pas: Duration::from_millis(80),
+            yt_dlp_present: true,
         }
     }
 
@@ -945,6 +1134,16 @@ struct Effets {
 }
 
 /// Ajoute les valeurs absentes (sans tenir compte de la casse).
+/// Nom du secret d'un service dans le coffre factice (celui de TMDB est partagé avec
+/// l'assistant de démarrage).
+fn nom_secret_service(service: &str) -> String {
+    if service.eq_ignore_ascii_case("tmdb") {
+        SECRET_CLE_TMDB.to_string()
+    } else {
+        format!("{}.cle_api", service.to_lowercase())
+    }
+}
+
 fn ajouter_valeurs(liste: &mut Vec<String>, valeurs: &[String]) -> bool {
     let mut change = false;
     for v in valeurs.iter().map(|v| v.trim()).filter(|v| !v.is_empty()) {
@@ -1049,12 +1248,41 @@ fn exporter_demo(
     })
 }
 
+/// Ajoute au film un fichier `<nom du film>-trailer.mp4` (démonstration) ; renvoie son nom.
+fn ajouter_fichier_bande_annonce(f: &mut Film) -> String {
+    let base = f
+        .nom_fichier
+        .rsplit_once('.')
+        .map_or(f.nom_fichier.as_str(), |(b, _)| b)
+        .to_string();
+    let base = if base.is_empty() {
+        f.titre.clone()
+    } else {
+        base
+    };
+    let mut nom = format!("{base}-trailer.mp4");
+    let mut n = 2;
+    while f.fichiers.iter().any(|x| x.nom == nom) {
+        nom = format!("{base}-trailer.{n}.mp4");
+        n += 1;
+    }
+    f.fichiers.push(FichierFilm {
+        type_fichier: TypeFichier::BandeAnnonce,
+        nom: nom.clone(),
+        taille_octets: 48_000_000,
+        ..FichierFilm::default()
+    });
+    f.bande_annonce = true;
+    nom
+}
+
 /// Effet d'une tâche simulée sur les films et séries de démonstration.
 fn effet_simule(
     travail: &Travail,
     films: &mut [Film],
     series: &mut [SerieAffichage],
     services: &ReglagesServices,
+    cles: &[String],
 ) -> Effets {
     let mut effets = Effets::default();
     match travail {
@@ -1186,6 +1414,77 @@ fn effet_simule(
                     effets.series_modifiees = true;
                 }
             }
+        }
+        Travail::RecupererBandesAnnonces { ids } => {
+            let mut b = BilanRecuperation::default();
+            for f in films.iter_mut().filter(|f| ids.contains(&f.id)) {
+                if f.verrouille {
+                    b.verrouilles += 1;
+                } else if f.bandes_annonces.is_empty() {
+                    f.bandes_annonces.push(BandeAnnonceFilm {
+                        nom: "Bande-annonce officielle".into(),
+                        source: "YouTube".into(),
+                        qualite: "1080p".into(),
+                        url: format!("https://www.youtube.com/watch?v=demo{}", f.id),
+                    });
+                    f.bande_annonce = true;
+                    b.films_mis_a_jour += 1;
+                    b.bandes_trouvees += 1;
+                    effets.films.push(f.clone());
+                } else {
+                    b.films_mis_a_jour += 1;
+                    b.bandes_trouvees += f.bandes_annonces.len();
+                }
+            }
+            effets.notifications.push(texte_bilan_recuperation(&b));
+        }
+        Travail::TelechargerBandesAnnonces { ids } => {
+            let mut b = BilanTelechargement::default();
+            for f in films.iter_mut().filter(|f| ids.contains(&f.id)) {
+                if f.verrouille {
+                    b.verrouilles += 1;
+                } else if f.a_fichier_bande_annonce() {
+                    b.deja_presents += 1;
+                } else if f.bandes_annonces.is_empty() {
+                    b.sans_bande_annonce += 1;
+                } else {
+                    ajouter_fichier_bande_annonce(f);
+                    b.telecharges += 1;
+                    effets.films.push(f.clone());
+                }
+            }
+            effets.notifications.push(texte_bilan_telechargement(&b));
+        }
+        Travail::TelechargerBandeAnnonce { film, bande } => {
+            if let Some(f) = films.iter_mut().find(|f| f.id == *film) {
+                if f.verrouille {
+                    effets.notifications.push((
+                        Niveau::Avertissement,
+                        format!("Film verrouillé : {}", f.titre),
+                    ));
+                } else {
+                    let nom = ajouter_fichier_bande_annonce(f);
+                    let _ = bande;
+                    effets
+                        .notifications
+                        .push((Niveau::Info, format!("Bande-annonce téléchargée : {nom}")));
+                    effets.films.push(f.clone());
+                }
+            }
+        }
+        Travail::TesterCle { service } => {
+            let texte = if cles.iter().any(|c| c.eq_ignore_ascii_case(service)) {
+                (
+                    Niveau::Info,
+                    format!("Clé {service} valide (démonstration)"),
+                )
+            } else {
+                (
+                    Niveau::Avertissement,
+                    format!("Aucune clé enregistrée pour {service}"),
+                )
+            };
+            effets.notifications.push(texte);
         }
         Travail::MettreAJourSources
         | Travail::MettreAJourSeries
@@ -1756,6 +2055,12 @@ impl SourceDonnees for SourceFactice {
             Travail::RecupererAuto { .. } => 25,
             _ => 10,
         };
+        let cles: Vec<String> = self
+            .etat_cles()
+            .into_iter()
+            .filter(|c| c.cle_presente)
+            .map(|c| c.id)
+            .collect();
         let (pas, films, series, services, annulations, retour) = (
             self.pas,
             self.films.clone(),
@@ -1789,7 +2094,9 @@ impl SourceDonnees for SourceFactice {
             if issue == IssueTache::Reussie {
                 let services = services.lock().map(|s| s.clone()).unwrap_or_default();
                 let effets = match (films.lock(), series.lock()) {
-                    (Ok(mut f), Ok(mut s)) => effet_simule(&travail, &mut f, &mut s, &services),
+                    (Ok(mut f), Ok(mut s)) => {
+                        effet_simule(&travail, &mut f, &mut s, &services, &cles)
+                    }
                     _ => Effets::default(),
                 };
                 for f in effets.films {
@@ -1811,6 +2118,50 @@ impl SourceDonnees for SourceFactice {
             retour.envoyer(Message::TacheTerminee { id, issue });
         });
         Ok(())
+    }
+
+    fn etat_cles(&self) -> Vec<ServiceCle> {
+        let secrets = self.secrets.lock().map(|s| s.clone()).unwrap_or_default();
+        services_cles_connus()
+            .into_iter()
+            .map(|mut c| {
+                c.cle_presente = secrets
+                    .get(&nom_secret_service(&c.id))
+                    .is_some_and(|v| !v.trim().is_empty());
+                c
+            })
+            .collect()
+    }
+
+    fn enregistrer_cle(&self, service: &str, secret: &str) -> Result<(), String> {
+        if !SERVICES.iter().any(|d| d.id.eq_ignore_ascii_case(service)) {
+            return Err(format!("service inconnu : {service}"));
+        }
+        let mut s = self.secrets.lock().map_err(|e| e.to_string())?;
+        let nom = nom_secret_service(service);
+        if secret.trim().is_empty() {
+            s.remove(&nom);
+        } else {
+            s.insert(nom, secret.trim().to_string());
+        }
+        Ok(())
+    }
+
+    fn yt_dlp_disponible(&self) -> bool {
+        self.yt_dlp_present
+    }
+
+    fn tester_yt_dlp(&self, chemin: &str) -> Result<Option<OutilAffiche>, String> {
+        std::thread::sleep(self.latence);
+        let chemin = chemin.trim();
+        Ok(self.yt_dlp_present.then(|| OutilAffiche {
+            chemin: if chemin.is_empty() {
+                "outils/yt-dlp.exe".into()
+            } else {
+                chemin.into()
+            },
+            version: Some("2026.01.01 (démonstration)".into()),
+        }))
     }
 
     fn annuler_tache(&self, id: u64) {

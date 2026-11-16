@@ -154,6 +154,22 @@ impl Film {
         }
     }
 
+    /// Noms des fichiers de bande-annonce présents dans le dossier du film.
+    pub fn fichiers_bande_annonce(&self) -> Vec<&str> {
+        self.fichiers
+            .iter()
+            .filter(|f| f.type_fichier == TypeFichier::BandeAnnonce)
+            .map(|f| f.nom.as_str())
+            .collect()
+    }
+
+    /// Vrai si au moins un fichier de bande-annonce existe (bande-annonce « téléchargée »).
+    pub fn a_fichier_bande_annonce(&self) -> bool {
+        self.fichiers
+            .iter()
+            .any(|f| f.type_fichier == TypeFichier::BandeAnnonce)
+    }
+
     /// Chemin complet du fichier vidéo principal (`None` si le film n'a pas de vidéo).
     pub fn chemin_video(&self) -> Option<std::path::PathBuf> {
         if self.nom_fichier.is_empty() {

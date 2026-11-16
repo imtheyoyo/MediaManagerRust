@@ -12,7 +12,8 @@ use crate::dialogues::FilmEdite;
 use crate::editeur_film::retirer;
 use crate::etat::Message;
 use crate::ouverture::CibleOuverture;
-use crate::theme::{BLEU_ETAT, ICONE_REPOS};
+use crate::ouverture::adresse_web_valide;
+use crate::theme::BLEU_ETAT;
 use crate::vue::Sortie;
 use crate::vue::details::largeur_libelles;
 use eframe::egui::{Align, Layout, Ui, vec2};
@@ -61,19 +62,31 @@ pub fn afficher(ui: &mut Ui, ct: &Contexte<'_>, b: &mut FilmEdite, sortie: &mut 
             if c.retirer {
                 retirer(bandes, sel);
             }
-            let url = sel
-                .and_then(|n| bandes.get(n))
-                .map(|x| x.url.clone())
-                .unwrap_or_default();
+            let choisie = sel.and_then(|n| bandes.get(n)).cloned();
+            let url = choisie.as_ref().map(|x| x.url.clone()).unwrap_or_default();
             if bouton(
                 ui,
                 Glyphe::Lire,
-                !url.trim().is_empty(),
+                adresse_web_valide(&url),
                 &i.t("editor.trailer.play"),
             )
             .clicked()
             {
-                sortie.push(Message::Ouvrir(CibleOuverture::Adresse(url)));
+                sortie.push(Message::Ouvrir(CibleOuverture::Adresse(url.clone())));
+            }
+            if bouton(
+                ui,
+                Glyphe::Telecharger,
+                adresse_web_valide(&url),
+                &i.t("editor.trailer.download"),
+            )
+            .clicked()
+                && let Some(bande) = choisie
+            {
+                sortie.push(Message::TelechargerBandeAnnonce {
+                    film: ct.e.id,
+                    bande,
+                });
             }
         });
         let l_table = l_champ;
@@ -100,19 +113,23 @@ pub fn afficher(ui: &mut Ui, ct: &Contexte<'_>, b: &mut FilmEdite, sortie: &mut 
             sel,
             |row, k| {
                 let x = &mut bandes[k];
-                // Le téléchargement n'est pas pris en charge par les services.
-                cellule_glyphe(
+                if cellule_glyphe(
                     row,
                     Glyphe::Telecharger,
-                    ICONE_REPOS,
-                    false,
+                    BLEU_ETAT,
+                    adresse_web_valide(&x.url),
                     &i.t("editor.trailer.download"),
-                );
+                ) {
+                    sortie.push(Message::TelechargerBandeAnnonce {
+                        film: ct.e.id,
+                        bande: x.clone(),
+                    });
+                }
                 if cellule_glyphe(
                     row,
                     Glyphe::Lire,
                     BLEU_ETAT,
-                    !x.url.trim().is_empty(),
+                    adresse_web_valide(&x.url),
                     &i.t("editor.trailer.play"),
                 ) {
                     sortie.push(Message::Ouvrir(CibleOuverture::Adresse(x.url.clone())));
