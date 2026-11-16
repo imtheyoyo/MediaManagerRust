@@ -494,6 +494,21 @@ pub fn serie(s: &Serie, r: &Reglages) -> SerieAffichage {
     }
 }
 
+/// Identifiant de l'épisode de rang `rang` dans la saison `saison` de l'arbre affiché (mêmes
+/// épisodes et même ordre que [`serie`]).
+pub fn identifiant_episode(s: &Serie, r: &Reglages, saison: i32, rang: usize) -> Option<String> {
+    let mut episodes: Vec<Episode> = mediamanager_app::series::episodes_affiches(s, r)
+        .into_iter()
+        .filter(|e| e.saison(&s.groupe_actif) == saison)
+        .collect();
+    episodes.sort_by(|a, b| {
+        a.episode(&s.groupe_actif)
+            .cmp(&b.episode(&s.groupe_actif))
+            .then(a.titre.cmp(&b.titre))
+    });
+    episodes.into_iter().nth(rang).map(|e| e.id)
+}
+
 /// Reporte les champs éditables d'une série affichée dans la série du modèle. Une note
 /// inchangée n'est pas recopiée comme note de l'utilisateur.
 pub fn appliquer_edition_serie(g: &SerieAffichage, s: &mut Serie) {

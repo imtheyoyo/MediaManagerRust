@@ -10,10 +10,13 @@ pub mod dialogue_assistant;
 pub mod dialogue_confirmation;
 pub mod dialogue_editeur;
 pub mod dialogue_editeur_serie;
+pub mod dialogue_edition_lot;
+pub mod dialogue_export;
 pub mod dialogue_filtres;
 pub mod dialogue_manquants;
 pub mod dialogue_messages;
 pub mod dialogue_mise_a_jour;
+pub mod dialogue_nettoyage;
 pub mod dialogue_recherche;
 pub mod dialogue_reglages;
 pub mod dialogue_renommage;
@@ -112,6 +115,81 @@ pub fn separateur_vertical(ui: &mut eframe::egui::Ui, hauteur: f32) {
         ],
         ui.visuals().widgets.noninteractive.bg_stroke,
     );
+}
+
+/// Outils des tests de rendu hors écran des dialogues modaux.
+#[cfg(test)]
+pub(crate) mod essais {
+    use super::Sortie;
+    use crate::etat::Etat;
+    use eframe::egui::{self, Pos2, RawInput, Rect, Vec2, epaint::Shape};
+
+    /// Écrans essayés : grand, moyen, petit.
+    pub const ECRANS: [Vec2; 3] = [
+        Vec2::new(1914.0, 1026.0),
+        Vec2::new(1280.0, 800.0),
+        Vec2::new(1050.0, 700.0),
+    ];
+
+    /// Rend `images` images du dialogue `id` ; renvoie les textes dessinés à la dernière image
+    /// et le rectangle de la fenêtre.
+    pub fn rendre(
+        etat: &Etat,
+        id: &'static str,
+        ecran: Vec2,
+        images: usize,
+        mut dessiner: impl FnMut(&egui::Context, &mut Sortie),
+    ) -> (Vec<String>, Rect) {
+        let ctx = egui::Context::default();
+        ctx.set_visuals(crate::theme::visuals(etat.reglages.theme));
+        let mut textes = Vec::new();
+        let mut sortie = Vec::new();
+        for _ in 0..images {
+            let entree = RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, ecran)),
+                ..Default::default()
+            };
+            let mut out = ctx.run_ui(entree, |ui| dessiner(ui.ctx(), &mut sortie));
+            out.textures_delta.clear();
+            textes = out
+                .shapes
+                .iter()
+                .filter_map(|c| match &c.shape {
+                    Shape::Text(t) => Some(t.galley.text().to_string()),
+                    _ => None,
+                })
+                .collect();
+        }
+        let rect = ctx
+            .memory(|m| m.area_rect(egui::Id::unique(id)))
+            .expect("fenêtre affichée");
+        (textes, rect)
+    }
+
+    /// Vérifie, à chaque taille d'écran : les textes `attendus` sont dessinés, la fenêtre est
+    /// la même à l'image 4 et à l'image 20 et tient dans l'écran.
+    pub fn verifier_stable(
+        etat: &Etat,
+        id: &'static str,
+        attendus: &[String],
+        mut dessiner: impl FnMut(&egui::Context, &mut Sortie),
+    ) {
+        for ecran in ECRANS {
+            let (textes, r4) = rendre(etat, id, ecran, 4, &mut dessiner);
+            let (_, r20) = rendre(etat, id, ecran, 20, &mut dessiner);
+            for a in attendus {
+                assert!(
+                    textes.iter().any(|t| t.contains(a.as_str())),
+                    "{id} : texte « {a} » absent à {ecran:?} ({textes:?})"
+                );
+            }
+            assert_eq!(r4.size(), r20.size(), "{id} grandit à {ecran:?}");
+            assert!(
+                r20.width() <= ecran.x && r20.height() <= ecran.y,
+                "{id} : {r20:?} plus grande que l'écran {ecran:?}"
+            );
+        }
+    }
 }
 
 #[cfg(test)]

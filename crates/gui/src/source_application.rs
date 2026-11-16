@@ -8,21 +8,25 @@
 //! - Tâches : chaque tâche lancée est suivie (principale ou non, bilan à afficher à la fin).
 
 use crate::conversion::{self, ContexteConversion};
+use crate::etat::NoeudSerie;
 use crate::etat::{Message, Niveau};
 use crate::modele::Film;
 use crate::renommage::ApercuFilm;
 use crate::source_donnees::{
-    DiagnosticOutils, ElementManquant, GenreImage, OutilAffiche, ReglagesServices,
-    RequeteRecherche, RequeteRechercheSerie, ResultatRecherche, Retour, SECRET_CLE_TMDB,
-    SagaAffichage, SerieAffichage, SourceDonnees, Travail,
+    CibleExport, DiagnosticOutils, ElementManquant, FichierInutileAffiche, GenreImage,
+    ModeleExportAffiche, ModifsLot, OutilAffiche, RaisonNettoyage, RapportExportAffiche,
+    ReglagesServices, RequeteRecherche, RequeteRechercheSerie, ResultatRecherche, Retour,
+    SECRET_CLE_TMDB, SagaAffichage, SerieAffichage, SourceDonnees, Travail,
 };
 use crate::taches::{IssueTache, compteur};
 use mediamanager_app::{
-    Application as Services, ConfigMetadonnees, ConfigSerie, Evenement, IdTache,
-    IssueTache as IssueServices, NiveauMessage, PoigneeTache, RapportMiseAJour, RapportRenommage,
-    RapportRetrait, RapportScrap, RequeteFilm, RequeteSerie,
+    Application as Services, CibleVu, ConfigMetadonnees, ConfigSerie, Evenement, FichierInutile,
+    IdTache, IssueTache as IssueServices, ModeleExport, ModificationsLot, ModificationsLotSeries,
+    NiveauMessage, OptionsExport, PoigneeTache, RaisonInutile, RapportEvaluations, RapportExport,
+    RapportLot, RapportMiseAJour, RapportNettoyage, RapportRenommage, RapportRetrait, RapportScrap,
+    RequeteFilm, RequeteSerie, TypeExport,
 };
-use mediamanager_core::modele::Film as FilmModele;
+use mediamanager_core::modele::{Edition, Film as FilmModele, SourceMedia};
 use mediamanager_scrapers::ResultatRecherche as ResultatScraper;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::PathBuf;
@@ -32,7 +36,7 @@ use std::sync::{Arc, Mutex, MutexGuard, RwLock, RwLockReadGuard, Weak};
 const ARRETEE: &str = "l'application est arrêtée";
 
 /// Bilan d'une tâche terminée (lu sur la poignée), à présenter à l'utilisateur.
-type Bilan = Box<dyn FnOnce() -> Option<(Niveau, String)> + Send>;
+type Bilan = Box<dyn FnOnce() -> Vec<Message> + Send>;
 
 struct Suivi {
     principale: bool,
@@ -154,8 +158,8 @@ fn bilan_renommage(r: RapportRenommage) -> Option<(Niveau, String)> {
     Some((n, t))
 }
 
-fn bilan_retrait(r: RapportRetrait, avec_fichiers: bool) -> Option<(Niveau, String)> {
-    let mut t = format!("{} film(s) retiré(s) de la base", r.retires.len());
+fn bilan_retrait(r: RapportRetrait, avec_fichiers: bool, quoi: &str) -> Option<(Niveau, String)> {
+    let mut t = format!("{} {quoi} retiré(s) de la base", r.retires.len());
     if avec_fichiers {
         t.push_str(&format!(
             ", {} élément(s) déplacé(s) dans la corbeille de la source",
@@ -164,7 +168,7 @@ fn bilan_retrait(r: RapportRetrait, avec_fichiers: bool) -> Option<(Niveau, Stri
     }
     if !r.verrouilles.is_empty() {
         t.push_str(&format!(
-            "\n{} film(s) verrouillé(s) ignoré(s)",
+            "\n{} {quoi} verrouillé(s) ignoré(s)",
             r.verrouilles.len()
         ));
     }
@@ -177,6 +181,189 @@ fn bilan_retrait(r: RapportRetrait, avec_fichiers: bool) -> Option<(Niveau, Stri
         Niveau::Erreur
     };
     Some((n, t))
+}
+
+/// Taille lisible (o, Ko ou Mo), pour les bilans.
+fn taille_lisible(octets: u64) -> String {
+    if octets >= 1_000_000 {
+        format!("{:.1} Mo", octets as f64 / 1e6)
+    } else if octets >= 1_000 {
+        format!("{} Ko", octets / 1_000)
+    } else {
+        format!("{octets} o")
+    }
+}
+
+fn bilan_nettoyage(r: RapportNettoyage) -> Option<(Niveau, String)> {
+    let mut t = format!(
+        "Nettoyage : {} élément(s) déplacé(s) dans la corbeille de la source ({})",
+        r.mis_a_la_corbeille.len(),
+        taille_lisible(r.octets)
+    );
+    for (chemin, raison) in &r.ignores {
+        t.push_str(&format!("\nignoré : {} ({raison})", chemin.display()));
+    }
+    for (chemin, e) in &r.echecs {
+        t.push_str(&format!("\n{} : {e}", chemin.display()));
+    }
+    let n = if r.echecs.is_empty() && r.ignores.is_empty() {
+        Niveau::Info
+    } else {
+        Niveau::Avertissement
+    };
+    Some((n, t))
+}
+
+fn bilan_evaluations(r: RapportEvaluations) -> Option<(Niveau, String)> {
+    let mut t = format!(
+        "Évaluations : {} mise(s) à jour, {} inchangée(s)",
+        r.mis_a_jour.len(),
+        r.inchanges.len()
+    );
+    if !r.sans_identifiant.is_empty() {
+        t.push_str(&format!(
+            "\n{} film(s) sans identifiant TMDB",
+            r.sans_identifiant.len()
+        ));
+    }
+    if !r.verrouilles.is_empty() {
+        t.push_str(&format!(
+            "\n{} film(s) verrouillé(s) ignoré(s)",
+            r.verrouilles.len()
+        ));
+    }
+    for (_, e) in &r.erreurs {
+        t.push_str(&format!("\n{e}"));
+    }
+    let n = if r.erreurs.is_empty() {
+        Niveau::Info
+    } else {
+        Niveau::Avertissement
+    };
+    Some((n, t))
+}
+
+fn bilan_lot(r: RapportLot, quoi: &str) -> Option<(Niveau, String)> {
+    let mut t = format!(
+        "Édition globale : {} {quoi} modifié(s), {} déjà conforme(s)",
+        r.modifies.len(),
+        r.inchanges.len()
+    );
+    if !r.verrouilles.is_empty() {
+        t.push_str(&format!(
+            "\n{} {quoi} verrouillé(s) ignoré(s)",
+            r.verrouilles.len()
+        ));
+    }
+    for (_, e) in &r.erreurs {
+        t.push_str(&format!("\n{e}"));
+    }
+    let n = if r.erreurs.is_empty() {
+        Niveau::Info
+    } else {
+        Niveau::Avertissement
+    };
+    Some((n, t))
+}
+
+fn rapport_export(r: RapportExport) -> RapportExportAffiche {
+    RapportExportAffiche {
+        fichier_liste: r.fichier_liste,
+        exportes: r.exportes,
+        vignettes: r.vignettes.len(),
+        avertissements: r.avertissements,
+    }
+}
+
+fn raison_affichee(r: RaisonInutile) -> RaisonNettoyage {
+    match r {
+        RaisonInutile::Motif(m) => RaisonNettoyage::Motif(m),
+        RaisonInutile::Parasite => RaisonNettoyage::Parasite,
+        RaisonInutile::Extrait => RaisonNettoyage::Extrait,
+        RaisonInutile::NfoOrphelin => RaisonNettoyage::NfoOrphelin,
+    }
+}
+
+fn raison_services(r: &RaisonNettoyage) -> RaisonInutile {
+    match r {
+        RaisonNettoyage::Motif(m) => RaisonInutile::Motif(m.clone()),
+        RaisonNettoyage::Parasite => RaisonInutile::Parasite,
+        RaisonNettoyage::Extrait => RaisonInutile::Extrait,
+        RaisonNettoyage::NfoOrphelin => RaisonInutile::NfoOrphelin,
+    }
+}
+
+/// Source média désignée par son code (voir `SOURCES_MEDIA`).
+fn source_media(code: &str) -> Option<SourceMedia> {
+    Some(match code {
+        "UHD_BLURAY" => SourceMedia::UhdBluray,
+        "BLURAY" => SourceMedia::Bluray,
+        "DVD" => SourceMedia::Dvd,
+        "HDDVD" => SourceMedia::HdDvd,
+        "TV" => SourceMedia::Tv,
+        "VHS" => SourceMedia::Vhs,
+        "LASERDISC" => SourceMedia::Laserdisc,
+        "D_VHS" => SourceMedia::DVhs,
+        "HDRIP" => SourceMedia::HdRip,
+        "CAM" => SourceMedia::Cam,
+        "TS" => SourceMedia::Ts,
+        "TC" => SourceMedia::Tc,
+        "DVDSCR" => SourceMedia::DvdScr,
+        "R5" => SourceMedia::R5,
+        "WEBRIP" => SourceMedia::WebRip,
+        "WEB_DL" => SourceMedia::WebDl,
+        "STREAM" => SourceMedia::Stream,
+        _ => return None,
+    })
+}
+
+/// Modifications des services pour un lot de films.
+fn lot_films(m: &ModifsLot) -> ModificationsLot {
+    ModificationsLot {
+        genres_ajouter: m.genres_ajouter.clone(),
+        genres_retirer: m.genres_retirer.clone(),
+        tags_ajouter: m.tags_ajouter.clone(),
+        tags_retirer: m.tags_retirer.clone(),
+        certification: m.certification.clone(),
+        societe_production: m.studio.clone(),
+        pays: m.pays.clone(),
+        vu: m.vu,
+        edition: m
+            .edition
+            .as_deref()
+            .map(Edition::depuis_chaine)
+            .filter(|e| *e != Edition::Aucune),
+        source_media: m.source_media.as_deref().and_then(source_media),
+        langues_parlees: m.langue.clone(),
+        note_utilisateur: m.note.clone(),
+        ..ModificationsLot::default()
+    }
+}
+
+/// Modifications des services pour un lot de séries.
+fn lot_series(m: &ModifsLot) -> ModificationsLotSeries {
+    ModificationsLotSeries {
+        genres_ajouter: m.genres_ajouter.clone(),
+        genres_retirer: m.genres_retirer.clone(),
+        tags_ajouter: m.tags_ajouter.clone(),
+        tags_retirer: m.tags_retirer.clone(),
+        certification: m.certification.clone(),
+        societe_production: m.studio.clone(),
+        pays: m.pays.clone(),
+        note_utilisateur: m.note.clone(),
+    }
+}
+
+/// Modèle d'export des services désigné par son identifiant.
+fn modele_par_id(
+    app: &Services,
+    type_export: TypeExport,
+    id: &str,
+) -> Result<ModeleExport, String> {
+    app.modeles_export(type_export)
+        .into_iter()
+        .find(|m| m.id == id)
+        .ok_or_else(|| format!("modèle d'export {id} introuvable"))
 }
 
 impl Interne {
@@ -227,10 +414,28 @@ impl Interne {
         principale: bool,
         bilan: impl FnOnce(T) -> Option<(Niveau, String)> + Send + 'static,
     ) {
+        Self::suivre_messages(suivis, poignee, principale, move |r| match r {
+            Ok(v) => bilan(v)
+                .map(|(n, t)| Message::Notifier(n, t))
+                .into_iter()
+                .collect(),
+            Err(_) => Vec::new(),
+        });
+    }
+
+    /// Comme [`suivre`](Self::suivre), mais le bilan est une suite de messages et reçoit aussi
+    /// l'échec de la tâche (message d'erreur).
+    fn suivre_messages<T: Send + 'static>(
+        suivis: &mut HashMap<IdTache, Suivi>,
+        poignee: PoigneeTache<T>,
+        principale: bool,
+        bilan: impl FnOnce(Result<T, String>) -> Vec<Message> + Send + 'static,
+    ) {
         let id = poignee.id;
         let bilan: Bilan = Box::new(move || match poignee.essayer_resultat() {
-            Some(Ok(v)) => bilan(v),
-            _ => None,
+            Some(Ok(v)) => bilan(Ok(v)),
+            Some(Err(e)) => bilan(Err(e.to_string())),
+            None => Vec::new(),
         });
         suivis.insert(
             id,
@@ -298,8 +503,8 @@ impl Interne {
                     IssueServices::Echouee(e) => IssueTache::Echouee(e),
                 };
                 let mut v = vec![Message::TacheTerminee { id: tache, issue }];
-                if let Some((n, texte)) = suivi.and_then(|s| s.bilan).and_then(|b| b()) {
-                    v.push(Message::Notifier(n, texte));
+                if let Some(bilan) = suivi.and_then(|s| s.bilan) {
+                    v.extend(bilan());
                 }
                 v
             }
@@ -487,7 +692,7 @@ impl SourceDonnees for SourceApplication {
             let mut suivis = verrou(&i.suivis);
             let p = app.retirer_films(modele, deplacer_fichiers);
             Interne::suivre(&mut suivis, p, true, move |r| {
-                bilan_retrait(r, deplacer_fichiers)
+                bilan_retrait(r, deplacer_fichiers, "film(s)")
             });
             Ok(())
         })?;
@@ -642,6 +847,113 @@ impl SourceDonnees for SourceApplication {
         })
     }
 
+    fn modeles_export(&self, series: bool) -> Vec<ModeleExportAffiche> {
+        let type_export = if series {
+            TypeExport::Series
+        } else {
+            TypeExport::Films
+        };
+        self.avec_app(|app| {
+            Ok(app
+                .modeles_export(type_export)
+                .into_iter()
+                .map(|m| ModeleExportAffiche {
+                    id: m.id,
+                    nom: m.nom,
+                    description: m.description,
+                    nom_fichier: m.nom_fichier,
+                    extension: m.extension,
+                })
+                .collect())
+        })
+        .unwrap_or_default()
+    }
+
+    fn analyser_nettoyage(&self, ids: &[u64]) -> Result<Vec<FichierInutileAffiche>, String> {
+        let i = &self.interne;
+        let modele = i.ids_modele(ids);
+        self.avec_app(|app| {
+            let liste = app.analyser_nettoyage(&modele).map_err(|e| e.to_string())?;
+            let mut titres: HashMap<String, String> = HashMap::new();
+            let mut sortie = Vec::with_capacity(liste.len());
+            for f in liste {
+                let titre = match titres.get(&f.id_film) {
+                    Some(t) => t.clone(),
+                    None => {
+                        let t = app
+                            .film(&f.id_film)
+                            .ok()
+                            .flatten()
+                            .map(|film| film.titre)
+                            .unwrap_or_default();
+                        titres.insert(f.id_film.clone(), t.clone());
+                        t
+                    }
+                };
+                sortie.push(FichierInutileAffiche {
+                    id_film: i.id_affichage(&f.id_film),
+                    titre_film: titre,
+                    chemin: f.chemin.display().to_string(),
+                    est_dossier: f.est_dossier,
+                    raison: raison_affichee(f.raison),
+                    taille: f.taille,
+                });
+            }
+            Ok(sortie)
+        })
+    }
+
+    fn basculer_vu_series(&self, cibles: &[NoeudSerie]) -> Result<(), String> {
+        self.avec_app(|app| {
+            let reglages = app.reglages();
+            let mut visees = Vec::new();
+            for c in cibles {
+                visees.push(match c {
+                    NoeudSerie::Serie(id) => CibleVu::Serie(id.clone()),
+                    NoeudSerie::Saison(id, n) => CibleVu::Saison {
+                        id_serie: id.clone(),
+                        saison: *n,
+                    },
+                    NoeudSerie::Episode(id, saison, rang) => {
+                        let Some(serie) = app.serie(id).map_err(|e| e.to_string())? else {
+                            return Err(format!("série {id} introuvable"));
+                        };
+                        let Some(episode) =
+                            conversion::identifiant_episode(&serie, &reglages, *saison, *rang)
+                        else {
+                            continue;
+                        };
+                        CibleVu::Episodes {
+                            id_serie: id.clone(),
+                            ids_episodes: vec![episode],
+                        }
+                    }
+                });
+            }
+            app.basculer_vu_series(&visees, None)
+                .map(|_| ())
+                .map_err(|e| e.to_string())
+        })
+    }
+
+    fn retirer_series(
+        &self,
+        ids: &[String],
+        deplacer_fichiers: bool,
+    ) -> Result<Vec<String>, String> {
+        let i = &self.interne;
+        self.avec_app(|app| {
+            let mut suivis = verrou(&i.suivis);
+            let p = app.retirer_series(ids.to_vec(), deplacer_fichiers);
+            Interne::suivre(&mut suivis, p, true, move |r| {
+                bilan_retrait(r, deplacer_fichiers, "série(s)")
+            });
+            Ok(())
+        })?;
+        // Retrait en tâche : la liste est rechargée par l'événement de séries.
+        Ok(Vec::new())
+    }
+
     fn lancer(&self, travail: Travail, _retour: &Retour) -> Result<(), String> {
         let i = &self.interne;
         self.avec_app(|app| {
@@ -759,6 +1071,56 @@ impl SourceDonnees for SourceApplication {
                     let p = app.renommer_series(ids);
                     Interne::suivre(&mut suivis, p, true, bilan_renommage);
                 }
+                Travail::Exporter {
+                    cible,
+                    modele,
+                    dossier,
+                    vignettes,
+                    titre,
+                } => {
+                    let options = OptionsExport { vignettes, titre };
+                    let p = match cible {
+                        CibleExport::Films(ids) => {
+                            let m = modele_par_id(app, TypeExport::Films, &modele)?;
+                            app.exporter_films(ids.map(|v| i.ids_modele(&v)), &m, &dossier, options)
+                        }
+                        CibleExport::Series(ids) => {
+                            let m = modele_par_id(app, TypeExport::Series, &modele)?;
+                            app.exporter_series(ids, &m, &dossier, options)
+                        }
+                    };
+                    Interne::suivre_messages(&mut suivis, p, true, |r| {
+                        vec![Message::ExportTermine(r.map(rapport_export))]
+                    });
+                }
+                Travail::Nettoyer { liste } => {
+                    let liste: Vec<FichierInutile> = liste
+                        .iter()
+                        .filter_map(|f| {
+                            Some(FichierInutile {
+                                id_film: i.id_modele(f.id_film)?,
+                                chemin: PathBuf::from(&f.chemin),
+                                est_dossier: f.est_dossier,
+                                raison: raison_services(&f.raison),
+                                taille: f.taille,
+                            })
+                        })
+                        .collect();
+                    let p = app.executer_nettoyage(liste);
+                    Interne::suivre(&mut suivis, p, true, bilan_nettoyage);
+                }
+                Travail::RecupererEvaluations { ids } => {
+                    let p = app.recuperer_evaluations(i.ids_modele(&ids));
+                    Interne::suivre(&mut suivis, p, true, bilan_evaluations);
+                }
+                Travail::EditionLotFilms { ids, modifs } => {
+                    let p = app.modifier_en_lot_films(i.ids_modele(&ids), lot_films(&modifs));
+                    Interne::suivre(&mut suivis, p, true, |r| bilan_lot(r, "film(s)"));
+                }
+                Travail::EditionLotSeries { ids, modifs } => {
+                    let p = app.modifier_en_lot_series(ids, lot_series(&modifs));
+                    Interne::suivre(&mut suivis, p, true, |r| bilan_lot(r, "série(s)"));
+                }
             }
             Ok(())
         })
@@ -806,6 +1168,7 @@ pub(crate) mod tests {
     use super::*;
     use crate::etat::Etat;
     use mediamanager_app::{ConfigServices, OptionsDemarrage, OptionsJournal};
+    use mediamanager_core::modele::{Edition, SourceMedia};
     use mediamanager_store::{CoffreMemoire, DossiersApplication, ModeDossiers};
     use std::path::Path;
     use std::time::{Duration, Instant};
@@ -861,7 +1224,13 @@ pub(crate) mod tests {
             e.drainer();
             std::thread::sleep(Duration::from_millis(10));
         }
-        assert!(fini(e), "délai dépassé");
+        assert!(
+            fini(e),
+            "délai dépassé : {:?} / {:?} / {:?}",
+            e.notifications,
+            e.taches,
+            e.dialogue
+        );
     }
 
     #[test]
@@ -1023,6 +1392,188 @@ pub(crate) mod tests {
         // Le retrait est une tâche de fond : l'appel lui-même aboutit.
         assert!(source.retirer_films(&[f.id], false).unwrap().is_empty());
         attendre(&mut e, |e| e.taches.is_empty());
+        source.arreter().unwrap();
+    }
+
+    #[test]
+    fn export_nettoyage_edition_globale_et_evaluations_avec_la_source_reelle() {
+        use crate::commandes::Commande;
+        use crate::dialogues::{
+            ActionEditionLot, ActionExport, ActionNettoyage, BrouillonLot, PhaseExport,
+            PhaseNettoyage,
+        };
+        use crate::etat::{ActionDialogue, Dialogue};
+        let d = tempfile::tempdir().unwrap();
+        let source = source_reelle(d.path());
+        let mut e = Etat::avec_source(source.clone());
+        e.appliquer(Message::Commande(Commande::MettreAJourToutesSources));
+        attendre(&mut e, |e| e.films.len() == 2 && e.taches.is_empty());
+        let alien = e.films.iter().find(|f| f.titre == "Alien").unwrap().clone();
+        e.appliquer(Message::Selectionner {
+            id: alien.id,
+            ctrl: false,
+            maj: false,
+        });
+
+        // Export de la sélection avec un modèle intégré.
+        e.appliquer(Message::Commande(Commande::Exporter));
+        let sortie = d.path().join("export");
+        for a in [
+            ActionExport::Dossier(sortie.display().to_string()),
+            ActionExport::Lancer,
+        ] {
+            e.appliquer(Message::Dialogue(ActionDialogue::Export(a)));
+        }
+        attendre(
+            &mut e,
+            |e| matches!(&e.dialogue, Some(Dialogue::Export(x)) if matches!(x.phase, PhaseExport::Termine(_) | PhaseExport::Echec(_))),
+        );
+        let Some(Dialogue::Export(x)) = &e.dialogue else {
+            panic!()
+        };
+        let PhaseExport::Termine(r) = &x.phase else {
+            panic!("export échoué : {:?}", x.phase)
+        };
+        assert_eq!(r.exportes, 1);
+        assert!(r.fichier_liste.is_file(), "{:?}", r.fichier_liste);
+        e.appliquer(Message::FermerDialogue);
+
+        // Nettoyage : un fichier parasite est proposé puis déplacé dans la corbeille.
+        let dossier = d.path().join("films/Alien (1979)");
+        std::fs::write(dossier.join("Thumbs.db"), b"xxxx").unwrap();
+        e.appliquer(Message::Commande(Commande::Nettoyer));
+        attendre(
+            &mut e,
+            |e| matches!(&e.dialogue, Some(Dialogue::Nettoyage(n)) if n.phase != PhaseNettoyage::Analyse),
+        );
+        let Some(Dialogue::Nettoyage(n)) = &e.dialogue else {
+            panic!()
+        };
+        assert_eq!(n.phase, PhaseNettoyage::Liste, "{:?}", n.phase);
+        let ligne = n
+            .lignes
+            .iter()
+            .find(|l| l.fichier.chemin.ends_with("Thumbs.db"))
+            .unwrap_or_else(|| panic!("Thumbs.db non proposé : {:?}", n.lignes));
+        assert_eq!(ligne.fichier.id_film, alien.id);
+        assert_eq!(ligne.fichier.titre_film, "Alien");
+        assert_eq!(ligne.fichier.raison, RaisonNettoyage::Parasite);
+        assert_eq!(ligne.fichier.taille, 4);
+        for a in [
+            ActionNettoyage::Executer,
+            ActionNettoyage::ConfirmerExecution,
+        ] {
+            e.appliquer(Message::Dialogue(ActionDialogue::Nettoyage(a)));
+        }
+        attendre(&mut e, |e| {
+            e.taches.is_empty()
+                && e.notifications
+                    .iter()
+                    .any(|n| n.texte.starts_with("Nettoyage :"))
+        });
+        assert!(!dossier.join("Thumbs.db").exists());
+        assert!(d.path().join("films/.corbeille").exists());
+
+        // Édition globale : genre ajouté, répercuté dans la liste.
+        e.appliquer(Message::Commande(Commande::EditionGlobale));
+        e.appliquer(Message::Dialogue(ActionDialogue::EditionLot(
+            ActionEditionLot::Brouillon(Box::new(BrouillonLot {
+                genres_ajouter: "Culte".into(),
+                edition: Some("Director's Cut".into()),
+                source_media: Some("BLURAY".into()),
+                ..BrouillonLot::default()
+            })),
+        )));
+        e.appliquer(Message::Dialogue(ActionDialogue::EditionLot(
+            ActionEditionLot::Appliquer,
+        )));
+        attendre(&mut e, |e| {
+            e.taches.is_empty()
+                && e.film(alien.id)
+                    .unwrap()
+                    .genres
+                    .iter()
+                    .any(|g| g == "Culte")
+        });
+        let id = source.id_modele(alien.id).unwrap();
+        let relu = source
+            .avec_app(|app| Ok(app.film(&id).unwrap().unwrap()))
+            .unwrap();
+        assert_eq!(relu.edition, Edition::DirectorsCut);
+        assert_eq!(relu.source_media, SourceMedia::Bluray);
+
+        // Évaluations : sans clé d'API, la tâche échoue et le message d'erreur est notifié.
+        e.appliquer(Message::Commande(Commande::RecupererEvaluations));
+        attendre(&mut e, |e| {
+            e.taches.is_empty()
+                && e.notifications
+                    .iter()
+                    .any(|n| n.texte.contains("Récupération des évaluations"))
+        });
+        source.arreter().unwrap();
+    }
+
+    #[test]
+    fn vu_et_retrait_des_series_avec_la_source_reelle() {
+        use crate::commandes::Commande;
+        use crate::etat::{Module, NoeudSerie};
+        let d = tempfile::tempdir().unwrap();
+        let source = source_reelle(d.path());
+        let series = d.path().join("series");
+        for n in 1..=2 {
+            let dossier = series.join("Ma Série (2020)/Saison 1");
+            std::fs::create_dir_all(&dossier).unwrap();
+            std::fs::write(dossier.join(format!("Ma.Serie.S01E0{n}.mkv")), b"").unwrap();
+        }
+        source
+            .avec_app(|app| {
+                app.modifier_reglages(|r| r.series.sources = vec![series.clone()])
+                    .map_err(|e| e.to_string())
+            })
+            .unwrap();
+        let mut e = Etat::avec_source(source.clone());
+        e.appliquer(Message::ChoisirModule(Module::Series));
+        e.appliquer(Message::MettreAJourSeries);
+        attendre(&mut e, |e| !e.series.is_empty() && e.taches.is_empty());
+        let id = e.series[0].id.clone();
+        let vus = |e: &Etat| -> Vec<bool> {
+            e.series[0].saisons[0]
+                .episodes
+                .iter()
+                .map(|x| x.vu)
+                .collect()
+        };
+        assert_eq!(vus(&e), [false, false]);
+
+        // Épisode (rang 1) puis saison : bascule vu / non vu.
+        e.appliquer(Message::SelectionnerNoeudSerie(NoeudSerie::Episode(
+            id.clone(),
+            1,
+            1,
+        )));
+        e.appliquer(Message::Commande(Commande::BasculerVu));
+        assert_eq!(vus(&e), [false, true]);
+        e.appliquer(Message::SelectionnerNoeudSerie(NoeudSerie::Saison(
+            id.clone(),
+            1,
+        )));
+        e.appliquer(Message::Commande(Commande::BasculerVu));
+        assert_eq!(vus(&e), [true, true]);
+        e.appliquer(Message::Commande(Commande::BasculerVu));
+        assert_eq!(vus(&e), [false, false]);
+
+        // Retrait avec les fichiers : tâche de fond, bilan et liste rechargée.
+        e.appliquer(Message::SelectionnerNoeudSerie(NoeudSerie::Serie(id)));
+        e.appliquer(Message::Commande(Commande::SupprimerFichiers));
+        e.appliquer(Message::Confirmer);
+        attendre(&mut e, |e| e.series.is_empty() && e.taches.is_empty());
+        assert!(
+            e.notifications
+                .iter()
+                .any(|n| n.texte.contains("série(s) retiré(s) de la base")),
+            "{:?}",
+            e.notifications
+        );
         source.arreter().unwrap();
     }
 

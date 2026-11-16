@@ -373,6 +373,15 @@ impl Application {
             Some(Dialogue::MiseAJour(d)) => {
                 vue::dialogue_mise_a_jour::afficher(&ctx, &self.etat, d, &mut sortie)
             }
+            Some(Dialogue::Export(d)) => {
+                vue::dialogue_export::afficher(&ctx, &self.etat, d, &mut sortie)
+            }
+            Some(Dialogue::Nettoyage(d)) => {
+                vue::dialogue_nettoyage::afficher(&ctx, &self.etat, d, &mut sortie)
+            }
+            Some(Dialogue::EditionLot(d)) => {
+                vue::dialogue_edition_lot::afficher(&ctx, &self.etat, d, &mut sortie)
+            }
             None => {}
         }
 

@@ -14,6 +14,8 @@ pub enum CibleDossier {
     SourceSeries,
     /// Source de films de l'assistant de premier lancement.
     Assistant,
+    /// Dossier de sortie du dialogue d'export.
+    Export,
 }
 
 /// Destination du fichier choisi.

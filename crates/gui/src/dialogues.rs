@@ -5,8 +5,9 @@ use crate::i18n::Langue;
 use crate::modele::Film;
 use crate::reglages::Theme;
 use crate::source_donnees::{
-    ElementManquant, GroupeManquants, RequeteRecherche, ResultatRecherche, SerieAffichage,
-    StatutSerie,
+    EDITIONS, ElementManquant, FichierInutileAffiche, GroupeManquants, ModeleExportAffiche,
+    ModifsLot, RapportExportAffiche, RequeteRecherche, ResultatRecherche, SOURCES_MEDIA,
+    SerieAffichage, StatutSerie,
 };
 use std::fmt;
 
@@ -493,6 +494,271 @@ impl EtatManquants {
     pub fn total(&self) -> usize {
         self.groupes.iter().map(|g| g.elements.len()).sum()
     }
+}
+
+// ------------------------------------------------------------------ export
+
+/// Avancement du dialogue d'export.
+#[derive(Clone, Debug, PartialEq)]
+pub enum PhaseExport {
+    /// Choix du modèle et des options.
+    Saisie,
+    /// Tâche lancée : la progression est lue dans les tâches de l'état.
+    EnCours,
+    Termine(RapportExportAffiche),
+    Echec(String),
+}
+
+/// Dialogue « Exporter » (films ou séries selon le module).
+#[derive(Clone, Debug)]
+pub struct EtatExport {
+    /// Export des séries (sinon des films).
+    pub series: bool,
+    pub modeles: Vec<ModeleExportAffiche>,
+    /// Rang du modèle choisi dans `modeles`.
+    pub modele: usize,
+    /// Dossier de sortie saisi.
+    pub dossier: String,
+    /// Copie des affiches (vignettes) dans `images/`.
+    pub vignettes: bool,
+    /// Largeur des vignettes en pixels (0 = taille d'origine).
+    pub largeur: u32,
+    pub titre: String,
+    /// Exporte la sélection (sinon toute la bibliothèque).
+    pub selection_seule: bool,
+    pub nb_selection: usize,
+    pub nb_total: usize,
+    /// Message de validation (dossier manquant…), clé de traduction.
+    pub erreur: Option<&'static str>,
+    pub phase: PhaseExport,
+}
+
+/// Largeur par défaut des vignettes d'export.
+pub const LARGEUR_VIGNETTES: u32 = 200;
+
+impl EtatExport {
+    pub fn nouveau(
+        series: bool,
+        modeles: Vec<ModeleExportAffiche>,
+        nb_selection: usize,
+        nb_total: usize,
+        dossier: String,
+    ) -> Self {
+        Self {
+            series,
+            modeles,
+            modele: 0,
+            dossier,
+            vignettes: false,
+            largeur: LARGEUR_VIGNETTES,
+            titre: String::new(),
+            selection_seule: nb_selection > 0,
+            nb_selection,
+            nb_total,
+            erreur: None,
+            phase: PhaseExport::Saisie,
+        }
+    }
+
+    pub fn modele_choisi(&self) -> Option<&ModeleExportAffiche> {
+        self.modeles.get(self.modele)
+    }
+
+    /// Nombre d'éléments qui seront exportés.
+    pub fn nb_exportes(&self) -> usize {
+        if self.selection_seule {
+            self.nb_selection
+        } else {
+            self.nb_total
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum ActionExport {
+    Modele(usize),
+    Dossier(String),
+    Vignettes(bool),
+    Largeur(u32),
+    Titre(String),
+    SelectionSeule(bool),
+    Lancer,
+    /// Revient à la saisie après un échec.
+    Recommencer,
+}
+
+// ------------------------------------------------------------------ nettoyage
+
+/// Avancement du dialogue de nettoyage.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PhaseNettoyage {
+    /// Analyse des dossiers en cours.
+    Analyse,
+    Liste,
+    /// Dernière confirmation avant le déplacement dans la corbeille.
+    Confirmation,
+    Echec(String),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LigneNettoyage {
+    pub fichier: FichierInutileAffiche,
+    pub coche: bool,
+}
+
+/// Dialogue « Nettoyer » : fichiers inutiles des films choisis.
+#[derive(Clone, Debug)]
+pub struct EtatNettoyage {
+    /// Identifiant de la requête d'analyse attendue (les réponses périmées sont ignorées).
+    pub id_requete: u64,
+    pub nb_films: usize,
+    pub phase: PhaseNettoyage,
+    pub lignes: Vec<LigneNettoyage>,
+}
+
+impl EtatNettoyage {
+    /// Éléments cochés.
+    pub fn nb_coches(&self) -> usize {
+        self.lignes.iter().filter(|l| l.coche).count()
+    }
+
+    /// Octets libérés par les éléments cochés.
+    pub fn octets_coches(&self) -> u64 {
+        self.lignes
+            .iter()
+            .filter(|l| l.coche)
+            .map(|l| l.fichier.taille)
+            .sum()
+    }
+
+    /// Éléments cochés, prêts à être transmis au nettoyage.
+    pub fn liste_cochee(&self) -> Vec<FichierInutileAffiche> {
+        self.lignes
+            .iter()
+            .filter(|l| l.coche)
+            .map(|l| l.fichier.clone())
+            .collect()
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ActionNettoyage {
+    Cocher(usize, bool),
+    ToutCocher(bool),
+    /// « Déplacer vers la corbeille » : demande la confirmation.
+    Executer,
+    ConfirmerExecution,
+    AnnulerConfirmation,
+}
+
+// ------------------------------------------------------------------ édition globale
+
+/// Saisies de l'édition globale ; un champ vide ou « inchangé » laisse la valeur intacte.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct BrouillonLot {
+    /// Listes séparées par des virgules.
+    pub genres_ajouter: String,
+    pub genres_retirer: String,
+    pub tags_ajouter: String,
+    pub tags_retirer: String,
+    pub certification: String,
+    pub studio: String,
+    pub pays: String,
+    pub langue: String,
+    pub note: String,
+    /// Libellé d'une entrée de [`EDITIONS`].
+    pub edition: Option<String>,
+    /// Code d'une entrée de [`SOURCES_MEDIA`].
+    pub source_media: Option<String>,
+    pub vu: Option<bool>,
+}
+
+/// Valeurs d'une liste saisie (séparées par des virgules ou des points-virgules).
+fn valeurs(texte: &str) -> Vec<String> {
+    texte
+        .split([',', ';'])
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+        .collect()
+}
+
+fn texte_facultatif(texte: &str) -> Option<String> {
+    let t = texte.trim();
+    (!t.is_empty()).then(|| t.to_string())
+}
+
+impl BrouillonLot {
+    /// Modifications correspondantes ; pour des séries, les champs propres aux films sont
+    /// ignorés.
+    pub fn modifications(&self, series: bool) -> ModifsLot {
+        ModifsLot {
+            genres_ajouter: valeurs(&self.genres_ajouter),
+            genres_retirer: valeurs(&self.genres_retirer),
+            tags_ajouter: valeurs(&self.tags_ajouter),
+            tags_retirer: valeurs(&self.tags_retirer),
+            certification: texte_facultatif(&self.certification),
+            studio: texte_facultatif(&self.studio),
+            pays: texte_facultatif(&self.pays),
+            note: texte_facultatif(&self.note),
+            langue: if series {
+                None
+            } else {
+                texte_facultatif(&self.langue)
+            },
+            edition: if series {
+                None
+            } else {
+                self.edition
+                    .clone()
+                    .filter(|e| EDITIONS.contains(&e.as_str()))
+            },
+            source_media: if series {
+                None
+            } else {
+                self.source_media
+                    .clone()
+                    .filter(|c| SOURCES_MEDIA.iter().any(|(code, _)| code == c))
+            },
+            vu: if series { None } else { self.vu },
+        }
+    }
+}
+
+/// Dialogue « Édition globale » : mêmes modifications pour plusieurs films ou une série.
+#[derive(Clone, Debug)]
+pub struct EtatEditionLot {
+    pub series: bool,
+    pub ids_films: Vec<u64>,
+    pub ids_series: Vec<String>,
+    /// Éléments verrouillés, ignorés par l'édition.
+    pub nb_verrouilles: usize,
+    pub brouillon: BrouillonLot,
+}
+
+impl EtatEditionLot {
+    /// Éléments choisis.
+    pub fn nb_elements(&self) -> usize {
+        if self.series {
+            self.ids_series.len()
+        } else {
+            self.ids_films.len()
+        }
+    }
+
+    /// Éléments qui seront réellement modifiés.
+    pub fn nb_modifies(&self) -> usize {
+        self.nb_elements().saturating_sub(self.nb_verrouilles)
+    }
+
+    pub fn modifications(&self) -> ModifsLot {
+        self.brouillon.modifications(self.series)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ActionEditionLot {
+    Brouillon(Box<BrouillonLot>),
+    Appliquer,
 }
 
 // ------------------------------------------------------------------ confirmation

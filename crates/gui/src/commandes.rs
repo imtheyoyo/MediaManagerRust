@@ -59,6 +59,7 @@ pub const MENU_RECHERCHE: &[Entree] = &[
     Cmd(C::ScrapeMetadonnees),
     Cmd(C::ScrapeNonTraites),
     Sep,
+    Cmd(C::RecupererEvaluations),
     Cmd(C::InfosMedia),
 ];
 
@@ -67,7 +68,6 @@ pub const MENU_EDITION: &[Entree] = &[
     Cmd(C::EditionGlobale),
     Cmd(C::BasculerVerrou),
     Cmd(C::BasculerVu),
-    Cmd(C::RecupererEvaluations),
     Cmd(C::ReecrireNfo),
     Sep,
     Cmd(C::Exporter),
@@ -84,6 +84,7 @@ pub const MENU_RENOMMAGE: &[Entree] = &[
 pub const MENU_CONTEXTUEL: &[Entree] = &[
     Cmd(C::ScrapeInteractif),
     Cmd(C::ScrapeMeilleur),
+    Cmd(C::RecupererEvaluations),
     Sep,
     Cmd(C::MettreAJourSelection),
     Cmd(C::Editer),
@@ -92,6 +93,7 @@ pub const MENU_CONTEXTUEL: &[Entree] = &[
     Sep,
     Cmd(C::Renommer),
     Cmd(C::ApercuRenommage),
+    Cmd(C::Nettoyer),
     Sep,
     Cmd(C::Exporter),
     Cmd(C::OuvrirDossier),
@@ -142,6 +144,7 @@ impl Commande {
                 | C::CreerHorsLigne
                 | C::AjouterSource
                 | C::ScrapeNonTraites
+                | C::Exporter
         )
     }
 
@@ -217,6 +220,44 @@ mod tests {
         for c in Commande::TOUTES {
             assert!(i.brut(c.cle()).is_some(), "clé manquante : {}", c.cle());
         }
+    }
+
+    #[test]
+    fn menus_sans_doublon_et_avec_les_commandes_branchees() {
+        let cmds = |m: &[Entree]| -> Vec<Commande> {
+            m.iter()
+                .filter_map(|e| match e {
+                    Entree::Cmd(c) => Some(*c),
+                    Entree::Separateur => None,
+                })
+                .collect()
+        };
+        let mut vues = Vec::new();
+        for menu in [
+            MENU_MISE_A_JOUR,
+            MENU_RECHERCHE,
+            MENU_EDITION,
+            MENU_RENOMMAGE,
+        ] {
+            for c in cmds(menu) {
+                assert!(!vues.contains(&c), "commande en double : {c:?}");
+                vues.push(c);
+            }
+        }
+        for c in [
+            C::Exporter,
+            C::Nettoyer,
+            C::RecupererEvaluations,
+            C::EditionGlobale,
+            C::BasculerVu,
+        ] {
+            assert!(vues.contains(&c), "absente des menus : {c:?}");
+            assert!(
+                cmds(MENU_CONTEXTUEL).contains(&c),
+                "absente du menu contextuel : {c:?}"
+            );
+        }
+        assert!(!C::Exporter.requiert_selection());
     }
 
     #[test]

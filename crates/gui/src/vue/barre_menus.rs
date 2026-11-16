@@ -134,6 +134,17 @@ pub fn afficher(ui: &mut egui::Ui, etat: &Etat, sortie: &mut Sortie) {
                     );
                 });
                 ui.menu_button(i.t("Toolbar.tools"), |ui| {
+                    commandes(
+                        ui,
+                        etat,
+                        &[
+                            Commande::Exporter,
+                            Commande::Nettoyer,
+                            Commande::RecupererEvaluations,
+                        ],
+                        sortie,
+                    );
+                    ui.separator();
                     entree(
                         ui,
                         i.t("gui.tools.messages"),

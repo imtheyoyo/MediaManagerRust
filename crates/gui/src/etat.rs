@@ -4,9 +4,11 @@
 use crate::collections::NoeudSaga;
 use crate::commandes::Commande;
 use crate::dialogues::{
-    ActionAssistant, ActionConfirmee, ActionEditeur, ActionEditeurSerie, ActionRecherche,
-    CaseConfirmation, EtatAssistant, EtatConfirmation, EtatEditeur, EtatEditeurSerie,
-    EtatManquants, EtatRecherche, FilmEdite, OngletEditeur, SerieEdite, valider, valider_serie,
+    ActionAssistant, ActionConfirmee, ActionEditeur, ActionEditeurSerie, ActionEditionLot,
+    ActionExport, ActionNettoyage, ActionRecherche, CaseConfirmation, EtatAssistant,
+    EtatConfirmation, EtatEditeur, EtatEditeurSerie, EtatEditionLot, EtatExport, EtatManquants,
+    EtatNettoyage, EtatRecherche, FilmEdite, LigneNettoyage, OngletEditeur, PhaseExport,
+    PhaseNettoyage, SerieEdite, valider, valider_serie,
 };
 use crate::filtres::{ActionFiltre, ContexteFiltre, FiltresAvances, OngletFiltre};
 use crate::i18n::{I18n, Langue};
@@ -18,9 +20,10 @@ use crate::reglages::{Page, Reglages, Theme};
 use crate::renommage::ApercuFilm;
 use crate::selecteur::{self, CibleDossier, CibleFichier, SelecteurDossier, SelecteurFichier};
 use crate::source_donnees::{
-    DiagnosticOutils, GroupeManquants, ReglagesServices, RequeteRecherche, RequeteRechercheSerie,
-    ResultatRecherche, Retour, SECRET_CLE_TMDB, SagaAffichage, SerieAffichage, SourceDonnees,
-    SourceFactice, Travail, titre_nettoye,
+    CibleExport, DiagnosticOutils, FichierInutileAffiche, GroupeManquants, RapportExportAffiche,
+    ReglagesServices, RequeteRecherche, RequeteRechercheSerie, ResultatRecherche, Retour,
+    SECRET_CLE_TMDB, SagaAffichage, SerieAffichage, SourceDonnees, SourceFactice, Travail,
+    titre_nettoye,
 };
 use crate::taches::{IssueTache, Repaint, Tache};
 use regex::Regex;
@@ -184,6 +187,9 @@ pub enum Dialogue {
     Confirmation(EtatConfirmation),
     Assistant(Box<EtatAssistant>),
     MiseAJour(EtatDialogueMiseAJour),
+    Export(Box<EtatExport>),
+    Nettoyage(Box<EtatNettoyage>),
+    EditionLot(Box<EtatEditionLot>),
 }
 
 /// Étape affichée par le dialogue de mise à jour du programme.
@@ -232,6 +238,9 @@ pub enum ActionDialogue {
     ConfirmationCase(bool),
     /// Choisit un élément de la liste des manquants (groupe, rang).
     ManquantsChoisir(usize, usize),
+    Export(ActionExport),
+    Nettoyage(ActionNettoyage),
+    EditionLot(ActionEditionLot),
 }
 
 /// Messages : seul `Etat::appliquer` modifie l'état.
@@ -362,6 +371,13 @@ pub enum Message {
     FilmRetire(u64),
     /// La liste des séries a changé.
     SeriesModifiees,
+    /// Fin d'un export : bilan ou message d'erreur.
+    ExportTermine(Result<RapportExportAffiche, String>),
+    /// Résultat de l'analyse du nettoyage lancée par le dialogue `id_requete`.
+    NettoyageAnalyse {
+        id_requete: u64,
+        resultat: Result<Vec<FichierInutileAffiche>, String>,
+    },
 }
 
 /// Ce dont on cherche les éléments manquants : (identifiant, titre) d'une saga ou d'une série.
@@ -437,6 +453,8 @@ pub struct Etat {
     /// Rafraîchissement réel, remplaçable après la création (voir `definir_repaint`).
     repaint_partage: Arc<Mutex<Repaint>>,
     prochain_id_requete: u64,
+    /// Dernier dossier de sortie d'un export (proposé à l'export suivant).
+    dossier_export: String,
     /// Vue dérivée ou séries à recalculer après un lot de messages.
     a_recalculer: bool,
     series_a_recharger: bool,
@@ -528,6 +546,7 @@ impl Etat {
             rx,
             repaint_partage,
             prochain_id_requete: 1,
+            dossier_export: String::new(),
             a_recalculer: false,
             series_a_recharger: false,
             sagas_a_recharger: false,
@@ -1040,6 +1059,11 @@ impl Etat {
                 self.sagas_a_recharger = true;
             }
             Message::SeriesModifiees => self.series_a_recharger = true,
+            Message::ExportTermine(resultat) => self.export_termine(resultat),
+            Message::NettoyageAnalyse {
+                id_requete,
+                resultat,
+            } => self.nettoyage_analyse(id_requete, resultat),
         }
     }
 
@@ -1275,6 +1299,9 @@ impl Etat {
         if commande == Commande::TrouverManquants {
             return self.trouver_manquants_films();
         }
+        if commande == Commande::Exporter {
+            return self.ouvrir_export();
+        }
         if commande.requiert_selection() && self.selection.is_empty() {
             self.avertir_aucune_selection();
             return;
@@ -1357,6 +1384,12 @@ impl Etat {
             Commande::Renommer | Commande::ApercuRenommage => {
                 self.ouvrir_dialogue(TypeDialogue::ApercuRenommage)
             }
+            Commande::Nettoyer => self.ouvrir_nettoyage(),
+            Commande::RecupererEvaluations => {
+                let ids = self.selection_ordonnee();
+                self.lancer_travail(Travail::RecupererEvaluations { ids });
+            }
+            Commande::EditionGlobale => self.ouvrir_edition_lot(),
             autre => self.notifier_bientot(autre),
         }
     }
@@ -1393,6 +1426,7 @@ impl Etat {
                 self.appliquer_sans_recalcul(Message::OuvrirReglagesPage(Page::SeriesSource));
                 return self.choisir_dossier(CibleDossier::SourceSeries);
             }
+            Commande::Exporter => return self.ouvrir_export(),
             Commande::ScrapeNonTraites => {
                 let ids: Vec<String> = self
                     .series
@@ -1456,6 +1490,16 @@ impl Etat {
                     self.ouvrir(ouverture::cible_dossier(&serie.chemin, None));
                 }
             }
+            Commande::EditionGlobale => self.ouvrir_edition_lot(),
+            Commande::BasculerVu => self.basculer_vu_serie(),
+            Commande::RetirerBase => self.demander_confirmation(ActionConfirmee::RetirerBase),
+            Commande::SupprimerFichiers => {
+                self.demander_confirmation(ActionConfirmee::SupprimerFichiers)
+            }
+            Commande::Nettoyer | Commande::RecupererEvaluations => {
+                let texte = self.i18n.t("gui.moviesonly");
+                self.notifier(Niveau::Info, texte);
+            }
             autre => self.notifier_bientot(autre),
         }
     }
@@ -1498,6 +1542,314 @@ impl Etat {
             total: 1,
         })));
         self.lancer_recherche();
+    }
+
+    // ---- export
+
+    /// Ouvre le dialogue d'export des films ou des séries selon le module.
+    fn ouvrir_export(&mut self) {
+        let series = self.module == Module::Series;
+        let (nb_selection, nb_total) = if series {
+            (
+                usize::from(self.serie_selectionnee().is_some()),
+                self.series.len(),
+            )
+        } else {
+            (self.selection.len(), self.films.len())
+        };
+        let modeles = self.source.modeles_export(series);
+        if modeles.is_empty() {
+            let texte = self.i18n.t("gui.export.nomodel");
+            return self.notifier(Niveau::Avertissement, texte);
+        }
+        self.dialogue = Some(Dialogue::Export(Box::new(EtatExport::nouveau(
+            series,
+            modeles,
+            nb_selection,
+            nb_total,
+            self.dossier_export.clone(),
+        ))));
+    }
+
+    fn action_export(&mut self, action: ActionExport) {
+        let Some(Dialogue::Export(e)) = &mut self.dialogue else {
+            return;
+        };
+        if e.phase == PhaseExport::EnCours {
+            return;
+        }
+        match action {
+            ActionExport::Modele(n) => {
+                if n < e.modeles.len() {
+                    e.modele = n;
+                }
+            }
+            ActionExport::Dossier(d) => {
+                e.dossier = d;
+                e.erreur = None;
+            }
+            ActionExport::Vignettes(v) => e.vignettes = v,
+            ActionExport::Largeur(l) => e.largeur = l.min(4000),
+            ActionExport::Titre(t) => e.titre = t,
+            ActionExport::SelectionSeule(v) => e.selection_seule = v && e.nb_selection > 0,
+            ActionExport::Recommencer => e.phase = PhaseExport::Saisie,
+            ActionExport::Lancer => self.lancer_export(),
+        }
+    }
+
+    fn lancer_export(&mut self) {
+        let Some(Dialogue::Export(e)) = &mut self.dialogue else {
+            return;
+        };
+        let dossier = e.dossier.trim().to_string();
+        if dossier.is_empty() {
+            e.erreur = Some("gui.export.nofolder");
+            return;
+        }
+        let Some(modele) = e.modele_choisi().map(|m| m.id.clone()) else {
+            return;
+        };
+        let (series, selection_seule) = (e.series, e.selection_seule);
+        let vignettes = e.vignettes.then_some(e.largeur);
+        let titre = Some(e.titre.trim().to_string()).filter(|t| !t.is_empty());
+        e.erreur = None;
+        let cible = if series {
+            let ids = self
+                .noeud_serie
+                .as_ref()
+                .map(|n| vec![n.id_serie().to_string()]);
+            CibleExport::Series(ids.filter(|_| selection_seule))
+        } else {
+            CibleExport::Films(selection_seule.then(|| self.selection_ordonnee()))
+        };
+        self.dossier_export = dossier.clone();
+        let travail = Travail::Exporter {
+            cible,
+            modele,
+            dossier: PathBuf::from(dossier),
+            vignettes,
+            titre,
+        };
+        let retour = self.retour.clone();
+        let resultat = self.source.lancer(travail, &retour);
+        let Some(Dialogue::Export(e)) = &mut self.dialogue else {
+            return;
+        };
+        e.phase = match resultat {
+            Ok(()) => PhaseExport::EnCours,
+            Err(m) => PhaseExport::Echec(m),
+        };
+    }
+
+    fn export_termine(&mut self, resultat: Result<RapportExportAffiche, String>) {
+        if let Some(Dialogue::Export(e)) = &mut self.dialogue
+            && e.phase == PhaseExport::EnCours
+        {
+            e.phase = match resultat {
+                Ok(r) => PhaseExport::Termine(r),
+                Err(m) => PhaseExport::Echec(m),
+            };
+            return;
+        }
+        // Dialogue fermé pendant l'export : le bilan revient en notification.
+        match resultat {
+            Ok(r) => {
+                let n = r.exportes.to_string();
+                let f = r.fichier_liste.display().to_string();
+                let texte = self.i18n.t_args(
+                    "gui.export.done",
+                    &[("count", n.as_str()), ("file", f.as_str())],
+                );
+                self.notifier(Niveau::Info, texte);
+            }
+            Err(m) => self.notifier(Niveau::Erreur, m),
+        }
+    }
+
+    // ---- nettoyage
+
+    /// Ouvre le dialogue de nettoyage et lance l'analyse hors du thread de l'interface.
+    fn ouvrir_nettoyage(&mut self) {
+        let ids = self.selection_ordonnee();
+        let id_requete = self.prochain_id_requete;
+        self.prochain_id_requete += 1;
+        self.dialogue = Some(Dialogue::Nettoyage(Box::new(EtatNettoyage {
+            id_requete,
+            nb_films: ids.len(),
+            phase: PhaseNettoyage::Analyse,
+            lignes: Vec::new(),
+        })));
+        let (source, retour) = (self.source.clone(), self.retour.clone());
+        std::thread::spawn(move || {
+            let resultat = source.analyser_nettoyage(&ids);
+            retour.envoyer(Message::NettoyageAnalyse {
+                id_requete,
+                resultat,
+            });
+        });
+    }
+
+    fn nettoyage_analyse(
+        &mut self,
+        id_requete: u64,
+        resultat: Result<Vec<FichierInutileAffiche>, String>,
+    ) {
+        let Some(Dialogue::Nettoyage(n)) = &mut self.dialogue else {
+            return;
+        };
+        if n.id_requete != id_requete {
+            return;
+        }
+        match resultat {
+            Ok(v) => {
+                n.lignes = v
+                    .into_iter()
+                    .map(|fichier| LigneNettoyage {
+                        fichier,
+                        coche: true,
+                    })
+                    .collect();
+                n.phase = PhaseNettoyage::Liste;
+            }
+            Err(e) => n.phase = PhaseNettoyage::Echec(e),
+        }
+    }
+
+    fn action_nettoyage(&mut self, action: ActionNettoyage) {
+        let Some(Dialogue::Nettoyage(n)) = &mut self.dialogue else {
+            return;
+        };
+        match action {
+            ActionNettoyage::Cocher(rang, v) => {
+                if n.phase == PhaseNettoyage::Liste
+                    && let Some(l) = n.lignes.get_mut(rang)
+                {
+                    l.coche = v;
+                }
+            }
+            ActionNettoyage::ToutCocher(v) => {
+                if n.phase == PhaseNettoyage::Liste {
+                    n.lignes.iter_mut().for_each(|l| l.coche = v);
+                }
+            }
+            ActionNettoyage::Executer => {
+                if n.phase == PhaseNettoyage::Liste && n.nb_coches() > 0 {
+                    n.phase = PhaseNettoyage::Confirmation;
+                }
+            }
+            ActionNettoyage::AnnulerConfirmation => {
+                if n.phase == PhaseNettoyage::Confirmation {
+                    n.phase = PhaseNettoyage::Liste;
+                }
+            }
+            ActionNettoyage::ConfirmerExecution => {
+                if n.phase != PhaseNettoyage::Confirmation {
+                    return;
+                }
+                let liste = n.liste_cochee();
+                self.dialogue = None;
+                if !liste.is_empty() {
+                    self.lancer_travail(Travail::Nettoyer { liste });
+                }
+            }
+        }
+    }
+
+    // ---- édition globale
+
+    fn ouvrir_edition_lot(&mut self) {
+        let (series, ids_films, ids_series, nb_verrouilles) = if self.module == Module::Series {
+            let Some(s) = self.serie_selectionnee() else {
+                return self.avertir_aucune_selection();
+            };
+            (
+                true,
+                Vec::new(),
+                vec![s.id.clone()],
+                usize::from(s.verrouillee),
+            )
+        } else {
+            let ids = self.selection_ordonnee();
+            let verrouilles = self
+                .films_selectionnes()
+                .iter()
+                .filter(|f| f.verrouille)
+                .count();
+            (false, ids, Vec::new(), verrouilles)
+        };
+        self.dialogue = Some(Dialogue::EditionLot(Box::new(EtatEditionLot {
+            series,
+            ids_films,
+            ids_series,
+            nb_verrouilles,
+            brouillon: Default::default(),
+        })));
+    }
+
+    fn action_edition_lot(&mut self, action: ActionEditionLot) {
+        let Some(Dialogue::EditionLot(e)) = &mut self.dialogue else {
+            return;
+        };
+        match action {
+            ActionEditionLot::Brouillon(b) => e.brouillon = *b,
+            ActionEditionLot::Appliquer => {
+                let modifs = e.modifications();
+                if modifs.est_vide() || e.nb_modifies() == 0 {
+                    return;
+                }
+                let travail = if e.series {
+                    Travail::EditionLotSeries {
+                        ids: e.ids_series.clone(),
+                        modifs,
+                    }
+                } else {
+                    Travail::EditionLotFilms {
+                        ids: e.ids_films.clone(),
+                        modifs,
+                    }
+                };
+                self.dialogue = None;
+                self.lancer_travail(travail);
+            }
+        }
+    }
+
+    // ---- état « vu » et retrait des séries
+
+    /// Bascule « vu » de la série, de la saison ou de l'épisode sélectionné dans l'arbre.
+    fn basculer_vu_serie(&mut self) {
+        let Some(noeud) = self.noeud_serie.clone() else {
+            return self.avertir_aucune_selection();
+        };
+        match self.source.basculer_vu_series(&[noeud]) {
+            Ok(()) => self.series = self.source.series(),
+            Err(e) => self.notifier(Niveau::Erreur, e),
+        }
+    }
+
+    /// Retrait confirmé de la série sélectionnée (fichiers dans la corbeille si demandé).
+    fn retirer_serie_confirmee(&mut self, deplacer_fichiers: bool) {
+        let Some(id) = self.noeud_serie.as_ref().map(|n| n.id_serie().to_string()) else {
+            return;
+        };
+        let retirees = match self.source.retirer_series(&[id], deplacer_fichiers) {
+            Ok(v) => v,
+            Err(e) => return self.notifier(Niveau::Erreur, e),
+        };
+        // Avec les services, le bilan arrive à la fin de la tâche (événement de séries).
+        if retirees.is_empty() {
+            return;
+        }
+        self.series = self.source.series();
+        self.noeud_serie = None;
+        let compte = retirees.len().to_string();
+        let cle = if deplacer_fichiers {
+            "gui.deletedtv"
+        } else {
+            "gui.removed"
+        };
+        let texte = self.i18n.t_args(cle, &[("count", compte.as_str())]);
+        self.notifier(Niveau::Info, texte);
     }
 
     // ---- éditeur de série
@@ -1685,17 +2037,30 @@ impl Etat {
             self.executer_confirme(action, case.is_some_and(|c| c.cochee));
             return;
         }
-        let n = self.selection.len().to_string();
+        let series = self.module == Module::Series;
+        let n = if series { 1 } else { self.selection.len() }.to_string();
         let (titre, texte) = match action {
             ActionConfirmee::RetirerBase => (
                 self.i18n.t("movie.remove"),
-                self.i18n
-                    .t_args("confirm.remove.text", &[("count", n.as_str())]),
+                self.i18n.t_args(
+                    if series {
+                        "confirm.removetv.text"
+                    } else {
+                        "confirm.remove.text"
+                    },
+                    &[("count", n.as_str())],
+                ),
             ),
             ActionConfirmee::SupprimerFichiers => (
                 self.i18n.t("movie.delete"),
-                self.i18n
-                    .t_args("confirm.delete.text", &[("count", n.as_str())]),
+                self.i18n.t_args(
+                    if series {
+                        "confirm.deletetv.text"
+                    } else {
+                        "confirm.delete.text"
+                    },
+                    &[("count", n.as_str())],
+                ),
             ),
             ActionConfirmee::Quitter => (
                 self.i18n.t("app.exit.confirmation"),
@@ -1726,6 +2091,9 @@ impl Etat {
     fn executer_confirme(&mut self, action: ActionConfirmee, deplacer_fichiers: bool) {
         match action {
             ActionConfirmee::RetirerBase | ActionConfirmee::SupprimerFichiers => {
+                if self.module == Module::Series {
+                    return self.retirer_serie_confirmee(deplacer_fichiers);
+                }
                 let liste: Vec<u64> = self.selection.iter().copied().collect();
                 let retires = match self.source.retirer_films(&liste, deplacer_fichiers) {
                     Ok(v) => v,
@@ -1879,6 +2247,13 @@ impl Etat {
             }
             (Some(Dialogue::Assistant(_)), ActionDialogue::Assistant(a)) => {
                 self.action_assistant(a)
+            }
+            (Some(Dialogue::Export(_)), ActionDialogue::Export(a)) => self.action_export(a),
+            (Some(Dialogue::Nettoyage(_)), ActionDialogue::Nettoyage(a)) => {
+                self.action_nettoyage(a)
+            }
+            (Some(Dialogue::EditionLot(_)), ActionDialogue::EditionLot(a)) => {
+                self.action_edition_lot(a)
             }
             _ => {}
         }
@@ -2149,6 +2524,13 @@ impl Etat {
                 }
                 return;
             }
+            CibleDossier::Export => {
+                if let Some(Dialogue::Export(e)) = &mut self.dialogue {
+                    e.dossier = texte;
+                    e.erreur = None;
+                }
+                return;
+            }
             CibleDossier::SourceFilms => &mut self.services.sources_films,
             CibleDossier::SourceSeries => &mut self.services.sources_series,
         };
@@ -2409,6 +2791,7 @@ impl Etat {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::dialogues::BrouillonLot;
 
     fn titres(e: &Etat) -> Vec<String> {
         e.visibles
@@ -3438,5 +3821,437 @@ mod tests {
             &mut e,
             |e| matches!(&e.dialogue, Some(Dialogue::Reglages(d)) if d.test_outils.is_some()),
         );
+    }
+
+    // --- Export, nettoyage, évaluations, édition globale, gestion des séries ---
+
+    fn dossier_temp(nom: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!("mmr-etat-{nom}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        d
+    }
+
+    fn etat_rapide() -> Etat {
+        Etat::avec_source(source_rapide())
+    }
+
+    /// Sélectionne un film non verrouillé.
+    fn choisir_film_libre(e: &mut Etat) -> u64 {
+        let id = e
+            .films
+            .iter()
+            .find(|f| !f.verrouille)
+            .expect("film libre")
+            .id;
+        e.appliquer(Message::Selectionner {
+            id,
+            ctrl: false,
+            maj: false,
+        });
+        id
+    }
+
+    fn notifie(e: &Etat, extrait: &str) -> bool {
+        e.notifications.iter().any(|n| n.texte.contains(extrait))
+    }
+
+    #[test]
+    fn export_des_films_selection_puis_tout() {
+        let mut e = etat_rapide();
+        choisir_film_libre(&mut e);
+        e.appliquer(Message::Commande(Commande::Exporter));
+        let Some(Dialogue::Export(d)) = &e.dialogue else {
+            panic!("dialogue d'export attendu");
+        };
+        assert!(!d.series && d.selection_seule && d.nb_selection == 1);
+        assert!(!d.modeles.is_empty());
+        // Sans dossier : refus avec message, rien n'est lancé.
+        e.appliquer(Message::Dialogue(ActionDialogue::Export(
+            ActionExport::Lancer,
+        )));
+        let Some(Dialogue::Export(d)) = &e.dialogue else {
+            panic!()
+        };
+        assert_eq!(d.erreur, Some("gui.export.nofolder"));
+        assert_eq!(d.phase, PhaseExport::Saisie);
+        assert!(e.taches.is_empty());
+
+        let dossier = dossier_temp("export");
+        for a in [
+            ActionExport::Dossier(dossier.display().to_string()),
+            ActionExport::Titre("Ma liste".into()),
+            ActionExport::Vignettes(true),
+            ActionExport::Largeur(150),
+            ActionExport::Lancer,
+        ] {
+            e.appliquer(Message::Dialogue(ActionDialogue::Export(a)));
+        }
+        attendre_etat(
+            &mut e,
+            |e| matches!(&e.dialogue, Some(Dialogue::Export(d)) if matches!(d.phase, PhaseExport::Termine(_))),
+        );
+        let Some(Dialogue::Export(d)) = &e.dialogue else {
+            panic!()
+        };
+        let PhaseExport::Termine(r) = &d.phase else {
+            panic!()
+        };
+        assert_eq!(r.exportes, 1);
+        assert_eq!(r.vignettes, 1);
+        assert!(r.fichier_liste.starts_with(&dossier) && r.fichier_liste.exists());
+        let contenu = std::fs::read_to_string(&r.fichier_liste).unwrap();
+        assert!(contenu.starts_with("Ma liste"));
+
+        // Seconde passe : toute la bibliothèque.
+        let total = e.films.len();
+        for a in [
+            ActionExport::Recommencer,
+            ActionExport::SelectionSeule(false),
+            ActionExport::Lancer,
+        ] {
+            e.appliquer(Message::Dialogue(ActionDialogue::Export(a)));
+        }
+        attendre_etat(
+            &mut e,
+            |e| matches!(&e.dialogue, Some(Dialogue::Export(d)) if matches!(d.phase, PhaseExport::Termine(_))),
+        );
+        let Some(Dialogue::Export(d)) = &e.dialogue else {
+            panic!()
+        };
+        let PhaseExport::Termine(r) = &d.phase else {
+            panic!()
+        };
+        assert_eq!(r.exportes, total);
+        e.appliquer(Message::FermerDialogue);
+        // Le dossier est mémorisé pour l'export suivant.
+        e.appliquer(Message::Commande(Commande::Exporter));
+        let Some(Dialogue::Export(d)) = &e.dialogue else {
+            panic!()
+        };
+        assert_eq!(d.dossier, dossier.display().to_string());
+        let _ = std::fs::remove_dir_all(dossier);
+    }
+
+    #[test]
+    fn export_des_series_et_dossier_choisi() {
+        let mut e = etat_rapide();
+        e.appliquer(Message::ChoisirModule(Module::Series));
+        // Sans série sélectionnée, l'export de toutes les séries reste possible.
+        e.appliquer(Message::Commande(Commande::Exporter));
+        let Some(Dialogue::Export(d)) = &e.dialogue else {
+            panic!("dialogue d'export attendu")
+        };
+        assert!(d.series && !d.selection_seule && d.nb_selection == 0);
+        assert_eq!(d.nb_total, e.series.len());
+        let dossier = dossier_temp("export-series");
+        e.appliquer(Message::DossierChoisi(
+            CibleDossier::Export,
+            Some(dossier.clone()),
+        ));
+        e.appliquer(Message::Dialogue(ActionDialogue::Export(
+            ActionExport::Lancer,
+        )));
+        attendre_etat(
+            &mut e,
+            |e| matches!(&e.dialogue, Some(Dialogue::Export(d)) if matches!(d.phase, PhaseExport::Termine(_))),
+        );
+        let Some(Dialogue::Export(d)) = &e.dialogue else {
+            panic!()
+        };
+        let PhaseExport::Termine(r) = &d.phase else {
+            panic!()
+        };
+        assert_eq!(r.exportes, e.series.len());
+        assert!(r.fichier_liste.exists());
+        let _ = std::fs::remove_dir_all(dossier);
+    }
+
+    #[test]
+    fn export_ferme_pendant_la_tache_revient_en_notification() {
+        let mut e = etat_rapide();
+        e.appliquer(Message::Commande(Commande::Exporter));
+        let dossier = dossier_temp("export-ferme");
+        e.appliquer(Message::Dialogue(ActionDialogue::Export(
+            ActionExport::Dossier(dossier.display().to_string()),
+        )));
+        e.appliquer(Message::Dialogue(ActionDialogue::Export(
+            ActionExport::Lancer,
+        )));
+        e.appliquer(Message::FermerDialogue);
+        attendre_etat(&mut e, |e| notifie(e, "Export terminé"));
+        let _ = std::fs::remove_dir_all(dossier);
+    }
+
+    #[test]
+    fn nettoyage_liste_cases_total_et_confirmation() {
+        let mut e = etat_rapide();
+        choisir_film_libre(&mut e);
+        e.appliquer(Message::Commande(Commande::Nettoyer));
+        assert!(
+            matches!(&e.dialogue, Some(Dialogue::Nettoyage(n)) if n.phase == PhaseNettoyage::Analyse)
+        );
+        attendre_etat(
+            &mut e,
+            |e| matches!(&e.dialogue, Some(Dialogue::Nettoyage(n)) if n.phase == PhaseNettoyage::Liste),
+        );
+        let Some(Dialogue::Nettoyage(n)) = &e.dialogue else {
+            panic!()
+        };
+        assert_eq!(n.lignes.len(), 3);
+        assert_eq!(n.nb_coches(), 3);
+        let total = n.octets_coches();
+        assert!(total > 0);
+
+        let agir = |e: &mut Etat, a: ActionNettoyage| {
+            e.appliquer(Message::Dialogue(ActionDialogue::Nettoyage(a)))
+        };
+        agir(&mut e, ActionNettoyage::ToutCocher(false));
+        // Rien de coché : pas de confirmation.
+        agir(&mut e, ActionNettoyage::Executer);
+        assert!(
+            matches!(&e.dialogue, Some(Dialogue::Nettoyage(n)) if n.phase == PhaseNettoyage::Liste && n.nb_coches() == 0)
+        );
+        agir(&mut e, ActionNettoyage::Cocher(0, true));
+        let Some(Dialogue::Nettoyage(n)) = &e.dialogue else {
+            panic!()
+        };
+        assert_eq!(n.octets_coches(), n.lignes[0].fichier.taille);
+        agir(&mut e, ActionNettoyage::Executer);
+        assert!(
+            matches!(&e.dialogue, Some(Dialogue::Nettoyage(n)) if n.phase == PhaseNettoyage::Confirmation)
+        );
+        // La liste est figée pendant la confirmation.
+        agir(&mut e, ActionNettoyage::Cocher(1, true));
+        assert!(matches!(&e.dialogue, Some(Dialogue::Nettoyage(n)) if n.nb_coches() == 1));
+        agir(&mut e, ActionNettoyage::AnnulerConfirmation);
+        assert!(
+            matches!(&e.dialogue, Some(Dialogue::Nettoyage(n)) if n.phase == PhaseNettoyage::Liste)
+        );
+        agir(&mut e, ActionNettoyage::Executer);
+        agir(&mut e, ActionNettoyage::ConfirmerExecution);
+        assert!(e.dialogue.is_none());
+        attendre_etat(&mut e, |e| notifie(e, "Nettoyage : 1 élément"));
+    }
+
+    #[test]
+    fn nettoyage_ignore_les_reponses_perimees() {
+        let mut e = etat_rapide();
+        choisir_film_libre(&mut e);
+        e.appliquer(Message::Commande(Commande::Nettoyer));
+        e.appliquer(Message::NettoyageAnalyse {
+            id_requete: 0,
+            resultat: Err("périmée".into()),
+        });
+        assert!(
+            matches!(&e.dialogue, Some(Dialogue::Nettoyage(n)) if n.phase == PhaseNettoyage::Analyse)
+        );
+        let id = match &e.dialogue {
+            Some(Dialogue::Nettoyage(n)) => n.id_requete,
+            _ => unreachable!(),
+        };
+        e.appliquer(Message::NettoyageAnalyse {
+            id_requete: id,
+            resultat: Err("illisible".into()),
+        });
+        assert!(
+            matches!(&e.dialogue, Some(Dialogue::Nettoyage(n)) if matches!(&n.phase, PhaseNettoyage::Echec(m) if m == "illisible"))
+        );
+    }
+
+    #[test]
+    fn evaluations_en_tache_de_fond_et_series_exclues() {
+        let mut e = etat_rapide();
+        choisir_film_libre(&mut e);
+        e.appliquer(Message::Commande(Commande::RecupererEvaluations));
+        attendre_etat(&mut e, |e| notifie(e, "Évaluations : 1 film"));
+        e.appliquer(Message::ChoisirModule(Module::Series));
+        e.appliquer(Message::SelectionnerNoeudSerie(NoeudSerie::Serie(
+            "demo-1".into(),
+        )));
+        for c in [Commande::RecupererEvaluations, Commande::Nettoyer] {
+            let avant = e.notifications.len();
+            e.appliquer(Message::Commande(c));
+            assert!(e.dialogue.is_none());
+            assert_eq!(e.notifications.len(), avant + 1);
+            assert!(notifie(&e, "qu'aux films"), "{c:?}");
+        }
+    }
+
+    #[test]
+    fn edition_globale_des_films() {
+        let mut e = etat_rapide();
+        let id = choisir_film_libre(&mut e);
+        e.appliquer(Message::Commande(Commande::EditionGlobale));
+        let Some(Dialogue::EditionLot(d)) = &e.dialogue else {
+            panic!("dialogue attendu")
+        };
+        assert_eq!(
+            (d.nb_elements(), d.nb_verrouilles, d.nb_modifies()),
+            (1, 0, 1)
+        );
+        // Sans saisie : l'application est ignorée.
+        e.appliquer(Message::Dialogue(ActionDialogue::EditionLot(
+            ActionEditionLot::Appliquer,
+        )));
+        assert!(matches!(&e.dialogue, Some(Dialogue::EditionLot(_))));
+        let brouillon = BrouillonLot {
+            genres_ajouter: "Zorglub, ; zorglub".into(),
+            certification: " FR:U ".into(),
+            vu: Some(true),
+            ..BrouillonLot::default()
+        };
+        e.appliquer(Message::Dialogue(ActionDialogue::EditionLot(
+            ActionEditionLot::Brouillon(Box::new(brouillon)),
+        )));
+        e.appliquer(Message::Dialogue(ActionDialogue::EditionLot(
+            ActionEditionLot::Appliquer,
+        )));
+        assert!(e.dialogue.is_none());
+        attendre_etat(&mut e, |e| {
+            e.film(id)
+                .is_some_and(|f| f.genres.iter().any(|g| g == "Zorglub") && f.vu)
+        });
+        let f = e.film(id).unwrap();
+        assert_eq!(f.certification, "FR:U");
+        assert_eq!(
+            f.genres
+                .iter()
+                .filter(|g| g.eq_ignore_ascii_case("zorglub"))
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn edition_globale_compte_les_verrouilles() {
+        let mut e = etat_rapide();
+        let id = choisir_film_libre(&mut e);
+        // Verrouille le film dans l'interface : il est signalé et l'édition refusée.
+        if let Some(f) = e.films.iter_mut().find(|f| f.id == id) {
+            f.verrouille = true;
+        }
+        e.appliquer(Message::Commande(Commande::EditionGlobale));
+        let Some(Dialogue::EditionLot(d)) = &e.dialogue else {
+            panic!()
+        };
+        assert_eq!((d.nb_verrouilles, d.nb_modifies()), (1, 0));
+        e.appliquer(Message::Dialogue(ActionDialogue::EditionLot(
+            ActionEditionLot::Brouillon(Box::new(BrouillonLot {
+                pays: "France".into(),
+                ..BrouillonLot::default()
+            })),
+        )));
+        e.appliquer(Message::Dialogue(ActionDialogue::EditionLot(
+            ActionEditionLot::Appliquer,
+        )));
+        assert!(matches!(&e.dialogue, Some(Dialogue::EditionLot(_))));
+    }
+
+    #[test]
+    fn edition_globale_d_une_serie_ignore_les_champs_des_films() {
+        let mut e = etat_rapide();
+        e.appliquer(Message::ChoisirModule(Module::Series));
+        e.appliquer(Message::Commande(Commande::EditionGlobale));
+        assert!(e.dialogue.is_none(), "aucune série sélectionnée");
+        e.appliquer(Message::SelectionnerNoeudSerie(NoeudSerie::Serie(
+            "demo-2".into(),
+        )));
+        e.appliquer(Message::Commande(Commande::EditionGlobale));
+        let Some(Dialogue::EditionLot(d)) = &e.dialogue else {
+            panic!()
+        };
+        assert!(d.series && d.ids_series == vec!["demo-2".to_string()]);
+        let b = BrouillonLot {
+            genres_ajouter: "Policier".into(),
+            vu: Some(true),
+            edition: Some("IMAX".into()),
+            langue: "fr".into(),
+            ..BrouillonLot::default()
+        };
+        let m = b.modifications(true);
+        assert!(m.vu.is_none() && m.edition.is_none() && m.langue.is_none());
+        e.appliquer(Message::Dialogue(ActionDialogue::EditionLot(
+            ActionEditionLot::Brouillon(Box::new(b)),
+        )));
+        e.appliquer(Message::Dialogue(ActionDialogue::EditionLot(
+            ActionEditionLot::Appliquer,
+        )));
+        attendre_etat(&mut e, |e| {
+            e.series
+                .iter()
+                .any(|s| s.id == "demo-2" && s.genres.iter().any(|g| g == "Policier"))
+        });
+    }
+
+    fn vus(e: &Etat, id: &str) -> Vec<bool> {
+        e.series
+            .iter()
+            .find(|s| s.id == id)
+            .unwrap()
+            .saisons
+            .iter()
+            .flat_map(|s| s.episodes.iter().filter(|x| !x.manquant).map(|x| x.vu))
+            .collect()
+    }
+
+    #[test]
+    fn basculer_vu_serie_saison_et_episode() {
+        let mut e = etat_rapide();
+        e.appliquer(Message::ChoisirModule(Module::Series));
+        // Sans nœud sélectionné : simple avertissement.
+        e.appliquer(Message::Commande(Commande::BasculerVu));
+        assert_eq!(vus(&e, "demo-1"), [true, false, false]);
+        // Série entière : tout devient vu, puis non vu.
+        e.appliquer(Message::SelectionnerNoeudSerie(NoeudSerie::Serie(
+            "demo-1".into(),
+        )));
+        e.appliquer(Message::Commande(Commande::BasculerVu));
+        assert_eq!(vus(&e, "demo-1"), [true, true, true]);
+        e.appliquer(Message::Commande(Commande::BasculerVu));
+        assert_eq!(vus(&e, "demo-1"), [false, false, false]);
+        // Épisode : S01E02 (rang 1) devient vu.
+        e.appliquer(Message::SelectionnerNoeudSerie(NoeudSerie::Episode(
+            "demo-1".into(),
+            1,
+            1,
+        )));
+        e.appliquer(Message::Commande(Commande::BasculerVu));
+        assert_eq!(vus(&e, "demo-1"), [false, true, false]);
+        // Saison 1 : tout devient vu, puis non vu.
+        e.appliquer(Message::SelectionnerNoeudSerie(NoeudSerie::Saison(
+            "demo-1".into(),
+            1,
+        )));
+        e.appliquer(Message::Commande(Commande::BasculerVu));
+        assert_eq!(vus(&e, "demo-1"), [true, true, false]);
+        e.appliquer(Message::Commande(Commande::BasculerVu));
+        assert_eq!(vus(&e, "demo-1"), [false, false, false]);
+    }
+
+    #[test]
+    fn retrait_et_suppression_d_une_serie_avec_confirmation() {
+        let mut e = etat_rapide();
+        e.appliquer(Message::ChoisirModule(Module::Series));
+        e.appliquer(Message::SelectionnerNoeudSerie(NoeudSerie::Serie(
+            "demo-2".into(),
+        )));
+        e.appliquer(Message::Commande(Commande::RetirerBase));
+        let Some(Dialogue::Confirmation(c)) = &e.dialogue else {
+            panic!("confirmation attendue")
+        };
+        assert!(c.texte.contains("1 série"), "{}", c.texte);
+        assert!(c.case.is_some_and(|x| !x.cochee));
+        e.appliquer(Message::FermerDialogue);
+        assert_eq!(e.series.len(), 2, "annulation : rien n'est retiré");
+        e.appliquer(Message::Commande(Commande::SupprimerFichiers));
+        let Some(Dialogue::Confirmation(c)) = &e.dialogue else {
+            panic!()
+        };
+        assert!(c.case.is_some_and(|x| x.cochee));
+        e.appliquer(Message::Confirmer);
+        assert_eq!(e.series.len(), 1);
+        assert!(e.series.iter().all(|s| s.id != "demo-2"));
+        assert!(e.noeud_serie.is_none());
+        assert!(notifie(&e, "corbeille"));
     }
 }

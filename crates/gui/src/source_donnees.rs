@@ -9,7 +9,7 @@
 
 use crate::dialogues::appliquer_resultat;
 use crate::donnees::films_factices;
-use crate::etat::{Message, Niveau};
+use crate::etat::{Message, Niveau, NoeudSerie};
 use crate::modele::{Film, normaliser};
 use crate::renommage::{self, ApercuFilm, LigneFichier};
 use crate::taches::{IssueTache, Repaint};
@@ -171,6 +171,162 @@ pub enum Travail {
     RenommerSeries {
         ids: Vec<String>,
     },
+    /// Export de la liste (modèle, dossier de sortie, vignettes).
+    Exporter {
+        cible: CibleExport,
+        /// Identifiant du modèle (`ModeleExportAffiche::id`).
+        modele: String,
+        dossier: PathBuf,
+        /// `Some(largeur)` : copie des affiches (0 = taille d'origine).
+        vignettes: Option<u32>,
+        titre: Option<String>,
+    },
+    /// Déplace des fichiers inutiles dans la corbeille de leur source.
+    Nettoyer {
+        liste: Vec<FichierInutileAffiche>,
+    },
+    /// Rafraîchit les notes des films choisis.
+    RecupererEvaluations {
+        ids: Vec<u64>,
+    },
+    /// Édition globale de films.
+    EditionLotFilms {
+        ids: Vec<u64>,
+        modifs: ModifsLot,
+    },
+    /// Édition globale de séries.
+    EditionLotSeries {
+        ids: Vec<String>,
+        modifs: ModifsLot,
+    },
+}
+
+/// Éléments d'un export : films (identifiants affichés) ou séries ; `None` = tous.
+#[derive(Clone, Debug, PartialEq)]
+pub enum CibleExport {
+    Films(Option<Vec<u64>>),
+    Series(Option<Vec<String>>),
+}
+
+/// Modèle d'export proposé par le dialogue.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ModeleExportAffiche {
+    pub id: String,
+    pub nom: String,
+    pub description: String,
+    /// Nom du fichier de liste, sans extension.
+    pub nom_fichier: String,
+    pub extension: String,
+}
+
+/// Bilan d'un export, tel qu'affiché à la fin du dialogue.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct RapportExportAffiche {
+    /// Fichier de liste produit.
+    pub fichier_liste: PathBuf,
+    pub exportes: usize,
+    pub vignettes: usize,
+    pub avertissements: Vec<String>,
+}
+
+impl RapportExportAffiche {
+    /// Dossier contenant le fichier de liste.
+    pub fn dossier(&self) -> PathBuf {
+        self.fichier_liste
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_default()
+    }
+}
+
+/// Pourquoi un fichier est jugé inutile.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum RaisonNettoyage {
+    /// Nom conforme à un motif des réglages.
+    Motif(String),
+    Parasite,
+    Extrait,
+    NfoOrphelin,
+}
+
+/// Fichier ou dossier inutile d'un film, proposé au nettoyage.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FichierInutileAffiche {
+    /// Film concerné (identifiant affiché).
+    pub id_film: u64,
+    pub titre_film: String,
+    pub chemin: String,
+    pub est_dossier: bool,
+    pub raison: RaisonNettoyage,
+    pub taille: u64,
+}
+
+/// Éditions proposées par l'édition globale (libellés techniques, non traduits).
+pub const EDITIONS: [&str; 13] = [
+    "Director's Cut",
+    "Extended Edition",
+    "Theatrical Edition",
+    "Unrated",
+    "Uncut",
+    "IMAX",
+    "Remastered",
+    "Collectors Edition",
+    "Ultimate Edition",
+    "Final Edition",
+    "Special Edition",
+    "Criterion Collection",
+    "Open Matte",
+];
+
+/// Sources médias proposées par l'édition globale : (code, libellé).
+pub const SOURCES_MEDIA: [(&str, &str); 17] = [
+    ("UHD_BLURAY", "UHD Blu-ray"),
+    ("BLURAY", "Blu-ray"),
+    ("DVD", "DVD"),
+    ("HDDVD", "HD DVD"),
+    ("TV", "TV"),
+    ("VHS", "VHS"),
+    ("LASERDISC", "LaserDisc"),
+    ("D_VHS", "D-VHS"),
+    ("HDRIP", "HDRip"),
+    ("CAM", "CAM"),
+    ("TS", "TS"),
+    ("TC", "TC"),
+    ("DVDSCR", "DVDSCR"),
+    ("R5", "R5"),
+    ("WEBRIP", "WEBRip"),
+    ("WEB_DL", "WEB-DL"),
+    ("STREAM", "Stream"),
+];
+
+/// Modifications appliquées à un lot de films ou de séries. Une liste vide ou un `None`
+/// laisse la valeur existante intacte.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ModifsLot {
+    pub genres_ajouter: Vec<String>,
+    pub genres_retirer: Vec<String>,
+    pub tags_ajouter: Vec<String>,
+    pub tags_retirer: Vec<String>,
+    pub certification: Option<String>,
+    pub studio: Option<String>,
+    pub pays: Option<String>,
+    /// Langue d'origine : codes ISO 639-1 séparés par une virgule (films).
+    pub langue: Option<String>,
+    /// Libellé d'une entrée de [`EDITIONS`] (films).
+    pub edition: Option<String>,
+    /// Code d'une entrée de [`SOURCES_MEDIA`] (films).
+    pub source_media: Option<String>,
+    /// Marque vu / non vu (films).
+    pub vu: Option<bool>,
+    /// Note personnelle (texte libre).
+    pub note: Option<String>,
+}
+
+impl ModifsLot {
+    /// Aucune modification demandée.
+    pub fn est_vide(&self) -> bool {
+        *self == Self::default()
+    }
 }
 
 impl Travail {
@@ -190,6 +346,12 @@ impl Travail {
             Travail::RenommerSeries { .. } => "gui.task.renametv",
             Travail::AnnulerRenommage { .. } => "gui.task.undorename",
             Travail::AnalyserMedias { .. } => "gui.task.mediainfo",
+            Travail::Exporter { .. } => "gui.task.export",
+            Travail::Nettoyer { .. } => "gui.task.cleanup",
+            Travail::RecupererEvaluations { .. } => "gui.task.ratings",
+            Travail::EditionLotFilms { .. } | Travail::EditionLotSeries { .. } => {
+                "gui.task.bulkedit"
+            }
         }
     }
 }
@@ -476,6 +638,22 @@ pub trait SourceDonnees: Send + Sync {
     /// Localise ffprobe / MediaInfo pour un chemin donné (vide = recherche automatique) et
     /// interroge leur version (bloquant : quelques secondes au plus).
     fn tester_outils(&self, chemin: &str) -> Result<DiagnosticOutils, String>;
+    /// Modèles d'export disponibles pour les films ou, avec `series`, pour les séries.
+    fn modeles_export(&self, series: bool) -> Vec<ModeleExportAffiche>;
+    /// Fichiers inutiles des dossiers des films choisis (lecture seule ; bloquant : appelé
+    /// hors du thread de l'interface).
+    fn analyser_nettoyage(&self, ids: &[u64]) -> Result<Vec<FichierInutileAffiche>, String>;
+    /// Marque vu / non vu les séries, saisons ou épisodes désignés : tout devient vu, sauf si
+    /// tout l'était déjà.
+    fn basculer_vu_series(&self, cibles: &[NoeudSerie]) -> Result<(), String>;
+    /// Retire des séries de la base ; avec `deplacer_fichiers`, leurs fichiers vont dans la
+    /// corbeille de leur source. Renvoie les séries retirées immédiatement ; celles qui le
+    /// sont par une tâche de fond arrivent par `SeriesModifiees`.
+    fn retirer_series(
+        &self,
+        ids: &[String],
+        deplacer_fichiers: bool,
+    ) -> Result<Vec<String>, String>;
     /// Lance un traitement long ; son cycle de vie arrive par `retour` (ou par le canal
     /// installé par [`brancher`](Self::brancher)).
     fn lancer(&self, travail: Travail, retour: &Retour) -> Result<(), String>;
@@ -663,6 +841,112 @@ struct Effets {
     films: Vec<Film>,
     series_modifiees: bool,
     notifications: Vec<(Niveau, String)>,
+    messages: Vec<Message>,
+}
+
+/// Ajoute les valeurs absentes (sans tenir compte de la casse).
+fn ajouter_valeurs(liste: &mut Vec<String>, valeurs: &[String]) -> bool {
+    let mut change = false;
+    for v in valeurs.iter().map(|v| v.trim()).filter(|v| !v.is_empty()) {
+        if !liste.iter().any(|x| x.eq_ignore_ascii_case(v)) {
+            liste.push(v.to_string());
+            change = true;
+        }
+    }
+    change
+}
+
+/// Retire les valeurs présentes (sans tenir compte de la casse).
+fn retirer_valeurs(liste: &mut Vec<String>, valeurs: &[String]) -> bool {
+    let avant = liste.len();
+    liste.retain(|x| !valeurs.iter().any(|v| v.trim().eq_ignore_ascii_case(x)));
+    liste.len() != avant
+}
+
+/// Applique une édition globale à un film affiché (seuls les champs que le modèle affiché
+/// porte : genres, certification, production, pays, état « vu »). Vrai si le film a changé.
+pub fn appliquer_lot_film(f: &mut Film, m: &ModifsLot) -> bool {
+    let mut c = ajouter_valeurs(&mut f.genres, &m.genres_ajouter);
+    c |= retirer_valeurs(&mut f.genres, &m.genres_retirer);
+    if let Some(x) = &m.certification
+        && *x != f.certification
+    {
+        f.certification = x.clone();
+        c = true;
+    }
+    if let Some(x) = &m.studio {
+        let v = vec![x.clone()];
+        if v != f.production {
+            f.production = v;
+            c = true;
+        }
+    }
+    if let Some(x) = &m.pays {
+        let v: Vec<String> = x
+            .split('/')
+            .map(|p| p.trim().to_string())
+            .filter(|p| !p.is_empty())
+            .collect();
+        if v != f.pays {
+            f.pays = v;
+            c = true;
+        }
+    }
+    if let Some(vu) = m.vu
+        && vu != f.vu
+    {
+        f.vu = vu;
+        c = true;
+    }
+    c
+}
+
+/// Applique une édition globale à une série affichée (genres). Vrai si elle a changé.
+pub fn appliquer_lot_serie(s: &mut SerieAffichage, m: &ModifsLot) -> bool {
+    let mut c = ajouter_valeurs(&mut s.genres, &m.genres_ajouter);
+    c |= retirer_valeurs(&mut s.genres, &m.genres_retirer);
+    c
+}
+
+/// Modèles de la source de démonstration : (identifiant, nom, extension).
+const MODELES_DEMO: [(&str, &str, &str); 3] = [
+    ("demo:html", "Liste HTML", "html"),
+    ("demo:csv", "Tableau CSV", "csv"),
+    ("demo:txt", "Liste texte", "txt"),
+];
+
+/// Écrit la liste de démonstration d'un export et renvoie son bilan.
+fn exporter_demo(
+    modele: &str,
+    dossier: &Path,
+    titres: &[String],
+    vignettes: Option<u32>,
+    titre: Option<&str>,
+    nom_fichier: &str,
+) -> Result<RapportExportAffiche, String> {
+    let extension = MODELES_DEMO
+        .iter()
+        .find(|(id, _, _)| *id == modele)
+        .map(|(_, _, e)| *e)
+        .ok_or_else(|| format!("modèle {modele} inconnu"))?;
+    std::fs::create_dir_all(dossier).map_err(|e| e.to_string())?;
+    let fichier = dossier.join(format!("{nom_fichier}.{extension}"));
+    let mut texte = String::new();
+    if let Some(t) = titre.filter(|t| !t.is_empty()) {
+        texte.push_str(t);
+        texte.push('\n');
+    }
+    for t in titres {
+        texte.push_str(t);
+        texte.push('\n');
+    }
+    std::fs::write(&fichier, texte).map_err(|e| e.to_string())?;
+    Ok(RapportExportAffiche {
+        fichier_liste: fichier,
+        exportes: titres.len(),
+        vignettes: if vignettes.is_some() { titres.len() } else { 0 },
+        avertissements: Vec::new(),
+    })
 }
 
 /// Effet d'une tâche simulée sur les films et séries de démonstration.
@@ -746,6 +1030,62 @@ fn effet_simule(
                 Niveau::Info,
                 format!("Analyse : {n} élément(s) (démonstration)"),
             ));
+        }
+        Travail::Exporter {
+            cible,
+            modele,
+            dossier,
+            vignettes,
+            titre,
+        } => {
+            let (titres, nom) = match cible {
+                CibleExport::Films(ids) => (
+                    films
+                        .iter()
+                        .filter(|f| ids.as_ref().is_none_or(|v| v.contains(&f.id)))
+                        .map(|f| f.titre.clone())
+                        .collect::<Vec<_>>(),
+                    "films",
+                ),
+                CibleExport::Series(ids) => (
+                    series
+                        .iter()
+                        .filter(|s| ids.as_ref().is_none_or(|v| v.contains(&s.id)))
+                        .map(|s| s.titre.clone())
+                        .collect::<Vec<_>>(),
+                    "series",
+                ),
+            };
+            effets.messages.push(Message::ExportTermine(exporter_demo(
+                modele,
+                dossier,
+                &titres,
+                *vignettes,
+                titre.as_deref(),
+                nom,
+            )));
+        }
+        Travail::Nettoyer { liste } => effets.notifications.push((
+            Niveau::Info,
+            format!("Nettoyage : {} élément(s) (démonstration)", liste.len()),
+        )),
+        Travail::RecupererEvaluations { ids } => effets.notifications.push((
+            Niveau::Info,
+            format!("Évaluations : {} film(s) (démonstration)", ids.len()),
+        )),
+        Travail::EditionLotFilms { ids, modifs } => {
+            for f in films.iter_mut().filter(|f| ids.contains(&f.id)) {
+                if !f.verrouille && appliquer_lot_film(f, modifs) {
+                    effets.films.push(f.clone());
+                }
+            }
+        }
+        Travail::EditionLotSeries { ids, modifs } => {
+            for s in series.iter_mut().filter(|s| ids.contains(&s.id)) {
+                if !s.verrouillee && appliquer_lot_serie(s, modifs) {
+                    effets.series_modifiees = true;
+                }
+            }
         }
         Travail::MettreAJourSources
         | Travail::MettreAJourSeries
@@ -1145,6 +1485,100 @@ impl SourceDonnees for SourceFactice {
         })
     }
 
+    fn modeles_export(&self, series: bool) -> Vec<ModeleExportAffiche> {
+        MODELES_DEMO
+            .iter()
+            .map(|(id, nom, ext)| ModeleExportAffiche {
+                id: (*id).into(),
+                nom: (*nom).into(),
+                description: format!("Export {} (démonstration)", ext.to_uppercase()),
+                nom_fichier: if series { "series" } else { "films" }.into(),
+                extension: (*ext).into(),
+            })
+            .collect()
+    }
+
+    fn analyser_nettoyage(&self, ids: &[u64]) -> Result<Vec<FichierInutileAffiche>, String> {
+        std::thread::sleep(self.latence);
+        let films = self.films.lock().map_err(|e| e.to_string())?;
+        let mut v = Vec::new();
+        for f in films
+            .iter()
+            .filter(|f| ids.contains(&f.id) && !f.verrouille)
+        {
+            v.push(FichierInutileAffiche {
+                id_film: f.id,
+                titre_film: f.titre.clone(),
+                chemin: format!("{}\\Thumbs.db", f.dossier),
+                est_dossier: false,
+                raison: RaisonNettoyage::Parasite,
+                taille: 24_576,
+            });
+            v.push(FichierInutileAffiche {
+                id_film: f.id,
+                titre_film: f.titre.clone(),
+                chemin: format!("{}\\Sample", f.dossier),
+                est_dossier: true,
+                raison: RaisonNettoyage::Extrait,
+                taille: 38_000_000,
+            });
+            v.push(FichierInutileAffiche {
+                id_film: f.id,
+                titre_film: f.titre.clone(),
+                chemin: format!("{}\\release.nfo", f.dossier),
+                est_dossier: false,
+                raison: RaisonNettoyage::Motif(r"(?i)^release\.nfo$".into()),
+                taille: 1_200,
+            });
+        }
+        Ok(v)
+    }
+
+    fn basculer_vu_series(&self, cibles: &[NoeudSerie]) -> Result<(), String> {
+        let mut series = self.series.lock().map_err(|e| e.to_string())?;
+        // Épisodes visés : (série, saison, rang dans la saison des épisodes affichés).
+        let mut vises: Vec<(usize, usize, usize)> = Vec::new();
+        for c in cibles {
+            let Some(s) = series.iter().position(|s| s.id == c.id_serie()) else {
+                return Err(format!("série {} introuvable", c.id_serie()));
+            };
+            for (n_saison, saison) in series[s].saisons.iter().enumerate() {
+                for (rang, e) in saison.episodes.iter().enumerate() {
+                    let vise = match c {
+                        NoeudSerie::Serie(_) => true,
+                        NoeudSerie::Saison(_, n) => *n == saison.numero,
+                        NoeudSerie::Episode(_, n, r) => *n == saison.numero && *r == rang,
+                    };
+                    if vise && !e.manquant {
+                        vises.push((s, n_saison, rang));
+                    }
+                }
+            }
+        }
+        let tous_vus = vises
+            .iter()
+            .all(|&(s, n, r)| series[s].saisons[n].episodes[r].vu);
+        for (s, n, r) in vises {
+            series[s].saisons[n].episodes[r].vu = !tous_vus;
+        }
+        Ok(())
+    }
+
+    fn retirer_series(
+        &self,
+        ids: &[String],
+        _deplacer_fichiers: bool,
+    ) -> Result<Vec<String>, String> {
+        let mut tous = self.series.lock().map_err(|e| e.to_string())?;
+        let retirees: Vec<String> = tous
+            .iter()
+            .filter(|s| ids.contains(&s.id) && !s.verrouillee)
+            .map(|s| s.id.clone())
+            .collect();
+        tous.retain(|s| !retirees.contains(&s.id));
+        Ok(retirees)
+    }
+
     fn lancer(&self, travail: Travail, retour: &Retour) -> Result<(), String> {
         let id = self.prochain_id.fetch_add(1, Ordering::SeqCst);
         let annulation = Arc::new(AtomicBool::new(false));
@@ -1197,6 +1631,9 @@ impl SourceDonnees for SourceFactice {
                 }
                 if effets.series_modifiees {
                     retour.envoyer(Message::SeriesModifiees);
+                }
+                for m in effets.messages {
+                    retour.envoyer(m);
                 }
                 for (niveau, texte) in effets.notifications {
                     retour.envoyer(Message::Notifier(niveau, texte));
