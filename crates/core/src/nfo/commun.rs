@@ -96,6 +96,10 @@ pub struct OptionsNfo {
     /// existe (`<Nom_Prénom>.jpg`), le `thumb` de l'acteur la référence
     /// (chemin relatif `.actors/<fichier>`) à la place de l'URL distante.
     pub dossier_acteurs: Option<std::path::PathBuf>,
+    /// Préfixe du chemin relatif des photos locales, quand le NFO n'est pas
+    /// dans le dossier qui contient `.actors` (ex. `../` pour un épisode
+    /// dans un dossier de saison). Vide par défaut.
+    pub prefixe_acteurs: String,
 }
 
 impl OptionsNfo {
@@ -116,6 +120,7 @@ impl OptionsNfo {
             ecrire_tous_acteurs: false,
             horodatage: None,
             dossier_acteurs: None,
+            prefixe_acteurs: String::new(),
         }
     }
 
@@ -619,7 +624,7 @@ pub fn nom_fichier_acteur(nom: &str) -> String {
 const EXTENSIONS_ACTEUR: [&str; 4] = ["jpg", "jpeg", "png", "webp"];
 
 /// Photo locale de l'acteur dans `dossier` : `.actors/<fichier>` si elle existe.
-fn thumb_local(p: &Personne, dossier: &std::path::Path) -> Option<String> {
+fn thumb_local(p: &Personne, dossier: &std::path::Path, prefixe: &str) -> Option<String> {
     let base = nom_fichier_acteur(&p.nom);
     if base.is_empty() {
         return None;
@@ -630,14 +635,17 @@ fn thumb_local(p: &Personne, dossier: &std::path::Path) -> Option<String> {
         dossier
             .join(&nom)
             .is_file()
-            .then(|| format!("{nom_dossier}/{nom}"))
+            .then(|| format!("{prefixe}{nom_dossier}/{nom}"))
     })
 }
 
 /// Comme [`element_acteur`], mais le `thumb` désigne la photo locale de
 /// `.actors` quand elle existe (sinon l'URL, si les URL sont écrites).
 pub fn element_acteur_options(p: &Personne, type_ecrit: Option<&str>, o: &OptionsNfo) -> Element {
-    let local = o.dossier_acteurs.as_deref().and_then(|d| thumb_local(p, d));
+    let local = o
+        .dossier_acteurs
+        .as_deref()
+        .and_then(|d| thumb_local(p, d, &o.prefixe_acteurs));
     match local {
         Some(l) => element_acteur_avec_thumb(p, type_ecrit, Some(&l)),
         None => element_acteur(p, type_ecrit, o.ecrire_urls_artwork),

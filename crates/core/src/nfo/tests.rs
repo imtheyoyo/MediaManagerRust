@@ -1262,3 +1262,20 @@ fn thumb_acteur_local_si_le_fichier_existe() {
         Some("https://img/c.jpg")
     );
 }
+
+#[test]
+fn thumb_acteur_local_avec_prefixe_pour_un_dossier_de_saison() {
+    let d = tempfile::tempdir().unwrap();
+    let dossier = d.path().join(".actors");
+    std::fs::create_dir_all(&dossier).unwrap();
+    std::fs::write(dossier.join("Keanu_Reeves.jpg"), b"x").unwrap();
+    let mut o = options();
+    o.dossier_acteurs = Some(dossier);
+    o.prefixe_acteurs = "../".into();
+    let keanu = personne(TypePersonne::Acteur, "Keanu Reeves", "Neo", "6384");
+    let x = super::commun::element_acteur_options(&keanu, None, &o);
+    assert_eq!(
+        x.texte_unique("thumb").as_deref(),
+        Some("../.actors/Keanu_Reeves.jpg")
+    );
+}

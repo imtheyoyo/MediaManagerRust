@@ -139,7 +139,15 @@ pub(crate) fn renommer_films(
                 let Some(mut film) = par_id.remove(id) else {
                     continue;
                 };
+                let etait_partage = film.dossier_multi_films;
                 appliquer_au_film(&mut film, el);
+                // Dossier changé sans déplacement en bloc : `.actors` suit.
+                if !etait_partage && !film.dossier_multi_films {
+                    crate::acteurs::emporter_dossier_acteurs(
+                        &el.ancien_dossier,
+                        &el.nouveau_dossier,
+                    );
+                }
                 if film.fichiers_de_type(TypeFichier::Nfo).next().is_some() {
                     let saga = film
                         .saga_id

@@ -7,8 +7,8 @@ use crate::dialogues::{
     ActionAssistant, ActionConfirmee, ActionEditeur, ActionEditeurSerie, ActionEditionLot,
     ActionExport, ActionNettoyage, ActionRecherche, CaseConfirmation, EtatAssistant,
     EtatConfirmation, EtatEditeur, EtatEditeurSerie, EtatEditionLot, EtatExport, EtatManquants,
-    EtatNettoyage, EtatRecherche, FilmEdite, LigneNettoyage, OngletEditeur, PhaseExport,
-    PhaseNettoyage, SerieEdite, valider, valider_serie,
+    EtatNettoyage, EtatRecherche, FilmEdite, LigneNettoyage, OngletEditeur, OptionsEditeur,
+    PhaseExport, PhaseNettoyage, SerieEdite, valider, valider_serie,
 };
 use crate::filtres::{ActionFiltre, ContexteFiltre, FiltresAvances, OngletFiltre};
 use crate::i18n::{I18n, Langue};
@@ -2266,24 +2266,67 @@ impl Etat {
         let total = file.len();
         let Some(id) = file.pop() else { return };
         let Some(film) = self.film(id) else { return };
+        let brouillon = self.brouillon_film(film);
+        let options = self.options_editeur();
         self.dialogue = Some(Dialogue::Editeur(Box::new(EtatEditeur {
             id,
             onglet: OngletEditeur::Details,
-            brouillon: FilmEdite::depuis(film),
+            brouillon,
+            options,
             erreurs: Vec::new(),
             file,
             total,
         })));
     }
 
+    /// Copie éditable d'un film, avec les détails fournis par la source de données.
+    fn brouillon_film(&self, film: &Film) -> FilmEdite {
+        FilmEdite::depuis(film, self.source.details_film(film))
+    }
+
+    /// Valeurs proposées par les listes déroulantes de l'éditeur.
+    fn options_editeur(&self) -> OptionsEditeur {
+        fn trie(mut v: Vec<String>) -> Vec<String> {
+            v.retain(|x| !x.trim().is_empty());
+            v.sort_by_key(|x| x.to_lowercase());
+            v.dedup_by_key(|x| x.to_lowercase());
+            v
+        }
+        let mut certifications: Vec<String> = ["-10", "-12", "-16", "-18", "TP"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        certifications.extend(self.films.iter().map(|f| f.certification.clone()));
+        OptionsEditeur {
+            sagas: trie(self.source.sagas().into_iter().map(|s| s.titre).collect()),
+            series: trie(self.source.series().into_iter().map(|s| s.titre).collect()),
+            genres: trie(
+                self.films
+                    .iter()
+                    .flat_map(|f| f.genres.iter().cloned())
+                    .collect(),
+            ),
+            mots_cles: Vec::new(),
+            certifications: trie(certifications),
+        }
+    }
+
     /// Passe au film suivant de la file (ou ferme l'éditeur).
-    fn editeur_suivant(&mut self, mut file: Vec<u64>, total: usize, onglet: OngletEditeur) {
+    fn editeur_suivant(
+        &mut self,
+        mut file: Vec<u64>,
+        total: usize,
+        onglet: OngletEditeur,
+        options: OptionsEditeur,
+    ) {
         while let Some(id) = file.pop() {
             if let Some(film) = self.film(id) {
+                let brouillon = self.brouillon_film(film);
                 self.dialogue = Some(Dialogue::Editeur(Box::new(EtatEditeur {
                     id,
                     onglet,
-                    brouillon: FilmEdite::depuis(film),
+                    brouillon,
+                    options,
                     erreurs: Vec::new(),
                     file,
                     total,
@@ -2292,6 +2335,21 @@ impl Etat {
             }
         }
         self.dialogue = None;
+    }
+
+    /// Écrit le brouillon (supposé valide) dans le film et l'enregistre avec ses détails.
+    fn enregistrer_brouillon(&mut self, id: u64, brouillon: &FilmEdite) {
+        if let Some(f) = self.films.iter_mut().find(|f| f.id == id) {
+            brouillon.appliquer(f);
+            let copie = f.clone();
+            if let Err(err) = self
+                .source
+                .enregistrer_film_detaille(&copie, &brouillon.details)
+            {
+                self.notifier(Niveau::Erreur, err);
+            }
+        }
+        self.recalculer();
     }
 
     fn action_editeur(&mut self, action: ActionEditeur) {
@@ -2309,8 +2367,13 @@ impl Etat {
             }
             ActionEditeur::Abandonner => self.dialogue = None,
             ActionEditeur::Ignorer => {
-                let (file, total, onglet) = (std::mem::take(&mut e.file), e.total, e.onglet);
-                self.editeur_suivant(file, total, onglet);
+                let (file, total, onglet, options) = (
+                    std::mem::take(&mut e.file),
+                    e.total,
+                    e.onglet,
+                    std::mem::take(&mut e.options),
+                );
+                self.editeur_suivant(file, total, onglet, options);
             }
             ActionEditeur::Valider => {
                 let erreurs = valider(&e.brouillon);
@@ -2318,22 +2381,26 @@ impl Etat {
                     e.erreurs = erreurs;
                     return;
                 }
-                let (id, brouillon, file, total, onglet) = (
+                let (id, brouillon, file, total, onglet, options) = (
                     e.id,
                     e.brouillon.clone(),
                     std::mem::take(&mut e.file),
                     e.total,
                     e.onglet,
+                    std::mem::take(&mut e.options),
                 );
-                if let Some(f) = self.films.iter_mut().find(|f| f.id == id) {
-                    brouillon.appliquer(f);
-                    let copie = f.clone();
-                    if let Err(err) = self.source.enregistrer_films(&[copie]) {
-                        self.notifier(Niveau::Erreur, err);
-                    }
+                self.enregistrer_brouillon(id, &brouillon);
+                self.editeur_suivant(file, total, onglet, options);
+            }
+            ActionEditeur::Rechercher => {
+                let erreurs = valider(&e.brouillon);
+                if !erreurs.is_empty() {
+                    e.erreurs = erreurs;
+                    return;
                 }
-                self.recalculer();
-                self.editeur_suivant(file, total, onglet);
+                let (id, brouillon) = (e.id, e.brouillon.clone());
+                self.enregistrer_brouillon(id, &brouillon);
+                self.ouvrir_recherche(vec![id]);
             }
         }
     }

@@ -389,6 +389,30 @@ fn dossiers_vides_et_indesirables() {
 }
 
 #[test]
+fn dossier_actors_suit_le_dossier_et_survit_au_nettoyage() {
+    let tmp = tempfile::tempdir().unwrap();
+    let src = tmp.path();
+    creer(
+        src,
+        &["a/b/Matrix/m.mkv", "a/b/Matrix/.actors/Keanu_Reeves.jpg"],
+    );
+    let f = film_disque(src, "a/b/Matrix", &[("m.mkv", TypeFichier::Video)]);
+    let profil = ProfilRenommageFilm {
+        nettoyer_indesirables: true,
+        motifs_indesirables: vec![r"\.jpg$".into()],
+        ..Default::default()
+    };
+    let plan = planifier(&[&f], &profil);
+    let rapport = executer(&plan, &OptionsExecution::default());
+    assert!(rapport.est_complet(), "{rapport:?}");
+    let s: Vec<String> = instantane(src).into_keys().collect();
+    assert!(
+        s.contains(&"The Matrix (1999)/.actors/Keanu_Reeves.jpg".to_string()),
+        "{s:?}"
+    );
+}
+
+#[test]
 fn serie_complete_avec_dependances() {
     let tmp = tempfile::tempdir().unwrap();
     let src = tmp.path();

@@ -342,7 +342,10 @@ impl<'a> Transaction<'a> {
                 let mut cibles = Vec::new();
                 for e in walkdir::WalkDir::new(racine)
                     .into_iter()
-                    .filter_entry(|e| depot.as_ref().is_none_or(|d| e.path() != d))
+                    .filter_entry(|e| {
+                        depot.as_ref().is_none_or(|d| e.path() != d)
+                            && !(e.file_type().is_dir() && e.file_name() == ".actors")
+                    })
                     .filter_map(Result::ok)
                 {
                     if e.file_type().is_file() {

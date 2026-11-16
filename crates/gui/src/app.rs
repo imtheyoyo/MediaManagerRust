@@ -349,7 +349,7 @@ impl Application {
                 vue::dialogue_messages::afficher(&ctx, &self.etat, &mut sortie)
             }
             Some(Dialogue::Editeur(d)) => {
-                vue::dialogue_editeur::afficher(&ctx, &self.etat, &mut self.images, d, &mut sortie)
+                vue::editeur::afficher(&ctx, &self.etat, &mut self.images, d, &mut sortie)
             }
             Some(Dialogue::Recherche(d)) => vue::dialogue_recherche::afficher(
                 &ctx,

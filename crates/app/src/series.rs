@@ -137,7 +137,8 @@ pub(crate) fn appliquer_choix_avec_renommage(
     let mut o = options_recherche_serie(&serie, &reglages.series);
     o.ids = choix.ids.clone();
     ctx.progression(0, 1, format!("Métadonnées de « {} »", choix.titre));
-    let mut serie = scraper_serie(n, ctx, &f, serie, o, config, &reglages)?;
+    let mut photos = crate::acteurs::BilanPhotos::default();
+    let mut serie = scraper_serie(n, ctx, &f, serie, o, config, &reglages, &mut photos)?;
     let mut rapport = None;
     if reglages.series.renommer_apres_scraping {
         match crate::renommage_serie::renommer_series(n, ctx, std::slice::from_ref(&serie.id)) {
@@ -208,7 +209,11 @@ pub(crate) fn scraper_automatiquement(
         };
         let mut o2 = o.clone();
         o2.ids = meilleur.ids.clone();
-        match scraper_serie(n, ctx, &f, serie, o2, config, &reglages) {
+        let mut photos = crate::acteurs::BilanPhotos::default();
+        let r = scraper_serie(n, ctx, &f, serie, o2, config, &reglages, &mut photos);
+        rapport.photos_acteurs += photos.telechargees;
+        rapport.photos_acteurs_echecs += photos.echecs;
+        match r {
             Ok(_) => rapport.reussis.push(id.clone()),
             Err(ErreurApp::Annulee) => return Err(ErreurApp::Annulee),
             Err(e) => {
@@ -278,6 +283,7 @@ pub fn associer_episodes(
 }
 
 /// Cœur commun : métadonnées de la série, épisodes, images, NFO, base.
+#[allow(clippy::too_many_arguments)]
 fn scraper_serie(
     n: &Noyau,
     ctx: &ContexteTache,
@@ -286,6 +292,7 @@ fn scraper_serie(
     options: OptionsRecherche,
     config: &ConfigSerie,
     reglages: &Reglages,
+    photos: &mut crate::acteurs::BilanPhotos,
 ) -> Resultat<Serie> {
     if serie.verrouille {
         return Err(ErreurApp::Verrouille(serie.titre));
@@ -349,8 +356,27 @@ fn scraper_serie(
                 }
             }
         }
-        if config.artwork && reglages.series.images_acteurs {
-            crate::acteurs::telecharger_photos_acteurs(ctx, &serie.chemin, &serie.acteurs)?;
+        // Option indépendante de « images » : `.actors` est dans le dossier
+        // de la série (acteurs de la série et invités des épisodes).
+        if reglages.series.images_acteurs {
+            let mut personnes = serie.acteurs.clone();
+            personnes.extend(
+                serie
+                    .episodes
+                    .iter()
+                    .flat_map(|e| e.invites.iter().cloned()),
+            );
+            let b = crate::acteurs::telecharger_photos_acteurs(ctx, &serie.chemin, &personnes)?;
+            photos.ajouter(b);
+            if b.telechargees > 0 || b.echecs > 0 {
+                ctx.message(
+                    NiveauMessage::Info,
+                    format!(
+                        "« {} » : {} photo(s) d'acteurs téléchargée(s), {} en échec",
+                        serie.titre, b.telechargees, b.echecs
+                    ),
+                );
+            }
         }
         ecrire_nfo_serie_complete(
             &mut serie,
@@ -717,6 +743,15 @@ fn ecrire(chemin: &std::path::Path, contenu: &str) -> Resultat<bool> {
     ecrire_si_change(chemin, contenu).map_err(|e| ErreurApp::io(chemin, e))
 }
 
+/// Préfixe relatif (`../`, `../../`…) menant de `dossier` à `racine`
+/// (vide si `dossier` est la racine ou n'est pas dessous).
+fn prefixe_vers_racine(dossier: &std::path::Path, racine: &std::path::Path) -> String {
+    match dossier.strip_prefix(racine) {
+        Ok(r) => "../".repeat(r.components().count()),
+        Err(_) => String::new(),
+    }
+}
+
 /// Écrit `tvshow.nfo`, les NFO des épisodes (un par fichier vidéo,
 /// multi-épisodes compris) et, si `nommage_saison` est donné, ceux des
 /// saisons. Balises inconnues des anciens NFO conservées ; fichiers ajoutés
@@ -770,7 +805,13 @@ pub fn ecrire_nfo_serie_complete(
             .unwrap_or_default();
         let contenu = {
             let refs: Vec<&Episode> = indices.iter().map(|&i| &serie.episodes[i]).collect();
-            ecrire_nfo_episodes(serie, &refs, &anciens, conn, &options)
+            // Le NFO d'un épisode peut se trouver dans un dossier de saison :
+            // la photo `.actors` de la série est référencée depuis ce dossier.
+            let mut opt_ep = options.clone();
+            if let Some(d) = chemin.parent() {
+                opt_ep.prefixe_acteurs = prefixe_vers_racine(d, &serie.chemin);
+            }
+            ecrire_nfo_episodes(serie, &refs, &anciens, conn, &opt_ep)
         };
         if ecrire(&chemin, &contenu)? {
             modifies += 1;

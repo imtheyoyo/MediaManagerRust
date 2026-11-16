@@ -20,7 +20,7 @@ use std::path::{Path, PathBuf};
 /// Hauteur de la partie « onglets » du bandeau.
 pub const HAUTEUR_ONGLETS: f32 = 30.0;
 /// Bande sous les onglets (couleur du contenu) où se dessine l'encoche de l'onglet actif.
-const HAUTEUR_ENCOCHE: f32 = 7.0;
+pub const HAUTEUR_ENCOCHE: f32 = 7.0;
 const TEXTE_TITRE: Color32 = Color32::from_rgb(0xE6, 0xE6, 0xE6);
 
 /// Bandeau d'onglets sombre : onglet actif gris avec encoche dessous. Renvoie l'onglet cliqué.

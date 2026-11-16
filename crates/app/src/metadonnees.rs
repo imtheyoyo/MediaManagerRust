@@ -16,6 +16,7 @@ use mediamanager_scrapers::{
 };
 use mediamanager_store::Reglages;
 
+use crate::acteurs::BilanPhotos;
 use crate::application::Noyau;
 use crate::artwork::{
     self, ajouter_fichier, nombre_affiches_voulu, nombre_fanarts_voulu, planifier_images_n,
@@ -50,6 +51,11 @@ pub struct RapportScrap {
     pub erreurs: Vec<(String, String)>,
     /// Renommage enchaîné si le réglage « renommer après scraping » est actif.
     pub renommage: Option<RapportRenommage>,
+    /// Photos d'acteurs téléchargées dans `.actors` (option « images des
+    /// acteurs »).
+    pub photos_acteurs: usize,
+    /// Photos d'acteurs en échec.
+    pub photos_acteurs_echecs: usize,
 }
 
 /// Scraper TMDB configuré (clé du coffre, cache HTTP, URL de test).
@@ -146,7 +152,21 @@ fn lier_saga(
     Ok(Some(saga))
 }
 
+/// Message d'information sur les photos d'acteurs d'un film.
+fn signaler_photos(ctx: &ContexteTache, titre: &str, b: BilanPhotos) {
+    if b.telechargees > 0 || b.echecs > 0 {
+        ctx.message(
+            NiveauMessage::Info,
+            format!(
+                "« {titre} » : {} photo(s) d'acteurs téléchargée(s), {} en échec",
+                b.telechargees, b.echecs
+            ),
+        );
+    }
+}
+
 /// Cœur commun : métadonnées complètes, application, saga, images, NFO, base.
+#[allow(clippy::too_many_arguments)]
 fn scraper_film(
     n: &Noyau,
     ctx: &ContexteTache,
@@ -155,6 +175,7 @@ fn scraper_film(
     options: OptionsRecherche,
     config: &ConfigMetadonnees,
     reglages: &Reglages,
+    photos: &mut BilanPhotos,
 ) -> Resultat<Film> {
     if film.verrouille {
         return Err(ErreurApp::Verrouille(film.titre));
@@ -220,8 +241,12 @@ fn scraper_film(
         }
     }
 
-    if config.artwork && reglages.films.images_acteurs && !film.chemin.as_os_str().is_empty() {
-        crate::acteurs::telecharger_photos_acteurs(ctx, &film.chemin, &film.acteurs)?;
+    // Option indépendante de « images » : les photos vont dans `.actors`, à
+    // côté de la vidéo principale du film.
+    if reglages.films.images_acteurs && !film.chemin.as_os_str().is_empty() {
+        let b = crate::acteurs::telecharger_photos_acteurs(ctx, &film.chemin, &film.acteurs)?;
+        photos.ajouter(b);
+        signaler_photos(ctx, &film.titre, b);
     }
 
     if !film.chemin.as_os_str().is_empty() {
@@ -272,7 +297,8 @@ pub(crate) fn appliquer_choix_avec_renommage(
     let mut o = options_recherche(&film, &reglages.films);
     o.ids = choix.ids.clone();
     ctx.progression(0, 1, format!("Métadonnées de « {} »", choix.titre));
-    let mut film = scraper_film(n, ctx, &f, film, o, config, &reglages)?;
+    let mut photos = BilanPhotos::default();
+    let mut film = scraper_film(n, ctx, &f, film, o, config, &reglages, &mut photos)?;
     let mut rapport = None;
     if reglages.films.renommer_apres_scraping {
         match renommage::renommer_films(n, ctx, std::slice::from_ref(&film.id)) {
@@ -345,7 +371,11 @@ pub(crate) fn scraper_automatiquement(
         };
         let mut o2 = o.clone();
         o2.ids = meilleur.ids.clone();
-        match scraper_film(n, ctx, &f, film, o2, config, &reglages) {
+        let mut photos = BilanPhotos::default();
+        let r = scraper_film(n, ctx, &f, film, o2, config, &reglages, &mut photos);
+        rapport.photos_acteurs += photos.telechargees;
+        rapport.photos_acteurs_echecs += photos.echecs;
+        match r {
             Ok(_) => rapport.reussis.push(id.clone()),
             Err(ErreurApp::Annulee) => return Err(ErreurApp::Annulee),
             Err(e) => {

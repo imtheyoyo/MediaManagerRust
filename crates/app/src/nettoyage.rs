@@ -140,6 +140,13 @@ fn verifier_chemin(chemin: &Path, film: &Film) -> Result<(), String> {
     if chemin == film.chemin || !chemin.starts_with(&film.chemin) {
         return Err("hors du dossier du film".into());
     }
+    // Les photos d'acteurs (`.actors`) ne sont jamais des fichiers inutiles.
+    if chemin.strip_prefix(&film.chemin).is_ok_and(|r| {
+        r.components()
+            .any(|c| c.as_os_str() == crate::acteurs::DOSSIER_ACTEURS)
+    }) {
+        return Err("dossier des photos d'acteurs".into());
+    }
     let meta = std::fs::symlink_metadata(chemin).map_err(|e| format!("introuvable : {e}"))?;
     if meta.file_type().is_symlink() {
         return Err("lien symbolique".into());

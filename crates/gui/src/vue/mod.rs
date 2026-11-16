@@ -8,7 +8,6 @@ pub mod collections;
 pub mod details;
 pub mod dialogue_assistant;
 pub mod dialogue_confirmation;
-pub mod dialogue_editeur;
 pub mod dialogue_editeur_serie;
 pub mod dialogue_edition_lot;
 pub mod dialogue_export;
@@ -20,6 +19,7 @@ pub mod dialogue_nettoyage;
 pub mod dialogue_recherche;
 pub mod dialogue_reglages;
 pub mod dialogue_renommage;
+pub mod editeur;
 pub mod menus;
 pub mod reglages_pages;
 pub mod series;
@@ -124,9 +124,10 @@ pub(crate) mod essais {
     use crate::etat::Etat;
     use eframe::egui::{self, Pos2, RawInput, Rect, Vec2, epaint::Shape};
 
-    /// Écrans essayés : grand, moyen, petit.
-    pub const ECRANS: [Vec2; 3] = [
+    /// Écrans essayés : grand, portable courant, moyen, petit.
+    pub const ECRANS: [Vec2; 4] = [
         Vec2::new(1914.0, 1026.0),
+        Vec2::new(1366.0, 768.0),
         Vec2::new(1280.0, 800.0),
         Vec2::new(1050.0, 700.0),
     ];
@@ -172,9 +173,20 @@ pub(crate) mod essais {
         etat: &Etat,
         id: &'static str,
         attendus: &[String],
+        dessiner: impl FnMut(&egui::Context, &mut Sortie),
+    ) {
+        verifier_stable_sur(etat, id, &ECRANS, attendus, dessiner);
+    }
+
+    /// Comme [`verifier_stable`], sur les `ecrans` donnés.
+    pub fn verifier_stable_sur(
+        etat: &Etat,
+        id: &'static str,
+        ecrans: &[Vec2],
+        attendus: &[String],
         mut dessiner: impl FnMut(&egui::Context, &mut Sortie),
     ) {
-        for ecran in ECRANS {
+        for &ecran in ecrans {
             let (textes, r4) = rendre(etat, id, ecran, 4, &mut dessiner);
             let (_, r20) = rendre(etat, id, ecran, 20, &mut dessiner);
             for a in attendus {

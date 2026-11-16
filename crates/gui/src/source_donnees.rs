@@ -7,6 +7,7 @@
 //! - [`SourceFactice`] : démonstration et tests visuels (données de `donnees.rs`, images
 //!   générées localement, recherche et tâches simulées).
 
+use crate::details_film::DetailsFilm;
 use crate::dialogues::appliquer_resultat;
 use crate::donnees::films_factices;
 use crate::etat::{Message, Niveau, NoeudSerie};
@@ -608,6 +609,17 @@ pub trait SourceDonnees: Send + Sync {
     }
     /// Écrit des films modifiés dans l'interface (base, puis NFO en tâche).
     fn enregistrer_films(&self, films: &[Film]) -> Result<(), String>;
+    /// Données de la fenêtre « Éditer un film » qui ne figurent pas dans [`Film`] (notes par
+    /// source, identifiants, équipe, illustrations, flux...). Par défaut : déduites du film.
+    fn details_film(&self, film: &Film) -> DetailsFilm {
+        DetailsFilm::depuis_film(film)
+    }
+    /// Enregistre un film édité avec ses détails (base, puis NFO en tâche). Par défaut, seuls
+    /// les champs du film d'affichage sont écrits.
+    fn enregistrer_film_detaille(&self, film: &Film, details: &DetailsFilm) -> Result<(), String> {
+        let _ = details;
+        self.enregistrer_films(std::slice::from_ref(film))
+    }
     /// Retire des films de la base ; avec `deplacer_fichiers`, leurs fichiers sont déplacés
     /// dans la corbeille de leur source (`.corbeille`). Renvoie les films retirés
     /// immédiatement ; ceux qui le sont par une tâche de fond arrivent par `FilmRetire`.
@@ -746,6 +758,8 @@ pub struct SourceFactice {
     services: Arc<Mutex<ReglagesServices>>,
     secrets: Mutex<HashMap<String, String>>,
     annulations: Arc<Mutex<HashMap<u64, Arc<AtomicBool>>>>,
+    /// Détails d'édition enregistrés par film.
+    details: Mutex<HashMap<u64, DetailsFilm>>,
     prochain_id: AtomicU64,
     /// Latence simulée de la recherche.
     pub latence: Duration,
@@ -789,6 +803,7 @@ impl SourceFactice {
             services: Arc::new(Mutex::new(reglages_demo())),
             secrets: Mutex::new(HashMap::new()),
             annulations: Arc::default(),
+            details: Mutex::new(HashMap::new()),
             prochain_id: AtomicU64::new(1),
             latence: Duration::from_millis(250),
             pas: Duration::from_millis(80),
@@ -1309,6 +1324,23 @@ impl SourceDonnees for SourceFactice {
                 *x = f.clone();
             }
         }
+        Ok(())
+    }
+
+    fn details_film(&self, film: &Film) -> DetailsFilm {
+        self.details
+            .lock()
+            .ok()
+            .and_then(|d| d.get(&film.id).cloned())
+            .unwrap_or_else(|| DetailsFilm::depuis_film(film))
+    }
+
+    fn enregistrer_film_detaille(&self, film: &Film, details: &DetailsFilm) -> Result<(), String> {
+        self.enregistrer_films(std::slice::from_ref(film))?;
+        self.details
+            .lock()
+            .map_err(|e| e.to_string())?
+            .insert(film.id, details.clone());
         Ok(())
     }
 

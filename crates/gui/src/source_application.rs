@@ -8,6 +8,8 @@
 //! - Tâches : chaque tâche lancée est suivie (principale ou non, bilan à afficher à la fin).
 
 use crate::conversion::{self, ContexteConversion};
+use crate::conversion_details;
+use crate::details_film::DetailsFilm;
 use crate::etat::NoeudSerie;
 use crate::etat::{Message, Niveau};
 use crate::modele::Film;
@@ -26,11 +28,48 @@ use mediamanager_app::{
     RapportLot, RapportMiseAJour, RapportNettoyage, RapportRenommage, RapportRetrait, RapportScrap,
     RequeteFilm, RequeteSerie, TypeExport,
 };
-use mediamanager_core::modele::{Edition, Film as FilmModele, SourceMedia};
+use mediamanager_core::modele::{Edition, Film as FilmModele, Saga, SourceMedia};
 use mediamanager_scrapers::ResultatRecherche as ResultatScraper;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, MutexGuard, RwLock, RwLockReadGuard, Weak};
+
+/// Rattache le film à la saga de titre `titre` (créée si elle n'existe pas) ; un titre vide
+/// retire le film de sa saga. Sans effet si le titre ne change pas.
+fn appliquer_saga(app: &Services, f: &mut FilmModele, titre: &str) -> Result<(), String> {
+    let titre = titre.trim();
+    let sagas = app.sagas().map_err(|e| e.to_string())?;
+    let actuelle = f
+        .saga_id
+        .as_ref()
+        .and_then(|id| sagas.iter().find(|s| s.id == *id));
+    if actuelle.map(|s| s.titre.as_str()).unwrap_or_default() == titre {
+        return Ok(());
+    }
+    if let Some(mut ancienne) = actuelle.cloned() {
+        ancienne.films.retain(|x| *x != f.id);
+        app.avec_stockage(|st| st.bibliotheque.enregistrer(&mut ancienne))
+            .map_err(|e| e.to_string())?;
+    }
+    if titre.is_empty() {
+        f.saga_id = None;
+        return Ok(());
+    }
+    let mut cible = sagas
+        .into_iter()
+        .find(|s| s.titre.eq_ignore_ascii_case(titre))
+        .unwrap_or_else(|| Saga {
+            titre: titre.to_string(),
+            ..Saga::default()
+        });
+    if !cible.films.contains(&f.id) {
+        cible.films.push(f.id.clone());
+    }
+    app.avec_stockage(|st| st.bibliotheque.enregistrer(&mut cible))
+        .map_err(|e| e.to_string())?;
+    f.saga_id = Some(cible.id.clone());
+    Ok(())
+}
 
 /// Message affiché quand l'application a déjà été arrêtée.
 const ARRETEE: &str = "l'application est arrêtée";
@@ -302,26 +341,7 @@ fn raison_services(r: &RaisonNettoyage) -> RaisonInutile {
 
 /// Source média désignée par son code (voir `SOURCES_MEDIA`).
 fn source_media(code: &str) -> Option<SourceMedia> {
-    Some(match code {
-        "UHD_BLURAY" => SourceMedia::UhdBluray,
-        "BLURAY" => SourceMedia::Bluray,
-        "DVD" => SourceMedia::Dvd,
-        "HDDVD" => SourceMedia::HdDvd,
-        "TV" => SourceMedia::Tv,
-        "VHS" => SourceMedia::Vhs,
-        "LASERDISC" => SourceMedia::Laserdisc,
-        "D_VHS" => SourceMedia::DVhs,
-        "HDRIP" => SourceMedia::HdRip,
-        "CAM" => SourceMedia::Cam,
-        "TS" => SourceMedia::Ts,
-        "TC" => SourceMedia::Tc,
-        "DVDSCR" => SourceMedia::DvdScr,
-        "R5" => SourceMedia::R5,
-        "WEBRIP" => SourceMedia::WebRip,
-        "WEB_DL" => SourceMedia::WebDl,
-        "STREAM" => SourceMedia::Stream,
-        _ => return None,
-    })
+    Some(conversion_details::source_media_depuis_code(code)).filter(|s| *s != SourceMedia::Inconnue)
 }
 
 /// Modifications des services pour un lot de films.
@@ -688,6 +708,47 @@ impl SourceDonnees for SourceApplication {
                 let mut suivis = verrou(&i.suivis);
                 Interne::suivre(&mut suivis, app.ecrire_nfo_films(ids), true, |_| None);
             }
+            Ok(())
+        })
+    }
+
+    fn details_film(&self, film: &Film) -> DetailsFilm {
+        let i = &self.interne;
+        i.id_modele(film.id)
+            .and_then(|id| {
+                self.avec_app(|app| app.film(&id).map_err(|e| e.to_string()))
+                    .ok()
+                    .flatten()
+            })
+            .map(|f| conversion_details::details(&f))
+            .unwrap_or_else(|| DetailsFilm::depuis_film(film))
+    }
+
+    fn enregistrer_film_detaille(&self, film: &Film, details: &DetailsFilm) -> Result<(), String> {
+        let i = &self.interne;
+        self.avec_app(|app| {
+            let Some(id) = i.id_modele(film.id) else {
+                return Ok(());
+            };
+            let Some(mut f) = app.film(&id).map_err(|e| e.to_string())? else {
+                return Ok(());
+            };
+            let supprimes = conversion_details::appliquer_edition_detaillee(film, details, &mut f);
+            appliquer_saga(app, &mut f, film.saga.as_deref().unwrap_or_default())?;
+            let source = f.source_donnees.clone();
+            // Base, puis événement `FilmModifie` (l'affichage se rafraîchit).
+            app.enregistrer_film(f).map_err(|e| e.to_string())?;
+            // Jamais de suppression définitive : les illustrations vont à la corbeille.
+            for chemin in supprimes {
+                if let Err(e) =
+                    mediamanager_app::gestion_films::mettre_a_la_corbeille(&chemin, &source)
+                {
+                    tracing::warn!("illustration {} non supprimée : {e}", chemin.display());
+                }
+            }
+            // Les NFO suivent la base (tâche principale).
+            let mut suivis = verrou(&i.suivis);
+            Interne::suivre(&mut suivis, app.ecrire_nfo_films(vec![id]), true, |_| None);
             Ok(())
         })
     }
@@ -1517,6 +1578,42 @@ pub(crate) mod tests {
                     .iter()
                     .any(|n| n.texte.contains("Récupération des évaluations"))
         });
+        source.arreter().unwrap();
+    }
+
+    #[test]
+    fn edition_detaillee_aller_retour_avec_la_source_reelle() {
+        let d = tempfile::tempdir().unwrap();
+        let source = source_reelle(d.path());
+        let mut e = Etat::avec_source(source.clone());
+        e.appliquer(Message::Commande(
+            crate::commandes::Commande::MettreAJourToutesSources,
+        ));
+        attendre(&mut e, |e| e.films.len() == 2 && e.taches.is_empty());
+        let alien = e.films.iter().find(|f| f.titre == "Alien").unwrap().clone();
+
+        // Lecture des détails, modification puis enregistrement.
+        let mut details = source.details_film(&alien);
+        details.titre_anglais = "Alien (EN)".into();
+        details.contour = "Dans l'espace".into();
+        details.mots_cles.push("espace".into());
+        details.video_3d = true;
+        let mut film = alien.clone();
+        film.saga = Some("Saga Alien".into());
+        source.enregistrer_film_detaille(&film, &details).unwrap();
+
+        // Rechargement : les détails et la saga sont persistés.
+        let relu = source
+            .films()
+            .into_iter()
+            .find(|f| f.id == alien.id)
+            .unwrap();
+        assert_eq!(relu.saga.as_deref(), Some("Saga Alien"));
+        let d2 = source.details_film(&relu);
+        assert_eq!(d2.titre_anglais, "Alien (EN)");
+        assert_eq!(d2.contour, "Dans l'espace");
+        assert!(d2.mots_cles.iter().any(|m| m == "espace"));
+        assert!(d2.video_3d);
         source.arreter().unwrap();
     }
 
