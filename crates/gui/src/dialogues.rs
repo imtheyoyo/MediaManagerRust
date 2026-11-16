@@ -148,6 +148,15 @@ impl FilmEdite {
         self.nouveau_genre.clear();
     }
 
+    /// Déplace l'acteur `n` d'un cran (`vers_le_haut`), sans sortir des bornes.
+    pub fn deplacer_acteur(&mut self, n: usize, vers_le_haut: bool) {
+        if vers_le_haut && n > 0 && n < self.acteurs.len() {
+            self.acteurs.swap(n, n - 1);
+        } else if !vers_le_haut && n + 1 < self.acteurs.len() {
+            self.acteurs.swap(n, n + 1);
+        }
+    }
+
     /// Déplace l'élément `n` d'un cran (`vers_le_haut`), sans sortir des bornes.
     pub fn deplacer_genre(&mut self, n: usize, vers_le_haut: bool) {
         if vers_le_haut && n > 0 && n < self.genres.len() {

@@ -710,7 +710,7 @@ pub fn element_nfo_film(
         r.ajouter_texte("tag", t);
     }
     for a in &film.acteurs {
-        r.ajouter(element_acteur(a, None, options.ecrire_urls_artwork));
+        r.ajouter(element_acteur_options(a, None, options));
     }
     if p.equipe_apres_acteurs {
         ecrire_personnes_texte(&mut r, "credits", &scenaristes, &p);

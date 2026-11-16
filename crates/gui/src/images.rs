@@ -16,7 +16,8 @@ pub const TAILLE_MINIATURE: u32 = 512;
 pub const TAILLE_PLEINE: u32 = 2048;
 const PLAFOND_MINIATURES: usize = 96 * 1024 * 1024;
 const PLAFOND_PLEINES: usize = 192 * 1024 * 1024;
-const NB_DECODEURS: usize = 2;
+// Les adresses distantes bloquent un fil pendant le téléchargement : quelques fils de plus.
+const NB_DECODEURS: usize = 4;
 
 /// Cache LRU générique borné par un coût total (octets). Éviction en O(n) : suffisant pour
 /// quelques centaines d'entrées.
@@ -119,9 +120,95 @@ impl CleImage {
     }
 }
 
-/// Décode un fichier image et le réduit (proportions conservées) à `taille_max` de côté.
+/// Taille maximale acceptée pour une image téléchargée (octets).
+const PLAFOND_TELECHARGEMENT: u64 = 20 * 1024 * 1024;
+
+/// `true` si le « chemin » est en réalité une adresse `http(s)://`.
+pub fn est_url(chemin: &Path) -> bool {
+    let t = chemin.to_string_lossy();
+    t.starts_with("http://") || t.starts_with("https://")
+}
+
+/// Dossier de cache disque des images téléchargées.
+pub fn dossier_cache_distant() -> PathBuf {
+    std::env::temp_dir().join("mediamanager-cache-images")
+}
+
+/// Nom de fichier de cache (hachage FNV-1a 64 bits de l'adresse, stable d'une exécution à l'autre).
+pub fn nom_cache(url: &str) -> String {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for o in url.bytes() {
+        h ^= u64::from(o);
+        h = h.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    format!("{h:016x}.img")
+}
+
+fn client_http() -> Result<&'static reqwest::blocking::Client, String> {
+    use std::sync::OnceLock;
+    static CLIENT: OnceLock<Result<reqwest::blocking::Client, String>> = OnceLock::new();
+    CLIENT
+        .get_or_init(|| {
+            reqwest::blocking::Client::builder()
+                .user_agent(concat!("MediaManagerRust/", env!("CARGO_PKG_VERSION")))
+                .connect_timeout(std::time::Duration::from_secs(8))
+                .timeout(std::time::Duration::from_secs(25))
+                .build()
+                .map_err(|e| e.to_string())
+        })
+        .as_ref()
+        .map_err(|e| e.clone())
+}
+
+/// Télécharge `url` dans le cache disque `dossier` (sans re-télécharger si déjà présent) et
+/// renvoie le chemin du fichier mis en cache.
+pub fn telecharger_dans_cache(url: &str, dossier: &Path) -> Result<PathBuf, String> {
+    use std::io::Read;
+    let cible = dossier.join(nom_cache(url));
+    if std::fs::metadata(&cible).is_ok_and(|m| m.len() > 0) {
+        return Ok(cible);
+    }
+    std::fs::create_dir_all(dossier).map_err(|e| format!("{}: {e}", dossier.display()))?;
+    let reponse = client_http()?
+        .get(url)
+        .send()
+        .and_then(|r| r.error_for_status())
+        .map_err(|e| format!("{url}: {e}"))?;
+    if reponse
+        .content_length()
+        .is_some_and(|l| l > PLAFOND_TELECHARGEMENT)
+    {
+        return Err(format!("{url}: image trop volumineuse"));
+    }
+    let mut octets = Vec::new();
+    reponse
+        .take(PLAFOND_TELECHARGEMENT + 1)
+        .read_to_end(&mut octets)
+        .map_err(|e| format!("{url}: {e}"))?;
+    if octets.is_empty() || octets.len() as u64 > PLAFOND_TELECHARGEMENT {
+        return Err(format!("{url}: taille de réponse invalide"));
+    }
+    // Vérifie que c'est bien une image avant de la garder en cache.
+    image::guess_format(&octets).map_err(|e| format!("{url}: {e}"))?;
+    let temporaire = cible.with_extension(format!("part{}", std::process::id()));
+    std::fs::write(&temporaire, &octets).map_err(|e| e.to_string())?;
+    std::fs::rename(&temporaire, &cible).map_err(|e| e.to_string())?;
+    Ok(cible)
+}
+
+/// Décode un fichier image (ou une adresse `http(s)://`, téléchargée dans le cache disque) et
+/// le réduit (proportions conservées) à `taille_max` de côté.
 pub fn decoder(chemin: &Path, taille_max: u32) -> Result<ColorImage, String> {
-    let img = image::open(chemin).map_err(|e| format!("{}: {e}", chemin.display()))?;
+    if est_url(chemin) {
+        let local = telecharger_dans_cache(&chemin.to_string_lossy(), &dossier_cache_distant())?;
+        return decoder_fichier(&local, taille_max);
+    }
+    decoder_fichier(chemin, taille_max)
+}
+
+fn decoder_fichier(chemin: &Path, taille_max: u32) -> Result<ColorImage, String> {
+    let octets = std::fs::read(chemin).map_err(|e| format!("{}: {e}", chemin.display()))?;
+    let img = image::load_from_memory(&octets).map_err(|e| format!("{}: {e}", chemin.display()))?;
     let img = if img.width() > taille_max || img.height() > taille_max {
         img.thumbnail(taille_max, taille_max)
     } else {
@@ -315,6 +402,91 @@ mod tests {
         assert_eq!(img.size, [400, 600]);
         assert!(decoder(Path::new("/n/existe/pas.png"), 100).is_err());
         let _ = std::fs::remove_file(p);
+    }
+
+    #[test]
+    fn url_reconnue_et_nom_de_cache_stable() {
+        assert!(est_url(Path::new("https://exemple.org/a.jpg")));
+        assert!(est_url(Path::new("http://exemple.org/a.jpg")));
+        assert!(!est_url(Path::new("/tmp/a.jpg")));
+        assert_eq!(nom_cache("https://a/b"), nom_cache("https://a/b"));
+        assert_ne!(nom_cache("https://a/b"), nom_cache("https://a/c"));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn telechargement_http_avec_cache_disque() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let src = png_temporaire("http", 80, 120);
+        let octets = std::fs::read(&src).unwrap();
+        let serveur = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/affiche.jpg"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(octets))
+            .expect(1)
+            .mount(&serveur)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/absente.jpg"))
+            .respond_with(ResponseTemplate::new(404))
+            .mount(&serveur)
+            .await;
+        let url = format!("{}/affiche.jpg", serveur.uri());
+        let mauvaise = format!("{}/absente.jpg", serveur.uri());
+        let cache = std::env::temp_dir().join(format!("mmr-cache-{}", std::process::id()));
+        let (c2, u2, m2) = (cache.clone(), url.clone(), mauvaise.clone());
+        tokio::task::spawn_blocking(move || {
+            let f1 = telecharger_dans_cache(&u2, &c2).unwrap();
+            // Deuxième appel : servi par le disque (le serveur n'attend qu'une requête).
+            let f2 = telecharger_dans_cache(&u2, &c2).unwrap();
+            assert_eq!(f1, f2);
+            assert_eq!(decoder_fichier(&f1, 512).unwrap().size, [80, 120]);
+            assert!(telecharger_dans_cache(&m2, &c2).is_err());
+        })
+        .await
+        .unwrap();
+        let _ = std::fs::remove_dir_all(cache);
+        let _ = std::fs::remove_file(src);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn gestionnaire_charge_une_url_http_sans_bloquer() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let src = png_temporaire("gest", 50, 75);
+        let octets = std::fs::read(&src).unwrap();
+        let serveur = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/a.png"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_bytes(octets)
+                    .set_delay(Duration::from_millis(300)),
+            )
+            .mount(&serveur)
+            .await;
+        let url = PathBuf::from(format!("{}/a.png", serveur.uri()));
+        let ctx = egui::Context::default();
+        let rendu = tokio::task::spawn_blocking(move || {
+            let mut g = GestionnaireImages::new(Arc::new(|| {}));
+            let cle = CleImage::miniature(&url);
+            // Le premier appel rend la main immédiatement (chargement en tâche de fond).
+            let debut = std::time::Instant::now();
+            assert!(matches!(g.image(&cle), EtatImage::EnCours));
+            assert!(debut.elapsed() < Duration::from_millis(250));
+            for _ in 0..200 {
+                g.recevoir(&ctx);
+                if let EtatImage::Prete(t) = g.image(&cle) {
+                    return t.size();
+                }
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            panic!("image distante jamais chargée");
+        })
+        .await
+        .unwrap();
+        assert_eq!(rendu, [50, 75]);
+        let _ = std::fs::remove_file(src);
     }
 
     #[test]

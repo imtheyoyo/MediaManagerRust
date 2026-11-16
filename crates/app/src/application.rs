@@ -364,6 +364,24 @@ impl Application {
         )
     }
 
+    /// Comme [`appliquer_resultat`](Self::appliquer_resultat), en renvoyant
+    /// aussi le rapport du renommage enchaîné (`Some` si le réglage
+    /// « renommer après scraping » est actif). Le film renvoyé porte les
+    /// chemins après renommage.
+    pub fn appliquer_resultat_avec_renommage(
+        &self,
+        id_film: &str,
+        choix: ResultatRecherche,
+        config: ConfigMetadonnees,
+    ) -> PoigneeTache<(Film, Option<RapportRenommage>)> {
+        let id = id_film.to_string();
+        self.lancer(
+            "Récupération des métadonnées",
+            TypeTache::Principale,
+            move |n, ctx| metadonnees::appliquer_choix_avec_renommage(n, ctx, &id, &choix, &config),
+        )
+    }
+
     /// Récupération automatique (meilleur résultat au-dessus du seuil des
     /// réglages) pour une sélection de films (tâche principale).
     pub fn scraper_films(
@@ -545,6 +563,23 @@ impl Application {
             "Récupération des métadonnées de la série",
             TypeTache::Principale,
             move |n, ctx| series::appliquer_choix(n, ctx, &id, &choix, &config),
+        )
+    }
+
+    /// Comme [`appliquer_resultat_serie`](Self::appliquer_resultat_serie), avec
+    /// le rapport du renommage enchaîné (`Some` si « renommer après
+    /// scraping » est actif pour les séries).
+    pub fn appliquer_resultat_serie_avec_renommage(
+        &self,
+        id_serie: &str,
+        choix: ResultatRecherche,
+        config: ConfigSerie,
+    ) -> PoigneeTache<(Serie, Option<RapportRenommage>)> {
+        let id = id_serie.to_string();
+        self.lancer(
+            "Récupération des métadonnées de la série",
+            TypeTache::Principale,
+            move |n, ctx| series::appliquer_choix_avec_renommage(n, ctx, &id, &choix, &config),
         )
     }
 

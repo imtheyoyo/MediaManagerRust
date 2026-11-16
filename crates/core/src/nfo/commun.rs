@@ -92,6 +92,10 @@ pub struct OptionsNfo {
     /// Horodatage du commentaire d'en-tête (`None` : commentaire sans date,
     /// utile pour des sorties reproductibles).
     pub horodatage: Option<String>,
+    /// Dossier `.actors` du film ou de la série : si la photo d'un acteur y
+    /// existe (`<Nom_Prénom>.jpg`), le `thumb` de l'acteur la référence
+    /// (chemin relatif `.actors/<fichier>`) à la place de l'URL distante.
+    pub dossier_acteurs: Option<std::path::PathBuf>,
 }
 
 impl OptionsNfo {
@@ -111,6 +115,7 @@ impl OptionsNfo {
             ecrire_date_fin: false,
             ecrire_tous_acteurs: false,
             horodatage: None,
+            dossier_acteurs: None,
         }
     }
 
@@ -591,14 +596,67 @@ pub fn element_personne_texte(balise: &str, p: &Personne) -> Element {
 
 /// `<actor>` : name, role, [type], thumb, profile, ids en sous-balises.
 pub fn element_acteur(p: &Personne, type_ecrit: Option<&str>, urls: bool) -> Element {
+    element_acteur_avec_thumb(
+        p,
+        type_ecrit,
+        (urls && !p.url_vignette.is_empty()).then_some(p.url_vignette.as_str()),
+    )
+}
+
+/// Nom de fichier de la photo d'un acteur (sans extension) : espaces
+/// remplacés par `_`, caractères interdits retirés (`Keanu_Reeves`).
+pub fn nom_fichier_acteur(nom: &str) -> String {
+    let nettoye: String = nom
+        .trim()
+        .chars()
+        .filter(|c| !c.is_control() && !"<>:\"/\\|?*".contains(*c))
+        .map(|c| if c.is_whitespace() { '_' } else { c })
+        .collect();
+    nettoye.trim_matches(['.', '_']).to_string()
+}
+
+/// Extensions reconnues pour la photo d'un acteur.
+const EXTENSIONS_ACTEUR: [&str; 4] = ["jpg", "jpeg", "png", "webp"];
+
+/// Photo locale de l'acteur dans `dossier` : `.actors/<fichier>` si elle existe.
+fn thumb_local(p: &Personne, dossier: &std::path::Path) -> Option<String> {
+    let base = nom_fichier_acteur(&p.nom);
+    if base.is_empty() {
+        return None;
+    }
+    let nom_dossier = dossier.file_name()?.to_string_lossy().into_owned();
+    EXTENSIONS_ACTEUR.iter().find_map(|ext| {
+        let nom = format!("{base}.{ext}");
+        dossier
+            .join(&nom)
+            .is_file()
+            .then(|| format!("{nom_dossier}/{nom}"))
+    })
+}
+
+/// Comme [`element_acteur`], mais le `thumb` désigne la photo locale de
+/// `.actors` quand elle existe (sinon l'URL, si les URL sont écrites).
+pub fn element_acteur_options(p: &Personne, type_ecrit: Option<&str>, o: &OptionsNfo) -> Element {
+    let local = o.dossier_acteurs.as_deref().and_then(|d| thumb_local(p, d));
+    match local {
+        Some(l) => element_acteur_avec_thumb(p, type_ecrit, Some(&l)),
+        None => element_acteur(p, type_ecrit, o.ecrire_urls_artwork),
+    }
+}
+
+fn element_acteur_avec_thumb(
+    p: &Personne,
+    type_ecrit: Option<&str>,
+    thumb: Option<&str>,
+) -> Element {
     let mut e = Element::nouveau("actor");
     e.ajouter_texte("name", &p.nom);
     e.ajouter_texte("role", &p.role);
     if let Some(t) = type_ecrit {
         e.ajouter_texte("type", t);
     }
-    if urls && !p.url_vignette.is_empty() {
-        e.ajouter_texte("thumb", &p.url_vignette);
+    if let Some(t) = thumb {
+        e.ajouter_texte("thumb", t);
     }
     if !p.url_profil.is_empty() {
         e.ajouter_texte("profile", &p.url_profil);

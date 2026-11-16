@@ -732,6 +732,11 @@ fn appliquer_generales(o: &OptionsGenerales, g: &mut ReglagesGeneraux) {
 
 /// Reporte les réglages des films (hors champs plats de [`ReglagesServices`]) en validant
 /// chaque valeur ; une valeur invalide conserve l'ancienne.
+/// Bornes des réglages « nombre d'affiches » et « nombre de fonds d'écran » (au moins 1 : le
+/// principal ; mêmes plafonds que les services de l'application).
+pub const NB_AFFICHES_MAX: u32 = 20;
+pub const NB_FANARTS_MAX: u32 = 50;
+
 fn appliquer_films(o: &ReglagesFilms, f: &mut ReglagesFilms) {
     f.ignorer_dossiers_nomedia = o.ignorer_dossiers_nomedia;
     f.mots_exclus = o
@@ -762,6 +767,8 @@ fn appliquer_films(o: &ReglagesFilms, f: &mut ReglagesFilms) {
     f.fanarts_extra = o.fanarts_extra;
     f.nombre_fanarts_extra = o.nombre_fanarts_extra.min(50);
     f.images_acteurs = o.images_acteurs;
+    f.nombre_affiches = o.nombre_affiches.clamp(1, NB_AFFICHES_MAX);
+    f.nombre_fanarts = o.nombre_fanarts.clamp(1, NB_FANARTS_MAX);
     f.format_nfo = o.format_nfo;
     f.nfo_propre = o.nfo_propre;
     f.nfo_date_ajout = o.nfo_date_ajout;
@@ -809,6 +816,9 @@ fn appliquer_series(o: &ReglagesSeries, f: &mut ReglagesSeries) {
     f.taille_fanart = o.taille_fanart;
     f.taille_vignette = o.taille_vignette;
     f.repli_artwork_saison = o.repli_artwork_saison;
+    f.images_acteurs = o.images_acteurs;
+    f.nombre_affiches = o.nombre_affiches.clamp(1, NB_AFFICHES_MAX);
+    f.nombre_fanarts = o.nombre_fanarts.clamp(1, NB_FANARTS_MAX);
     f.format_nfo = o.format_nfo;
     f.nfo_guide_episodes = o.nfo_guide_episodes;
     f.nfo_date_fin = o.nfo_date_fin;
@@ -889,6 +899,43 @@ mod tests {
         assert!(!s.generales.cle_tmdb_definie);
         r.general.cle_api_tmdb = "k".into();
         assert!(services(&r).generales.cle_tmdb_definie);
+    }
+
+    #[test]
+    fn illustrations_aller_retour_et_bornes() {
+        let r0 = Reglages::default();
+        let mut s = services(&r0);
+        s.films.images_acteurs = true;
+        s.films.nombre_affiches = 7;
+        s.films.nombre_fanarts = 12;
+        s.series.images_acteurs = true;
+        s.series.nombre_affiches = 3;
+        s.series.nombre_fanarts = 4;
+        let mut r = r0.clone();
+        appliquer_services(&s, &mut r);
+        assert!(r.films.images_acteurs && r.series.images_acteurs);
+        assert_eq!((r.films.nombre_affiches, r.films.nombre_fanarts), (7, 12));
+        assert_eq!((r.series.nombre_affiches, r.series.nombre_fanarts), (3, 4));
+        // Relecture : la même valeur revient dans les réglages affichés.
+        let s2 = services(&r);
+        assert_eq!(s2.films.nombre_affiches, 7);
+        assert_eq!(s2.series.nombre_fanarts, 4);
+        assert!(s2.series.images_acteurs);
+        // Les cases d'acteurs des films et des séries sont indépendantes.
+        s.series.images_acteurs = false;
+        appliquer_services(&s, &mut r);
+        assert!(r.films.images_acteurs && !r.series.images_acteurs);
+        // Bornes : 0 → 1, excès → plafond.
+        s.films.nombre_affiches = 0;
+        s.films.nombre_fanarts = 0;
+        s.series.nombre_affiches = 999;
+        s.series.nombre_fanarts = 999;
+        appliquer_services(&s, &mut r);
+        assert_eq!((r.films.nombre_affiches, r.films.nombre_fanarts), (1, 1));
+        assert_eq!(
+            (r.series.nombre_affiches, r.series.nombre_fanarts),
+            (20, 50)
+        );
     }
 
     #[test]

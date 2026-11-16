@@ -112,6 +112,13 @@ fn bilan_mise_a_jour(r: RapportMiseAJour, quoi: &str) -> Option<(Niveau, String)
 }
 
 /// Clé de cache d'un résultat de recherche : fournisseur et identifiants.
+/// Adresse de l'affiche d'un résultat, transportée telle quelle dans `ResultatRecherche::affiche`
+/// (le gestionnaire d'images reconnaît les adresses `http(s)://` et les télécharge).
+fn url_affiche(r: &ResultatScraper) -> Option<PathBuf> {
+    let u = r.url_affiche.trim();
+    (u.starts_with("http://") || u.starts_with("https://")).then(|| PathBuf::from(u))
+}
+
 fn cle_resultat(r: &ResultatScraper) -> String {
     format!(
         "{}:{}",
@@ -652,7 +659,7 @@ impl SourceDonnees for SourceApplication {
                     annee: u32::try_from(r.annee).unwrap_or(0),
                     score: r.score.clamp(0.0, 1.0),
                     resume: r.resume.clone(),
-                    affiche: None,
+                    affiche: url_affiche(&r),
                 };
                 cache.insert(cle, r);
                 affiche
@@ -776,7 +783,7 @@ impl SourceDonnees for SourceApplication {
                     annee: u32::try_from(r.annee).unwrap_or(0),
                     score: r.score.clamp(0.0, 1.0),
                     resume: r.resume.clone(),
-                    affiche: None,
+                    affiche: url_affiche(&r),
                 };
                 cache.insert(cle, r);
                 affiche

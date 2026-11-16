@@ -210,9 +210,109 @@ pub struct ImageATelecharger {
     pub type_fichier: TypeFichier,
     pub url: String,
     pub destinations: Vec<PathBuf>,
+    /// 0 = image principale ; k ≥ 1 = k-ième image supplémentaire (affiche
+    /// `poster<k>`, fond `extrafanart`).
+    pub indice: u32,
 }
 
-/// Prépare la liste des téléchargements d'un film.
+/// Plafond du nombre d'affiches par film ou série.
+pub const MAX_AFFICHES: u32 = 20;
+/// Plafond du nombre de fonds d'écran par film ou série.
+pub const MAX_FANARTS: u32 = 50;
+
+/// Nombre d'affiches voulu d'après les réglages (au moins 1).
+pub fn nombre_affiches_voulu(nombre_affiches: u32) -> usize {
+    nombre_affiches.clamp(1, MAX_AFFICHES) as usize
+}
+
+/// Nombre total de fonds voulu (fond principal compris) : le plus grand de
+/// `nombre_fanarts` et, si « fanarts supplémentaires » est actif,
+/// 1 + `nombre_fanarts_extra`.
+pub fn nombre_fanarts_voulu(nombre_fanarts: u32, extra: bool, nombre_extra: u32) -> usize {
+    let via_extra = if extra { 1 + nombre_extra } else { 1 };
+    nombre_fanarts.max(via_extra).clamp(1, MAX_FANARTS) as usize
+}
+
+fn largeur_max(a: &Artwork) -> u32 {
+    a.tailles.iter().map(|t| t.largeur).max().unwrap_or(0)
+}
+
+fn url_ref(a: &Artwork) -> &str {
+    if a.url_originale.is_empty() {
+        &a.url_apercu
+    } else {
+        &a.url_originale
+    }
+}
+
+/// Les `n` meilleures images d'un type : langue préférée, puis votes, puis
+/// plus grande taille ; doublons d'URL écartés.
+pub fn meilleures_images<'a>(
+    images: &'a [Artwork],
+    type_artwork: TypeArtwork,
+    langues: &[String],
+    n: usize,
+) -> Vec<&'a Artwork> {
+    let mut v: Vec<&Artwork> = images
+        .iter()
+        .filter(|a| a.type_artwork == type_artwork)
+        .collect();
+    v.sort_by_key(|a| {
+        (
+            rang_langue(a, langues),
+            std::cmp::Reverse(a.votes),
+            std::cmp::Reverse(largeur_max(a)),
+        )
+    });
+    let mut vus: Vec<&str> = Vec::new();
+    v.retain(|a| {
+        let u = url_ref(a);
+        if vus.contains(&u) {
+            false
+        } else {
+            vus.push(u);
+            true
+        }
+    });
+    v.truncate(n);
+    v
+}
+
+/// Chemins d'une image supplémentaire : pour une affiche, l'indice est
+/// ajouté au nom (`poster` ⇒ `poster1`) ; pour un fond, il remplace `<n>`
+/// dans les motifs d'extrafanart.
+fn destinations_supplementaires(
+    film: &Film,
+    t: TypeFichier,
+    noms: &NomsFichiersFilm,
+    ext: &str,
+    k: u32,
+) -> Vec<PathBuf> {
+    let base = film.nom_video_sans_pile();
+    let source = if t == TypeFichier::ExtraFanart {
+        TypeFichier::ExtraFanart
+    } else {
+        TypeFichier::Poster
+    };
+    motifs_artwork(source, noms, film.dossier_multi_films, film.est_disque)
+        .into_iter()
+        .filter_map(|m| {
+            if m.contains("<b>") && base.is_empty() {
+                return None;
+            }
+            let mut rel = m.replace("<b>", &base);
+            if rel.contains("<n>") {
+                rel = rel.replace("<n>", &k.to_string());
+            } else {
+                rel.push_str(&k.to_string());
+            }
+            let rel = rel.trim_matches('/').to_string();
+            (!rel.is_empty()).then(|| film.chemin.join(format!("{rel}.{ext}")))
+        })
+        .collect()
+}
+
+/// Prépare la liste des téléchargements d'un film (une affiche et un fond).
 pub fn planifier_images(
     film: &Film,
     images: &[Artwork],
@@ -221,30 +321,89 @@ pub fn planifier_images(
     taille_affiche: TailleImage,
     taille_fond: TailleImage,
 ) -> Vec<ImageATelecharger> {
-    choisir_images(images, langues)
-        .into_iter()
-        .filter_map(|a| {
-            let t = vers_type_fichier(a.type_artwork);
-            if !config.types.contains(&t) {
-                return None;
-            }
-            let taille = if t == TypeFichier::Fanart {
-                taille_fond
-            } else {
-                taille_affiche
-            };
+    planifier_images_n(
+        film,
+        images,
+        config,
+        langues,
+        taille_affiche,
+        taille_fond,
+        1,
+        1,
+    )
+}
+
+/// Prépare la liste des téléchargements d'un film avec `nombre_affiches`
+/// affiches et `nombre_fanarts` fonds au total (principal compris). Les
+/// meilleures images sont retenues (langue, votes, taille) ; s'il y en a
+/// moins, toutes sont prises. Les affiches supplémentaires portent le type
+/// `Graphic` (elles ne doivent pas supplanter l'affiche principale).
+#[allow(clippy::too_many_arguments)]
+pub fn planifier_images_n(
+    film: &Film,
+    images: &[Artwork],
+    config: &ConfigArtwork,
+    langues: &[String],
+    taille_affiche: TailleImage,
+    taille_fond: TailleImage,
+    nombre_affiches: usize,
+    nombre_fanarts: usize,
+) -> Vec<ImageATelecharger> {
+    let mut types: Vec<TypeArtwork> = Vec::new();
+    for a in images {
+        if !types.contains(&a.type_artwork) {
+            types.push(a.type_artwork);
+        }
+    }
+    let mut sortie = Vec::new();
+    for ta in types {
+        let t = vers_type_fichier(ta);
+        if !config.types.contains(&t) {
+            continue;
+        }
+        let (n, taille) = match t {
+            TypeFichier::Fanart => (nombre_fanarts.max(1), taille_fond),
+            TypeFichier::Poster => (nombre_affiches.max(1), taille_affiche),
+            _ => (1, taille_affiche),
+        };
+        for (k, a) in meilleures_images(images, ta, langues, n)
+            .into_iter()
+            .enumerate()
+        {
             let url = url_pour_taille(a, taille);
             if url.is_empty() {
-                return None;
+                continue;
             }
-            let dest = destinations(film, t, &config.noms, &extension_url(&url));
-            (!dest.is_empty()).then_some(ImageATelecharger {
-                type_fichier: t,
-                url,
-                destinations: dest,
-            })
-        })
-        .collect()
+            let ext = extension_url(&url);
+            let k = k as u32;
+            let (type_fichier, dest) = match (k, t) {
+                (0, _) => (t, destinations(film, t, &config.noms, &ext)),
+                (_, TypeFichier::Fanart) => (
+                    TypeFichier::ExtraFanart,
+                    destinations_supplementaires(
+                        film,
+                        TypeFichier::ExtraFanart,
+                        &config.noms,
+                        &ext,
+                        k,
+                    ),
+                ),
+                _ => (
+                    TypeFichier::Graphic,
+                    destinations_supplementaires(film, TypeFichier::Poster, &config.noms, &ext, k),
+                ),
+            };
+            if !dest.is_empty() {
+                sortie.push(ImageATelecharger {
+                    type_fichier,
+                    url,
+                    destinations: dest,
+                    indice: k,
+                });
+            }
+        }
+    }
+    sortie
 }
 
 #[cfg(test)]

@@ -14,6 +14,12 @@ use eframe::egui::{
 };
 use egui_extras::{Column, TableBuilder};
 
+/// Largeur de la liste des résultats (miniature, titre, année, score).
+const LARGEUR_LISTE: f32 = 440.0;
+const LARGEUR_MINIATURE: f32 = 40.0;
+const HAUTEUR_MINIATURE: f32 = 60.0;
+const HAUTEUR_LIGNE: f32 = 66.0;
+
 fn envoyer(sortie: &mut Sortie, a: ActionRecherche) {
     sortie.push(Message::Dialogue(ActionDialogue::Recherche(a)));
 }
@@ -119,17 +125,19 @@ pub fn afficher(
         ui.horizontal_top(|ui| {
             // Résultats (gauche)
             ui.vertical(|ui| {
-                ui.set_width(380.0);
+                ui.set_width(LARGEUR_LISTE);
                 ui.set_min_height(320.0);
                 TableBuilder::new(ui)
                     .id_salt("rech_resultats")
                     .striped(true)
                     .sense(Sense::click())
                     .max_scroll_height(320.0)
+                    .column(Column::exact(LARGEUR_MINIATURE + 8.0))
                     .column(Column::remainder().clip(true))
                     .column(Column::exact(48.0))
                     .column(Column::exact(70.0))
                     .header(22.0, |mut h| {
+                        h.col(|_| {});
                         for cle in ["metatag.title", "metatag.year", "app.similarityscore"] {
                             h.col(|ui| {
                                 ui.strong(i.t(cle)).on_hover_text(i.t(cle));
@@ -137,10 +145,20 @@ pub fn afficher(
                         }
                     })
                     .body(|body| {
-                        body.rows(22.0, r.resultats.len(), |mut ligne| {
+                        body.rows(HAUTEUR_LIGNE, r.resultats.len(), |mut ligne| {
                             let n = ligne.index();
                             let x = &r.resultats[n];
                             ligne.set_selected(r.selection == Some(n));
+                            ligne.col(|ui| {
+                                // Jaquette en miniature (emplacement gris pendant le chargement).
+                                image_ou_emplacement(
+                                    ui,
+                                    images,
+                                    x.affiche.as_deref(),
+                                    Vec2::new(LARGEUR_MINIATURE, HAUTEUR_MINIATURE),
+                                    "",
+                                );
+                            });
                             ligne.col(|ui| {
                                 ui.label(&x.titre);
                             });
@@ -238,5 +256,73 @@ pub fn afficher(
     });
     if reponse.should_close() {
         envoyer(sortie, ActionRecherche::Abandonner);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::dialogues::EtatRecherche;
+    use crate::etat::Dialogue;
+    use crate::source_donnees::{RequeteRecherche, ResultatRecherche};
+    use crate::vue::essais::verifier_stable;
+    use std::path::PathBuf;
+
+    fn etat_avec(nb: usize) -> (Etat, EtatRecherche) {
+        let etat = Etat::nouveau();
+        let affiche = std::env::temp_dir().join(format!("mmr-rech-{}.png", std::process::id()));
+        crate::source_donnees::generer_image_demo(&affiche, 80, 120, 3).unwrap();
+        let r = EtatRecherche {
+            film_id: etat.films[0].id,
+            serie: None,
+            requete: RequeteRecherche {
+                film: etat.films[0].id,
+                extracteur: "TMDb".into(),
+                langue: "fr".into(),
+                texte: "Alien".into(),
+                annee: None,
+            },
+            resultats: (0..nb)
+                .map(|k| ResultatRecherche {
+                    id: format!("id{k}"),
+                    titre: format!("Résultat {k}"),
+                    titre_original: format!("Result {k}"),
+                    annee: 1979 + k as u32,
+                    score: 0.9 - k as f32 * 0.05,
+                    resume: "Un long résumé. ".repeat(40),
+                    affiche: match k % 3 {
+                        0 => Some(affiche.clone()),
+                        1 => Some(PathBuf::from("http://127.0.0.1:9/absente.jpg")),
+                        _ => None,
+                    },
+                })
+                .collect(),
+            selection: Some(0),
+            en_cours: false,
+            id_requete: 1,
+            erreur: None,
+            ne_pas_remplacer: false,
+            file: Vec::new(),
+            total: 1,
+        };
+        (etat, r)
+    }
+
+    #[test]
+    fn liste_avec_jaquettes_taille_stable() {
+        for nb in [0usize, 4, 25] {
+            let (mut etat, r) = etat_avec(nb);
+            etat.dialogue = Some(Dialogue::Recherche(Box::new(r.clone())));
+            let attendus = if nb > 0 {
+                vec![etat.i18n.t("metatag.title"), "Résultat 0".to_string()]
+            } else {
+                vec![etat.i18n.t("metatag.title")]
+            };
+            let mut images = GestionnaireImages::new(std::sync::Arc::new(|| {}));
+            verifier_stable(&etat, "dlg_recherche", &attendus, |ctx, sortie| {
+                images.recevoir(ctx);
+                afficher(ctx, &etat, &mut images, &r, sortie)
+            });
+        }
     }
 }

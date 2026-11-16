@@ -183,34 +183,105 @@ fn onglet_classement(ui: &mut egui::Ui, i: &I18n, b: &mut FilmEdite) {
     ui.label(RichText::new(i.t("editor.commalist")).weak().small());
 }
 
-fn onglet_distribution(ui: &mut egui::Ui, i: &I18n, b: &mut FilmEdite) {
-    let mut retirer = None;
+/// Largeur minimale de la colonne « acteur » et de la colonne « rôle ».
+const LARGEUR_MIN_ACTEUR: f32 = 260.0;
+const LARGEUR_MIN_ROLE: f32 = 300.0;
+/// Largeur réservée aux trois boutons (monter, descendre, retirer) et aux espacements.
+const LARGEUR_BOUTONS: f32 = 3.0 * 34.0 + 4.0 * 8.0;
+/// Hauteur des cases de saisie de la distribution.
+const HAUTEUR_SAISIE: f32 = 30.0;
+
+/// Largeurs (acteur, rôle) des champs de saisie pour la largeur `disponible` : les minima sont
+/// respectés, le surplus est réparti à 45 % / 55 % ; une marge évite l'ascenseur horizontal.
+fn largeurs_distribution(disponible: f32) -> (f32, f32) {
+    let utile = (disponible - LARGEUR_BOUTONS - 24.0).max(LARGEUR_MIN_ACTEUR + LARGEUR_MIN_ROLE);
+    let surplus = utile - LARGEUR_MIN_ACTEUR - LARGEUR_MIN_ROLE;
+    (
+        LARGEUR_MIN_ACTEUR + (surplus * 0.45).floor(),
+        LARGEUR_MIN_ROLE + (surplus * 0.55).floor(),
+    )
+}
+
+/// Action demandée sur une ligne de la distribution.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum ActionActeur {
+    Monter(usize),
+    Descendre(usize),
+    Retirer(usize),
+}
+
+fn case_saisie(ui: &mut egui::Ui, valeur: &mut String, largeur: f32) {
+    ui.add(
+        TextEdit::singleline(valeur)
+            .desired_width(largeur)
+            .min_size(Vec2::new(largeur, HAUTEUR_SAISIE))
+            .margin(egui::Margin::symmetric(8, 6))
+            .align(egui::Align2::LEFT_CENTER),
+    );
+}
+
+/// Largeur de la fenêtre : fonction de l'écran seulement (jamais de l'espace « disponible »,
+/// sinon la modale grandirait à chaque image), de 760 à 1100 px.
+fn largeur_fenetre(ecran: f32) -> f32 {
+    (ecran - 120.0).clamp(760.0, 1100.0)
+}
+
+fn onglet_distribution(ui: &mut egui::Ui, i: &I18n, b: &mut FilmEdite, largeur: f32) {
+    // Marge pour l'ascenseur vertical et le cadre.
+    let (l_nom, l_role) = largeurs_distribution(largeur - 24.0);
+    let mut action: Option<ActionActeur> = None;
+    let dernier = b.acteurs.len().saturating_sub(1);
     Grid::new("ed_acteurs")
-        .num_columns(3)
-        .spacing([8.0, 4.0])
+        .num_columns(4)
+        .spacing([8.0, 8.0])
         .striped(true)
         .show(ui, |ui| {
             ui.strong(i.t("metatag.actor"));
             ui.strong(i.t("metatag.role"));
             ui.label("");
+            ui.label("");
             ui.end_row();
             for (n, (nom, role)) in b.acteurs.iter_mut().enumerate() {
-                ui.add(TextEdit::singleline(nom).desired_width(220.0));
-                ui.add(TextEdit::singleline(role).desired_width(220.0));
-                if ui
-                    .small_button(polices::CORBEILLE)
-                    .on_hover_text(i.t("Button.remove"))
-                    .clicked()
-                {
-                    retirer = Some(n);
-                }
+                case_saisie(ui, nom, l_nom);
+                case_saisie(ui, role, l_role);
+                ui.horizontal(|ui| {
+                    let bouton = |ui: &mut egui::Ui, texte: &str, actif: bool, tip: String| {
+                        ui.add_enabled(
+                            actif,
+                            Button::new(texte).min_size(Vec2::new(30.0, HAUTEUR_SAISIE)),
+                        )
+                        .on_hover_text(tip)
+                        .clicked()
+                    };
+                    if bouton(ui, polices::HAUT, n > 0, i.t("Button.moveup")) {
+                        action = Some(ActionActeur::Monter(n));
+                    }
+                    if bouton(ui, polices::BAS, n < dernier, i.t("Button.movedown")) {
+                        action = Some(ActionActeur::Descendre(n));
+                    }
+                    if bouton(ui, polices::CORBEILLE, true, i.t("Button.remove")) {
+                        action = Some(ActionActeur::Retirer(n));
+                    }
+                });
                 ui.end_row();
             }
         });
-    if let Some(n) = retirer {
-        b.acteurs.remove(n);
+    match action {
+        Some(ActionActeur::Monter(n)) => b.deplacer_acteur(n, true),
+        Some(ActionActeur::Descendre(n)) => b.deplacer_acteur(n, false),
+        Some(ActionActeur::Retirer(n)) => {
+            b.acteurs.remove(n);
+        }
+        None => {}
     }
-    if ui.button(format!("+ {}", i.t("Button.add"))).clicked() {
+    ui.add_space(6.0);
+    if ui
+        .add(
+            Button::new(format!("+ {}", i.t("Button.add")))
+                .min_size(Vec2::new(120.0, HAUTEUR_SAISIE)),
+        )
+        .clicked()
+    {
         b.acteurs.push((String::new(), String::new()));
     }
 }
@@ -248,10 +319,11 @@ pub fn afficher(
 ) {
     let i = &etat.i18n;
     let mut b = e.brouillon.clone();
+    let largeur = largeur_fenetre(ctx.content_rect().width());
     // Actions du pied appliquées APRÈS le brouillon modifié dans la même image.
     let mut pied: Vec<ActionEditeur> = Vec::new();
     let reponse = Modal::new(egui::Id::unique("dlg_editeur")).show(ctx, |ui| {
-        ui.set_min_size(Vec2::new(760.0, 520.0));
+        ui.set_min_size(Vec2::new(largeur, 520.0));
         ui.horizontal(|ui| {
             ui.heading(format!("{} - {}", i.t("movie.edit"), e.brouillon.titre));
             if e.total > 1 {
@@ -279,7 +351,7 @@ pub fn afficher(
             .show(ui, |ui| match e.onglet {
                 OngletEditeur::Details => onglet_details(ui, i, e, &mut b),
                 OngletEditeur::Classement => onglet_classement(ui, i, &mut b),
-                OngletEditeur::Distribution => onglet_distribution(ui, i, &mut b),
+                OngletEditeur::Distribution => onglet_distribution(ui, i, &mut b, largeur),
                 OngletEditeur::Identifiants => onglet_identifiants(ui, i, e, &mut b),
                 OngletEditeur::Illustration => {
                     if let Some(film) = etat.film(e.id) {
@@ -347,5 +419,78 @@ pub fn afficher(
         envoyer(sortie, ActionEditeur::Valider);
     } else if reponse.should_close() {
         envoyer(sortie, ActionEditeur::Abandonner);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::etat::Dialogue;
+    use crate::vue::essais::verifier_stable;
+
+    #[test]
+    fn largeurs_minimales_et_extensibles() {
+        // Fenêtre minimale : minima respectés et tient dans la largeur disponible.
+        let (n, r) = largeurs_distribution(740.0);
+        assert!(n >= 260.0 && r >= 300.0, "{n} {r}");
+        assert!(n + r + LARGEUR_BOUTONS <= 740.0, "{n} {r}");
+        // Très étroit : on ne descend jamais sous les minima.
+        assert_eq!(largeurs_distribution(100.0), (260.0, 300.0));
+        assert_eq!(largeur_fenetre(500.0), 760.0);
+        assert_eq!(largeur_fenetre(3000.0), 1100.0);
+        // Fenêtre large : les colonnes s'étendent, sans dépasser l'espace disponible.
+        let (n2, r2) = largeurs_distribution(1800.0);
+        assert!(n2 > 600.0 && r2 > 700.0, "{n2} {r2}");
+        assert!(n2 + r2 + LARGEUR_BOUTONS <= 1800.0);
+    }
+
+    #[test]
+    fn deplacement_des_acteurs() {
+        let etat = Etat::nouveau();
+        let mut b = FilmEdite::depuis(&etat.films[0]);
+        b.acteurs = vec![
+            ("A".into(), "a".into()),
+            ("B".into(), "b".into()),
+            ("C".into(), "c".into()),
+        ];
+        b.deplacer_acteur(0, true);
+        b.deplacer_acteur(2, false);
+        assert_eq!(b.acteurs[0].0, "A");
+        b.deplacer_acteur(2, true);
+        assert_eq!(
+            b.acteurs.iter().map(|a| a.0.as_str()).collect::<Vec<_>>(),
+            ["A", "C", "B"]
+        );
+        b.deplacer_acteur(0, false);
+        assert_eq!(b.acteurs[0].0, "C");
+        b.deplacer_acteur(9, true);
+        assert_eq!(b.acteurs.len(), 3);
+    }
+
+    #[test]
+    fn distribution_taille_stable() {
+        for nb in [0usize, 3, 40] {
+            let mut etat = Etat::nouveau();
+            let mut b = FilmEdite::depuis(&etat.films[0]);
+            b.acteurs = (0..nb)
+                .map(|k| (format!("Actrice numéro {k}"), format!("Rôle {k}")))
+                .collect();
+            etat.dialogue = Some(Dialogue::Editeur(Box::new(EtatEditeur {
+                id: etat.films[0].id,
+                onglet: OngletEditeur::Distribution,
+                brouillon: b,
+                erreurs: Vec::new(),
+                file: Vec::new(),
+                total: 1,
+            })));
+            let attendus = vec![etat.i18n.t("metatag.actor"), etat.i18n.t("metatag.role")];
+            let mut images = GestionnaireImages::new(std::sync::Arc::new(|| {}));
+            let Some(Dialogue::Editeur(e)) = etat.dialogue.clone() else {
+                unreachable!()
+            };
+            verifier_stable(&etat, "dlg_editeur", &attendus, |ctx, sortie| {
+                afficher(ctx, &etat, &mut images, &e, sortie)
+            });
+        }
     }
 }

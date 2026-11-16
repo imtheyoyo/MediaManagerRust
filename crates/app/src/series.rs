@@ -33,7 +33,9 @@ use mediamanager_store::base::nouvel_id;
 use mediamanager_store::reglages::TailleImage;
 
 use crate::application::Noyau;
-use crate::artwork::{self, ajouter_fichier_liste, extension_url};
+use crate::artwork::{
+    self, ajouter_fichier_liste, extension_url, nombre_affiches_voulu, nombre_fanarts_voulu,
+};
 use crate::conversion_serie::{
     ConfigSerie, appliquer_metadonnees_serie, appliquer_saisons, options_recherche_serie,
     type_fichier_serie, vers_episode_scrape, vers_groupe,
@@ -42,6 +44,7 @@ use crate::ecriture_nfo::connecteur;
 use crate::erreur::{ErreurApp, Resultat};
 use crate::evenements::{Evenement, NiveauMessage};
 use crate::metadonnees::RapportScrap;
+use crate::renommage::RapportRenommage;
 use crate::taches::ContexteTache;
 
 /// Recherche de série saisie par l'utilisateur (dialogue de choix).
@@ -112,6 +115,19 @@ pub(crate) fn appliquer_choix(
     choix: &ResultatRecherche,
     config: &ConfigSerie,
 ) -> Resultat<Serie> {
+    Ok(appliquer_choix_avec_renommage(n, ctx, id, choix, config)?.0)
+}
+
+/// Applique le résultat choisi puis, si le réglage « renommer après
+/// scraping » des séries est actif, renomme la série. Un échec du renommage
+/// n'annule pas le scrap (message d'avertissement).
+pub(crate) fn appliquer_choix_avec_renommage(
+    n: &Noyau,
+    ctx: &ContexteTache,
+    id: &str,
+    choix: &ResultatRecherche,
+    config: &ConfigSerie,
+) -> Resultat<(Serie, Option<RapportRenommage>)> {
     let serie = charger_serie(n, id)?;
     if serie.verrouille {
         return Err(ErreurApp::Verrouille(serie.titre));
@@ -121,9 +137,25 @@ pub(crate) fn appliquer_choix(
     let mut o = options_recherche_serie(&serie, &reglages.series);
     o.ids = choix.ids.clone();
     ctx.progression(0, 1, format!("Métadonnées de « {} »", choix.titre));
-    let serie = scraper_serie(n, ctx, &f, serie, o, config, &reglages)?;
+    let mut serie = scraper_serie(n, ctx, &f, serie, o, config, &reglages)?;
+    let mut rapport = None;
+    if reglages.series.renommer_apres_scraping {
+        match crate::renommage_serie::renommer_series(n, ctx, std::slice::from_ref(&serie.id)) {
+            Ok(r) => {
+                if !r.renommes.is_empty() {
+                    serie = charger_serie(n, id)?;
+                }
+                rapport = Some(r);
+            }
+            Err(ErreurApp::Annulee) => return Err(ErreurApp::Annulee),
+            Err(e) => ctx.message(
+                NiveauMessage::Avertissement,
+                format!("renommage de « {} » impossible : {e}", serie.titre),
+            ),
+        }
+    }
     ctx.progression(1, 1, "Terminé");
-    Ok(serie)
+    Ok((serie, rapport))
 }
 
 /// Tâche : récupération automatique pour une sélection de séries. Le seuil
@@ -299,6 +331,7 @@ fn scraper_serie(
                 ),
             }
             plan.extend(planifier_images_serie(&serie, &images, reglages));
+            plan.extend(planifier_images_supplementaires(&serie, &images, reglages));
         }
         if config.artwork_episodes {
             plan.extend(planifier_vignettes(&serie, &liste, &paires, reglages));
@@ -315,6 +348,9 @@ fn scraper_serie(
                     Err(e) => ctx.message(NiveauMessage::Avertissement, e.to_string()),
                 }
             }
+        }
+        if config.artwork && reglages.series.images_acteurs {
+            crate::acteurs::telecharger_photos_acteurs(ctx, &serie.chemin, &serie.acteurs)?;
         }
         ecrire_nfo_serie_complete(
             &mut serie,
@@ -344,6 +380,9 @@ pub struct ImageSerie {
     pub saison: Option<i32>,
     /// Épisodes concernés (vignettes ; plusieurs pour un multi-épisodes).
     pub episodes: Vec<String>,
+    /// 0 = image principale ; k ≥ 1 = k-ième image supplémentaire de la
+    /// série (`poster<k>`, `extrafanart/fanart<k>`).
+    pub indice: u32,
 }
 
 fn rang_langue(a: &ArtworkEtendu, langues: &[String]) -> usize {
@@ -486,9 +525,86 @@ pub fn planifier_images_serie(
                 url,
                 saison,
                 episodes: Vec::new(),
+                indice: 0,
             })
         })
         .collect()
+}
+
+/// Affiches et fonds supplémentaires de la série (selon `nombre_affiches` et
+/// `nombre_fanarts`) : les meilleures images (langue, votes, taille) autres
+/// que l'image principale, écrites `poster<k>` et `extrafanart/fanart<k>`.
+pub fn planifier_images_supplementaires(
+    serie: &Serie,
+    images: &[ArtworkEtendu],
+    reglages: &Reglages,
+) -> Vec<ImageSerie> {
+    let langues = langues_images(reglages);
+    let principales: Vec<String> = choisir_images_serie(images, &langues)
+        .into_iter()
+        .filter(|a| a.saison.is_none())
+        .map(|a| url_etendue(a, TailleImage::Originale))
+        .collect();
+    let voulus = [
+        (
+            TypeArtworkEtendu::Affiche,
+            nombre_affiches_voulu(reglages.series.nombre_affiches),
+            TypeFichier::Graphic,
+            reglages.series.taille_affiche,
+        ),
+        (
+            TypeArtworkEtendu::Fond,
+            nombre_fanarts_voulu(reglages.series.nombre_fanarts, false, 0),
+            TypeFichier::ExtraFanart,
+            reglages.series.taille_fanart,
+        ),
+    ];
+    let mut sortie = Vec::new();
+    for (ta, n, type_fichier, taille) in voulus {
+        if n < 2 {
+            continue;
+        }
+        let mut v: Vec<&ArtworkEtendu> = images
+            .iter()
+            .filter(|a| a.type_artwork == ta && a.saison.is_none())
+            .collect();
+        v.sort_by_key(|a| {
+            (
+                rang_langue(a, &langues),
+                std::cmp::Reverse(a.votes),
+                std::cmp::Reverse(a.tailles.iter().map(|t| t.largeur).max().unwrap_or(0)),
+            )
+        });
+        let mut vus: Vec<String> = principales.clone();
+        let mut k = 0u32;
+        for a in v {
+            if k as usize >= n - 1 {
+                break;
+            }
+            let id = url_etendue(a, TailleImage::Originale);
+            let url = url_etendue(a, taille);
+            if url.is_empty() || vus.contains(&id) {
+                continue;
+            }
+            vus.push(id);
+            k += 1;
+            let ext = extension_url(&url);
+            let nom = if type_fichier == TypeFichier::ExtraFanart {
+                format!("extrafanart/fanart{k}.{ext}")
+            } else {
+                format!("poster{k}.{ext}")
+            };
+            sortie.push(ImageSerie {
+                type_fichier,
+                destination: serie.chemin.join(nom),
+                url,
+                saison: None,
+                episodes: Vec::new(),
+                indice: k,
+            });
+        }
+    }
+    sortie
 }
 
 fn video(e: &Episode) -> Option<&FichierMedia> {
@@ -546,6 +662,7 @@ pub fn planifier_vignettes(
                 destination,
                 saison: None,
                 episodes: vec![id.clone()],
+                indice: 0,
             }),
         }
     }
@@ -571,7 +688,9 @@ fn rattacher_image(serie: &mut Serie, img: &ImageSerie) {
         }
         None => {
             ajouter_fichier_liste(&mut serie.fichiers, &img.destination, img.type_fichier);
-            serie.urls_artwork.insert(img.type_fichier, img.url.clone());
+            if img.indice == 0 {
+                serie.urls_artwork.insert(img.type_fichier, img.url.clone());
+            }
         }
     }
 }
@@ -608,7 +727,11 @@ pub fn ecrire_nfo_serie_complete(
     horodatage: bool,
     nommage_saison: Option<NommageNfoSaison>,
 ) -> Resultat<usize> {
-    let options = options_nfo_series(reglages, horodatage);
+    let mut options = options_nfo_series(reglages, horodatage);
+    let dossier_acteurs = serie.chemin.join(crate::acteurs::DOSSIER_ACTEURS);
+    if dossier_acteurs.is_dir() {
+        options.dossier_acteurs = Some(dossier_acteurs);
+    }
     let conn = connecteur(reglages.series.format_nfo);
     let mut modifies = 0;
 

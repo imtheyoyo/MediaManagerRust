@@ -5,9 +5,10 @@
 use super::{Sortie, reglages_pages};
 use crate::etat::{ActionDialogue, Etat, EtatDialogueReglages, Message};
 use crate::modele::normaliser;
-use crate::reglages::{Page, Reglages};
+use crate::reglages::{Page, Reglages, ToucheArbre, naviguer, pages_visibles};
 use crate::source_donnees::ReglagesServices;
-use eframe::egui::{self, Align, Layout, Modal, RichText, ScrollArea, TextEdit, Vec2};
+use eframe::egui::{self, Align, Key, Layout, Modal, RichText, ScrollArea, Sense, TextEdit, Vec2};
+use std::collections::HashSet;
 
 /// Taille initiale de la fenêtre des réglages (redimensionnable par le coin inférieur droit).
 pub const TAILLE_INITIALE: Vec2 = Vec2::new(900.0, 600.0);
@@ -18,7 +19,76 @@ const HAUTEUR_PIED: f32 = 34.0;
 /// Fenêtre modale des réglages. Toutes les zones ont une taille bornée par celle de la
 /// fenêtre (aucune ne dépend de l'espace « disponible » de la couche modale, sans quoi le
 /// contenu grandissait à chaque image jusqu'à sortir de l'écran).
+/// Touches de navigation de l'arbre et action associée.
+const TOUCHES_ARBRE: [(Key, ToucheArbre); 6] = [
+    (Key::ArrowUp, ToucheArbre::Haut),
+    (Key::ArrowDown, ToucheArbre::Bas),
+    (Key::ArrowLeft, ToucheArbre::Gauche),
+    (Key::ArrowRight, ToucheArbre::Droite),
+    (Key::Home, ToucheArbre::Debut),
+    (Key::End, ToucheArbre::Fin),
+];
+
+fn id_repliees() -> egui::Id {
+    egui::Id::unique("reglages_noeuds_repliees")
+}
+
+fn id_derniere_page() -> egui::Id {
+    egui::Id::unique("reglages_derniere_page_visible")
+}
+
+/// Nœuds réduits de l'arbre (état purement visuel, conservé par egui tant que la fenêtre vit).
+fn lire_repliees(ctx: &egui::Context) -> HashSet<Page> {
+    ctx.data(|d| d.get_temp::<HashSet<Page>>(id_repliees()))
+        .unwrap_or_default()
+}
+
+fn ecrire_repliees(ctx: &egui::Context, r: &HashSet<Page>) {
+    ctx.data_mut(|d| d.insert_temp(id_repliees(), r.clone()));
+}
+
+/// Pages affichées dans l'arbre pour le filtre `d.filtre` et les nœuds réduits `repliees`.
+fn visibles(
+    i: &crate::i18n::I18n,
+    d: &EtatDialogueReglages,
+    repliees: &HashSet<Page>,
+) -> Vec<Page> {
+    let motif = normaliser(&d.filtre);
+    pages_visibles(
+        |p| motif.is_empty() || normaliser(&i.t(p.cle())).contains(&motif),
+        !motif.is_empty(),
+        repliees,
+    )
+}
+
+/// Navigation au clavier dans l'arbre : valable dès l'ouverture (aucun clic préalable), sauf si
+/// un champ de texte a le focus (les flèches lui appartiennent). Renvoie la page à ouvrir.
+fn navigation_clavier(
+    ctx: &egui::Context,
+    i: &crate::i18n::I18n,
+    d: &EtatDialogueReglages,
+) -> Option<Page> {
+    if ctx.egui_wants_keyboard_input() {
+        return None;
+    }
+    let mut repliees = lire_repliees(ctx);
+    let mut page = d.page;
+    for (touche, action) in TOUCHES_ARBRE {
+        let appuyee = ctx.input_mut(|inp| inp.consume_key(egui::Modifiers::NONE, touche));
+        if appuyee {
+            let vis = visibles(i, d, &repliees);
+            page = naviguer(action, page, &vis, &mut repliees);
+        }
+    }
+    ecrire_repliees(ctx, &repliees);
+    (page != d.page).then_some(page)
+}
+
 pub fn afficher(ctx: &egui::Context, etat: &Etat, d: &EtatDialogueReglages, sortie: &mut Sortie) {
+    if let Some(page) = navigation_clavier(ctx, &etat.i18n, d) {
+        sortie.push(Message::Dialogue(ActionDialogue::ReglagesPage(page)));
+        ctx.request_repaint();
+    }
     let mut r: Reglages = etat.reglages.clone();
     let mut s: ReglagesServices = etat.services.clone();
     let ecran = ctx.content_rect().size();
@@ -63,7 +133,7 @@ fn contenu(
         Layout::left_to_right(Align::Min),
         |ui| {
             ui.set_min_size(Vec2::new(largeur, hauteur));
-            // Arbre des pages (tout développé), filtrable.
+            // Arbre des pages (nœuds réductibles), filtrable, pilotable au clavier.
             ui.allocate_ui_with_layout(
                 Vec2::new(LARGEUR_ARBRE, hauteur),
                 Layout::top_down(Align::Min),
@@ -82,31 +152,69 @@ fn contenu(
                             filtre.clone(),
                         )));
                     }
-                    let motif = normaliser(&filtre);
+                    let mut repliees = lire_repliees(ui.ctx());
+                    let visibles = visibles(i, d, &repliees);
+                    // La page sélectionnée est ramenée dans la zone visible quand elle change
+                    // (clavier, clic, ouverture).
+                    let a_defiler =
+                        ui.ctx().data(|m| m.get_temp::<Page>(id_derniere_page())) != Some(d.page);
                     ScrollArea::vertical()
                         .id_salt("arbre_reglages")
                         .auto_shrink([false, false])
                         .show(ui, |ui| {
-                            for (page, niveau, cle) in Page::ARBRE {
-                                let libelle = i.t(cle);
-                                if !motif.is_empty() && !normaliser(&libelle).contains(&motif) {
-                                    continue;
-                                }
+                            for page in &visibles {
+                                let page = *page;
+                                let libelle = i.t(page.cle());
+                                let niveau = page.niveau();
                                 ui.horizontal(|ui| {
-                                    ui.add_space(14.0 * *niveau as f32);
-                                    let texte = if *niveau == 0 {
+                                    ui.add_space(14.0 * f32::from(niveau));
+                                    // Flèche de réduction (nœuds de premier niveau ayant des sous-pages).
+                                    let (_, rep_fleche) =
+                                        ui.allocate_exact_size(Vec2::splat(14.0), Sense::click());
+                                    if page.a_des_enfants() && filtre.is_empty() {
+                                        let reduit = repliees.contains(&page);
+                                        egui::collapsing_header::paint_default_icon(
+                                            ui,
+                                            if reduit { 0.0 } else { 1.0 },
+                                            &rep_fleche,
+                                        );
+                                        if rep_fleche.clicked() {
+                                            if reduit {
+                                                repliees.remove(&page);
+                                            } else {
+                                                repliees.insert(page);
+                                                if d.page != page && d.page.racine() == page {
+                                                    sortie.push(Message::Dialogue(
+                                                        ActionDialogue::ReglagesPage(page),
+                                                    ));
+                                                }
+                                            }
+                                            ecrire_repliees(ui.ctx(), &repliees);
+                                        }
+                                    }
+                                    let texte = if niveau == 0 {
                                         RichText::new(libelle).strong()
                                     } else {
                                         RichText::new(libelle)
                                     };
-                                    if ui.selectable_label(d.page == *page, texte).clicked() {
+                                    let rep = ui.selectable_label(d.page == page, texte);
+                                    if rep.clicked() {
                                         sortie.push(Message::Dialogue(
-                                            ActionDialogue::ReglagesPage(*page),
+                                            ActionDialogue::ReglagesPage(page),
                                         ));
+                                    }
+                                    // Les flèches du clavier pilotent l'arbre, pas le focus egui.
+                                    if rep.has_focus() {
+                                        rep.surrender_focus();
+                                    }
+                                    if d.page == page && a_defiler {
+                                        rep.scroll_to_me(None);
                                     }
                                 });
                             }
                         });
+                    ui.ctx()
+                        .data_mut(|m| m.insert_temp(id_derniere_page(), d.page));
                 },
             );
             ui.separator();
@@ -223,6 +331,76 @@ mod tests {
         }
     }
 
+    /// Rend une image sans événement puis une image où `touche` est pressée ; renvoie les
+    /// messages émis par cette dernière (le dialogue est ouvert sans aucun clic préalable).
+    fn avec_touche(etat: &Etat, touche: egui::Key) -> Sortie {
+        let ctx = egui::Context::default();
+        ctx.set_visuals(crate::theme::visuals(etat.reglages.theme));
+        let ecran = Rect::from_min_size(Pos2::ZERO, Vec2::new(1280.0, 800.0));
+        let Some(Dialogue::Reglages(d)) = &etat.dialogue else {
+            panic!("dialogue attendu");
+        };
+        let mut sortie = Vec::new();
+        for n in 0..3 {
+            let mut entree = RawInput {
+                screen_rect: Some(ecran),
+                ..Default::default()
+            };
+            if n == 2 {
+                entree.events.push(egui::Event::Key {
+                    key: touche,
+                    physical_key: Some(touche),
+                    pressed: true,
+                    repeat: false,
+                    modifiers: egui::Modifiers::NONE,
+                });
+            }
+            sortie.clear();
+            let mut out = ctx.run_ui(entree, |ui| afficher(ui.ctx(), etat, d, &mut sortie));
+            out.textures_delta.clear();
+        }
+        sortie
+    }
+
+    fn pages_demandees(sortie: &Sortie) -> Vec<Page> {
+        sortie
+            .iter()
+            .filter_map(|m| match m {
+                Message::Dialogue(ActionDialogue::ReglagesPage(p)) => Some(*p),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn fleches_du_clavier_changent_de_page_des_l_ouverture() {
+        let mut etat = Etat::nouveau();
+        etat.appliquer(Message::OuvrirDialogue(TypeDialogue::Reglages));
+        assert_eq!(
+            pages_demandees(&avec_touche(&etat, egui::Key::ArrowDown)),
+            [Page::TypesFichiers]
+        );
+        assert_eq!(
+            pages_demandees(&avec_touche(&etat, egui::Key::End)),
+            [Page::SeriesPostTraitement]
+        );
+        etat.appliquer(Message::OuvrirReglagesPage(Page::FilmsSource));
+        assert_eq!(
+            pages_demandees(&avec_touche(&etat, egui::Key::ArrowLeft)),
+            [Page::Films]
+        );
+        assert_eq!(
+            pages_demandees(&avec_touche(&etat, egui::Key::ArrowUp)),
+            [Page::FilmsInterface]
+        );
+        assert_eq!(
+            pages_demandees(&avec_touche(&etat, egui::Key::Home)),
+            [Page::General]
+        );
+        // Une touche sans rapport ne change rien.
+        assert!(pages_demandees(&avec_touche(&etat, egui::Key::A)).is_empty());
+    }
+
     #[test]
     fn pages_des_sources_proposent_le_selecteur() {
         let mut etat = Etat::nouveau();
@@ -254,7 +432,12 @@ mod tests {
             FilmsSource | SeriesSource => &["Settings.folders"],
             FilmsNfo | SeriesNfo => &["gui.settings.nfo.format"],
             FilmsExtracteur | SeriesExtracteur => &["gui.settings.scraper.language"],
-            FilmsIllustrations | SeriesIllustrations => &["gui.settings.art.best"],
+            FilmsIllustrations | SeriesIllustrations => &[
+                "gui.settings.art.best",
+                "gui.settings.art.postercount",
+                "gui.settings.art.fanartcount",
+                "gui.settings.art.actors",
+            ],
             FilmsBandesAnnonces | SeriesBandesAnnonces => &["gui.settings.trailer.auto"],
             FilmsSousTitres | SeriesSousTitres => &["gui.settings.subtitle.language"],
             FilmsRenommeur => &["Settings.renamer.folder", "Settings.renamer.file"],

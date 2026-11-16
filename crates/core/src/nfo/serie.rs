@@ -617,7 +617,7 @@ pub fn element_nfo_serie(
         r.ajouter(element_personne_texte("director", x));
     }
     for a in &serie.acteurs {
-        r.ajouter(element_acteur(a, None, options.ecrire_urls_artwork));
+        r.ajouter(element_acteur_options(a, None, options));
     }
     if options.ecrire_bande_annonce
         && let Some(u) = url_bande_annonce(&serie.bandes_annonces, p.format_bande_annonce)

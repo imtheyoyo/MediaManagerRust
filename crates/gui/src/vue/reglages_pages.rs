@@ -7,6 +7,7 @@
 //! longues dans des zones à hauteur maximale.
 
 use super::Sortie;
+use crate::conversion::{NB_AFFICHES_MAX, NB_FANARTS_MAX};
 use crate::etat::{ActionDialogue, Etat, EtatDialogueReglages, Message};
 use crate::gabarits::{self, ChampGabarit, Exemples};
 use crate::i18n::{I18n, Langue};
@@ -65,6 +66,15 @@ fn erreur(ui: &mut Ui, i: &I18n, e: ErreurChamp) {
             .color(crate::theme::ROUGE)
             .small(),
     );
+}
+
+/// Ligne « libellé + nombre borné » (champ validé : la saisie est ramenée dans `[min, max]`).
+fn nombre_borne(ui: &mut Ui, i: &I18n, cle: &str, valeur: &mut u32, min: u32, max: u32) {
+    etiquette(ui, i, cle);
+    ui.add(egui::DragValue::new(valeur).range(min..=max).speed(0.1))
+        .on_hover_text(infobulle(i, cle));
+    *valeur = (*valeur).clamp(min, max);
+    ui.end_row();
 }
 
 fn grille(id: &str) -> egui::Grid {
@@ -225,6 +235,9 @@ struct Commun<'a> {
     meilleure_image: &'a mut bool,
     taille_affiche: &'a mut TailleImage,
     taille_fanart: &'a mut TailleImage,
+    images_acteurs: &'a mut bool,
+    nombre_affiches: &'a mut u32,
+    nombre_fanarts: &'a mut u32,
     /// Vignettes d'épisodes (séries seulement).
     taille_vignette: Option<&'a mut TailleImage>,
     format_nfo: &'a mut FormatNfo,
@@ -246,6 +259,9 @@ fn commun_films(f: &mut ReglagesFilms) -> Commun<'_> {
         meilleure_image: &mut f.meilleure_image_auto,
         taille_affiche: &mut f.taille_affiche,
         taille_fanart: &mut f.taille_fanart,
+        images_acteurs: &mut f.images_acteurs,
+        nombre_affiches: &mut f.nombre_affiches,
+        nombre_fanarts: &mut f.nombre_fanarts,
         taille_vignette: None,
         format_nfo: &mut f.format_nfo,
         bandes_auto: &mut f.bandes_annonces_auto,
@@ -267,6 +283,9 @@ fn commun_series(f: &mut ReglagesSeries) -> Commun<'_> {
         meilleure_image: &mut f.meilleure_image_auto,
         taille_affiche: &mut f.taille_affiche,
         taille_fanart: &mut f.taille_fanart,
+        images_acteurs: &mut f.images_acteurs,
+        nombre_affiches: &mut f.nombre_affiches,
+        nombre_fanarts: &mut f.nombre_fanarts,
         taille_vignette: Some(&mut f.taille_vignette),
         format_nfo: &mut f.format_nfo,
         bandes_auto: &mut f.bandes_annonces_auto,
@@ -1057,6 +1076,29 @@ fn page_illustrations(ui: &mut Ui, i: &I18n, m: Module, s: &mut ReglagesServices
             }
         });
     }
+    section(ui, i, "gui.settings.section.counts");
+    {
+        let c = commun(m, &mut s.films, &mut s.series);
+        grille("g_nombres").show(ui, |ui| {
+            nombre_borne(
+                ui,
+                i,
+                "gui.settings.art.postercount",
+                c.nombre_affiches,
+                1,
+                NB_AFFICHES_MAX,
+            );
+            nombre_borne(
+                ui,
+                i,
+                "gui.settings.art.fanartcount",
+                c.nombre_fanarts,
+                1,
+                NB_FANARTS_MAX,
+            );
+        });
+        case(ui, i, c.images_acteurs, "gui.settings.art.actors");
+    }
     section(ui, i, "gui.settings.section.options");
     match m {
         Module::Films => {
@@ -1078,7 +1120,6 @@ fn page_illustrations(ui: &mut Ui, i: &I18n, m: Module, s: &mut ReglagesServices
                     ui.add(egui::DragValue::new(&mut f.nombre_fanarts_extra).range(0..=50));
                 });
             });
-            case(ui, i, &mut f.images_acteurs, "gui.settings.art.actors");
         }
         Module::Series => {
             case(

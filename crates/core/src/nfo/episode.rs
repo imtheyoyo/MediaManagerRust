@@ -411,19 +411,11 @@ pub fn element_nfo_episode(
         r.ajouter(element_personne_texte("director", x));
     }
     for a in &episode.invites {
-        r.ajouter(element_acteur(
-            a,
-            Some("GuestStar"),
-            options.ecrire_urls_artwork,
-        ));
+        r.ajouter(element_acteur_options(a, Some("GuestStar"), options));
     }
     if options.ecrire_tous_acteurs {
         for a in &serie.acteurs {
-            r.ajouter(element_acteur(
-                a,
-                Some("Actor"),
-                options.ecrire_urls_artwork,
-            ));
+            r.ajouter(element_acteur_options(a, Some("Actor"), options));
         }
     }
     if options.ecrire_date_ajout && episode.date_ajout > 0 {

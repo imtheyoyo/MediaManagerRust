@@ -1227,3 +1227,38 @@ fn notes_principales_et_groupes() {
     );
     assert_eq!(serie::nom_type_groupe(TypeGroupe::Alternatif), "ALTERNATE");
 }
+
+#[test]
+fn nom_fichier_acteur_remplace_les_espaces() {
+    assert_eq!(super::nom_fichier_acteur("Keanu Reeves"), "Keanu_Reeves");
+    assert_eq!(
+        super::nom_fichier_acteur("  Jean-Paul  Belmondo "),
+        "Jean-Paul__Belmondo"
+    );
+    assert_eq!(super::nom_fichier_acteur("AC/DC: Live?"), "ACDC_Live");
+    assert_eq!(super::nom_fichier_acteur("Léa Seydoux"), "Léa_Seydoux");
+}
+
+#[test]
+fn thumb_acteur_local_si_le_fichier_existe() {
+    let d = tempfile::tempdir().unwrap();
+    let dossier = d.path().join(".actors");
+    std::fs::create_dir_all(&dossier).unwrap();
+    std::fs::write(dossier.join("Keanu_Reeves.jpg"), b"x").unwrap();
+    let mut o = options();
+    o.dossier_acteurs = Some(dossier);
+    let mut keanu = personne(TypePersonne::Acteur, "Keanu Reeves", "Neo", "6384");
+    keanu.url_vignette = "https://img/k.jpg".into();
+    let mut autre = personne(TypePersonne::Acteur, "Carrie-Anne Moss", "Trinity", "6385");
+    autre.url_vignette = "https://img/c.jpg".into();
+    let x = super::commun::element_acteur_options(&keanu, None, &o);
+    assert_eq!(
+        x.texte_unique("thumb").as_deref(),
+        Some(".actors/Keanu_Reeves.jpg")
+    );
+    let y = super::commun::element_acteur_options(&autre, None, &o);
+    assert_eq!(
+        y.texte_unique("thumb").as_deref(),
+        Some("https://img/c.jpg")
+    );
+}

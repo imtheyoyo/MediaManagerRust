@@ -247,6 +247,13 @@ pub struct ReglagesFilms {
     pub fanarts_extra: bool,
     pub nombre_fanarts_extra: u32,
     pub images_acteurs: bool,
+    /// Nombre d'affiches à télécharger (1 = affiche principale seule ; les
+    /// suivantes sont `poster1`, `poster2`…). Plafonné à 20 à l'usage.
+    pub nombre_affiches: u32,
+    /// Nombre total de fonds d'écran à télécharger, fond principal compris
+    /// (1 = fond principal seul ; les suivants vont dans les fanarts
+    /// supplémentaires). Plafonné à 50 à l'usage.
+    pub nombre_fanarts: u32,
     // NFO
     #[serde(deserialize_with = "tolerant")]
     pub format_nfo: FormatNfo,
@@ -292,6 +299,8 @@ impl Default for ReglagesFilms {
             fanarts_extra: false,
             nombre_fanarts_extra: 5,
             images_acteurs: false,
+            nombre_affiches: 1,
+            nombre_fanarts: 1,
             format_nfo: FormatNfo::Kodi,
             nfo_propre: false,
             nfo_date_ajout: true,
@@ -334,6 +343,12 @@ pub struct ReglagesSeries {
     #[serde(deserialize_with = "tolerant")]
     pub taille_vignette: TailleImage,
     pub repli_artwork_saison: bool,
+    /// Télécharger les photos des acteurs dans `.actors/`.
+    pub images_acteurs: bool,
+    /// Nombre d'affiches de la série (1 = principale seule).
+    pub nombre_affiches: u32,
+    /// Nombre total de fonds d'écran de la série (1 = fond principal seul).
+    pub nombre_fanarts: u32,
     #[serde(deserialize_with = "tolerant")]
     pub format_nfo: FormatNfo,
     pub nfo_guide_episodes: bool,
@@ -369,6 +384,9 @@ impl Default for ReglagesSeries {
             taille_fanart: TailleImage::Grande,
             taille_vignette: TailleImage::Moyenne,
             repli_artwork_saison: false,
+            images_acteurs: false,
+            nombre_affiches: 1,
+            nombre_fanarts: 1,
             format_nfo: FormatNfo::Kodi,
             nfo_guide_episodes: true,
             nfo_date_fin: false,

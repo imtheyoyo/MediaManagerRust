@@ -29,7 +29,8 @@
 //! - [`taches`] / [`evenements`] : gestionnaire de tâches et flux d'événements ;
 //! - [`sources`] : mise à jour des sources (fusion avec la base) ;
 //! - [`conversion`] : types des scrapers ↔ modèle partagé ;
-//! - [`metadonnees`], [`artwork`], [`ecriture_nfo`] : scraping, images, NFO ;
+//! - [`metadonnees`], [`artwork`], [`acteurs`], [`ecriture_nfo`] : scraping,
+//!   images (dont photos des acteurs), NFO ;
 //! - [`renommage`] : aperçu et exécution du renommage ;
 //! - [`series`], [`conversion_serie`], [`renommage_serie`] : séries
 //!   (scraping, épisodes, images, NFO, renommage) ;
@@ -43,6 +44,7 @@
 //! - [`gestion_series`] : état « vu » et retrait des séries ;
 //! - [`journal`] : journalisation dans `logs/`.
 
+pub mod acteurs;
 pub mod analyse;
 pub mod application;
 pub mod artwork;

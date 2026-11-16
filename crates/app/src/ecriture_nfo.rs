@@ -51,7 +51,11 @@ pub fn ecrire_nfo(
     nommages: &[NommageNfoFilm],
     horodatage: bool,
 ) -> Resultat<usize> {
-    let options = options_nfo_films(&reglages.films, horodatage);
+    let mut options = options_nfo_films(&reglages.films, horodatage);
+    let dossier_acteurs = film.chemin.join(crate::acteurs::DOSSIER_ACTEURS);
+    if dossier_acteurs.is_dir() {
+        options.dossier_acteurs = Some(dossier_acteurs);
+    }
     let conn = connecteur(reglages.films.format_nfo);
     let mut modifies = 0;
     for nom in noms_nfo_film(film, nommages, false) {

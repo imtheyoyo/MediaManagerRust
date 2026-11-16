@@ -17,7 +17,9 @@ use mediamanager_scrapers::{
 use mediamanager_store::Reglages;
 
 use crate::application::Noyau;
-use crate::artwork::{self, ajouter_fichier, planifier_images};
+use crate::artwork::{
+    self, ajouter_fichier, nombre_affiches_voulu, nombre_fanarts_voulu, planifier_images_n,
+};
 use crate::conversion::{
     ConfigMetadonnees, appliquer_metadonnees, options_recherche, vers_identifiants,
 };
@@ -179,13 +181,19 @@ fn scraper_film(
     };
 
     if config.artwork && !film.chemin.as_os_str().is_empty() {
-        let plan = planifier_images(
+        let plan = planifier_images_n(
             &film,
             &images,
             &n.config.artwork,
             &reglages.films.langues_images,
             reglages.films.taille_affiche,
             reglages.films.taille_fanart,
+            nombre_affiches_voulu(reglages.films.nombre_affiches),
+            nombre_fanarts_voulu(
+                reglages.films.nombre_fanarts,
+                reglages.films.fanarts_extra,
+                reglages.films.nombre_fanarts_extra,
+            ),
         );
         if !plan.is_empty() {
             let client = reqwest::Client::builder()
@@ -202,12 +210,18 @@ fn scraper_film(
                             artwork::ecrire_atomiquement(d, &octets)?;
                             ajouter_fichier(&mut film, d, img.type_fichier);
                         }
-                        film.urls_artwork.insert(img.type_fichier, img.url.clone());
+                        if img.indice == 0 {
+                            film.urls_artwork.insert(img.type_fichier, img.url.clone());
+                        }
                     }
                     Err(e) => ctx.message(NiveauMessage::Avertissement, e.to_string()),
                 }
             }
         }
+    }
+
+    if config.artwork && reglages.films.images_acteurs && !film.chemin.as_os_str().is_empty() {
+        crate::acteurs::telecharger_photos_acteurs(ctx, &film.chemin, &film.acteurs)?;
     }
 
     if !film.chemin.as_os_str().is_empty() {
@@ -234,6 +248,21 @@ pub(crate) fn appliquer_choix(
     choix: &ResultatRecherche,
     config: &ConfigMetadonnees,
 ) -> Resultat<Film> {
+    Ok(appliquer_choix_avec_renommage(n, ctx, id, choix, config)?.0)
+}
+
+/// Applique le résultat choisi puis, si le réglage « renommer après
+/// scraping » est actif, renomme le film (mêmes règles que le renommage
+/// manuel). Renvoie le film à jour (chemins après renommage) et le rapport
+/// de renommage. Un échec du renommage n'annule pas le scrap : il est
+/// signalé par un message et par le rapport.
+pub(crate) fn appliquer_choix_avec_renommage(
+    n: &Noyau,
+    ctx: &ContexteTache,
+    id: &str,
+    choix: &ResultatRecherche,
+    config: &ConfigMetadonnees,
+) -> Resultat<(Film, Option<RapportRenommage>)> {
     let film = charger_film(n, id)?;
     if film.verrouille {
         return Err(ErreurApp::Verrouille(film.titre));
@@ -243,9 +272,25 @@ pub(crate) fn appliquer_choix(
     let mut o = options_recherche(&film, &reglages.films);
     o.ids = choix.ids.clone();
     ctx.progression(0, 1, format!("Métadonnées de « {} »", choix.titre));
-    let film = scraper_film(n, ctx, &f, film, o, config, &reglages)?;
+    let mut film = scraper_film(n, ctx, &f, film, o, config, &reglages)?;
+    let mut rapport = None;
+    if reglages.films.renommer_apres_scraping {
+        match renommage::renommer_films(n, ctx, std::slice::from_ref(&film.id)) {
+            Ok(r) => {
+                if !r.renommes.is_empty() {
+                    film = charger_film(n, id)?;
+                }
+                rapport = Some(r);
+            }
+            Err(ErreurApp::Annulee) => return Err(ErreurApp::Annulee),
+            Err(e) => ctx.message(
+                NiveauMessage::Avertissement,
+                format!("renommage de « {} » impossible : {e}", film.titre),
+            ),
+        }
+    }
     ctx.progression(1, 1, "Terminé");
-    Ok(film)
+    Ok((film, rapport))
 }
 
 /// Tâche : récupération automatique pour une sélection.

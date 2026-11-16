@@ -19,7 +19,10 @@ pub mod saison;
 pub mod serie;
 
 pub use arbre::{Element, Noeud, decoder_octets};
-pub use commun::{Connecteur, DonneesConservees, OptionsNfo, contenu_equivalent, ecrire_si_change};
+pub use commun::{
+    Connecteur, DonneesConservees, OptionsNfo, contenu_equivalent, ecrire_si_change,
+    nom_fichier_acteur,
+};
 pub use episode::{
     EpisodeLu, EpisodesLus, ecrire_nfo_episodes, lire_fichier_nfo_episodes, lire_nfo_episodes,
     lire_nfo_episodes_octets,
